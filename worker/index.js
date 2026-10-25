@@ -237,6 +237,12 @@ async function publicState(state, env) {
   const balanceSheet=summarizeBalanceSheet(state.accounts,state.items,propertySummary,new Date());
   return { ...state, budgets, budgetTemplates: templates, monthlyBudgets: overrides, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], goalSummary, propertySummary, balanceSheet, owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null} } };
 }
+function scenarioFunding(state, linkedGoalId, asOf=new Date()) {
+  const summary=summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,asOf);
+  const goal=linkedGoalId?summary.goals.find(value=>value.id===linkedGoalId&&!value.archived):null;
+  if(linkedGoalId&&!goal)throw apiError('Choose an active savings goal.');
+  return{goal,snapshot:{eligibleCash:summary.unallocatedTotal,allocatedGoalFunds:goal?.backed||0,asOf:asOf.toISOString()}};
+}
 export default {
   async fetch(request, env) {
     try {
@@ -270,9 +276,7 @@ export default {
         const saved=await mutate(env,s=>{checkRevision(s,input);s.balanceSheetSnapshots||=[];if(!s.balanceSheetSnapshots.some(row=>row.date===date))s.balanceSheetSnapshots.push(snapshot);});return response({ok:true,existing:false,snapshot,revision:saved.revision});
       }
       if(path==='/api/scenario-calculate'&&request.method==='POST'){
-        const input=await body(request),scenarioInput=input.input||{},goal=input.linkedGoalId?(state.goalSummary?.goals||summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,new Date()).goals).find(value=>value.id===input.linkedGoalId&&!value.archived):null;
-        if(input.linkedGoalId&&!goal)throw apiError('Choose an active savings goal.');
-        const summary=summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,new Date()),result=calculateHomeScenario(scenarioInput,{eligibleCash:summary.unallocatedTotal,allocatedGoalFunds:goal?.backed||0,asOf:new Date().toISOString()});
+        const input=await body(request),scenarioInput=input.input||{},linkedGoalId=input.linkedGoalId||scenarioInput.linkedGoalId||null,asOf=new Date(),{snapshot}=scenarioFunding(state,linkedGoalId,asOf),result=calculateHomeScenario(scenarioInput,snapshot);
         if(!result.available)throw apiError(result.error||'Scenario inputs are incomplete.');return response({result,calculationVersion:SCENARIO_CALCULATION_VERSION});
       }
       if(path==='/api/scenario'&&request.method==='POST'){
@@ -280,8 +284,7 @@ export default {
         if(input.action==='archive'||input.action==='restore'||input.action==='rename'||input.action==='duplicate'){
           let scenario;const saved=await mutate(env,s=>{checkRevision(s,input);s.scenarios||=[];const existing=s.scenarios.find(row=>row.id===input.id);if(!existing)throw apiError('Scenario not found.',404);if(input.action==='rename'){const name=typeof input.name==='string'?input.name.trim():'';if(!name||name.length>100)throw apiError('Enter a scenario name up to 100 characters.');existing.name=name;existing.updatedAt=new Date().toISOString();scenario=existing;}else if(input.action==='archive'||input.action==='restore'){existing.archivedAt=input.action==='archive'?existing.archivedAt||new Date().toISOString():null;existing.updatedAt=new Date().toISOString();scenario=existing;}else{scenario={...existing,id:crypto.randomUUID(),name:(typeof input.name==='string'&&input.name.trim()?input.name.trim():existing.name+' copy').slice(0,100),createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),version:1,versions:[],archivedAt:null};s.scenarios.push(scenario);}});return response({ok:true,revision:saved.revision,scenario});
         }
-        const scenarioInput=input.input||{},validation=validateScenarioInput(scenarioInput);if(validation)throw apiError(validation);const goalId=input.linkedGoalId||scenarioInput.linkedGoalId||null,goal=goalId?(state.goals||[]).find(row=>row.id===goalId&&!row.archivedAt):null;if(goalId&&!goal)throw apiError('Choose an active savings goal.');
-        const summary=summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,new Date()),fundingSnapshot={eligibleCash:summary.unallocatedTotal,allocatedGoalFunds:goal?.backed||0,asOf:new Date().toISOString()},result=calculateHomeScenario(scenarioInput,fundingSnapshot);if(!result.available)throw apiError(result.error||'Scenario inputs are incomplete.');
+        const scenarioInput=input.input||{},validation=validateScenarioInput(scenarioInput);if(validation)throw apiError(validation);const goalId=input.linkedGoalId||scenarioInput.linkedGoalId||null,asOf=new Date(),{snapshot:fundingSnapshot}=scenarioFunding(state,goalId,asOf),result=calculateHomeScenario(scenarioInput,fundingSnapshot);if(!result.available)throw apiError(result.error||'Scenario inputs are incomplete.');
         let savedScenario;const saved=await mutate(env,s=>{checkRevision(s,input);s.scenarios||=[];const existing=input.id?s.scenarios.find(row=>row.id===input.id):null;if(input.id&&!existing)throw apiError('Scenario not found.',404);const now=new Date().toISOString(),versions=[...(existing?.versions||[])];if(existing)versions.push({version:existing.version||1,inputs:existing.inputs,fundingSnapshot:existing.fundingSnapshot,result:existing.result,calculationVersion:existing.calculationVersion,savedAt:existing.updatedAt});savedScenario={...(existing||{}),id:existing?.id||crypto.randomUUID(),name:scenarioInput.name.trim(),inputs:{...scenarioInput,linkedGoalId:goalId},linkedGoalId:goalId,fundingSnapshot,result,inputVersion:1,version:(existing?.version||0)+1,versions,calculationVersion:SCENARIO_CALCULATION_VERSION,createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};if(existing)Object.assign(existing,savedScenario);else s.scenarios.push(savedScenario);s.owner=user;});return response({ok:true,revision:saved.revision,scenario:savedScenario});
       }
       if(path==='/api/scenario-goal'&&request.method==='POST'){

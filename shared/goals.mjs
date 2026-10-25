@@ -2,8 +2,9 @@ export function eligibleCashAccounts(accounts=[],items=[],asOf=new Date()){
   const now=asOf instanceof Date?asOf:new Date(asOf+'T12:00:00Z');
   const itemById=new Map(items.map(item=>[item.id,item]));
   return accounts.map(account=>{
-    const restricted=['investment','retirement','hsa','credit','loan'].includes(String(account.type||'').toLowerCase())||['401k','ira','brokerage','hsa'].includes(String(account.subtype||'').toLowerCase());
-    const cashType=String(account.type||'').toLowerCase()==='depository'||String(account.subtype||'').toLowerCase()==='cash';
+    const type=String(account.type||'').toLowerCase(),subtype=String(account.subtype||'').toLowerCase();
+    const restricted=['investment','retirement','hsa','credit','loan','liability','mortgage'].includes(type)||['401k','ira','brokerage','hsa'].includes(subtype);
+    const cashType=type==='depository'||(['asset','other'].includes(type)&&subtype==='cash');
     const balance=account.balance,available=account.availableBalance;
     let freshnessDate=null;
     if(account.itemId){const item=itemById.get(account.itemId);freshnessDate=item?.lastSuccess||item?.lastSync||null;}
@@ -12,7 +13,7 @@ export function eligibleCashAccounts(accounts=[],items=[],asOf=new Date()){
     const stale=!Number.isFinite(age)||age>24*60*60*1000;
     const known=Number.isSafeInteger(balance)&&balance>=0&&account.currency==='USD';
     const usable=known&&!restricted&&cashType&&account.archivedAt==null&&account.includeInReporting!==false;
-    const cap=known&&Number.isSafeInteger(available)&&available>=0?Math.min(balance,available):balance;
+    const cap=!known?0:available===null||available===undefined?balance:Number.isSafeInteger(available)?Math.max(0,Math.min(balance,available)):0;
     return{accountId:account.id,name:account.name,balance:usable?cap:0,eligible:usable&&!stale,provisional:usable&&stale,stale,currency:account.currency||'UNKNOWN',asOf:freshnessDate};
   });
 }

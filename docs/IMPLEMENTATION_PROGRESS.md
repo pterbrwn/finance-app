@@ -265,3 +265,15 @@ Code-only log. No production records, account names, credentials, private origin
 - `npm run check` passed under pinned Node 24.22.1 in a disposable source copy: artifact validation, finance/client checks, JSON storage, HTTP preview checks, and SQLite backup/restore/import checks. The live checkout `dist` and service were not changed.
 
 **Next:** C02, correct cash backing and saved/preview scenario funding parity.
+
+
+## C02 — Cash backing and scenario funding parity
+
+**Status:** Implemented and verified in a disposable source copy.
+
+- A supplied negative available balance now caps eligible backing at zero. An absent available balance falls back to a valid current balance; malformed supplied values do not increase backing. Liability/mortgage records cannot qualify through a `cash` subtype.
+- Scenario preview and save now use the same computed active-goal summary and funding snapshot. Linked-goal backing is sourced from computed backed allocations, not a field missing from the stored goal. Top-level and input-level linked goal IDs resolve consistently; missing/archived goals fail.
+- Synthetic API coverage allocates $500 from $1,234.56 eligible cash and confirms preview/save both report $734.56 unallocated plus $500 linked backing, without counting the same cash twice. Domain checks cover negative and missing available values, a cash-typed liability, and an explicitly typed manual cash asset.
+- `npm run check` passed under pinned Node 24.22.1 in a disposable source copy. The first run exposed only an existing test assertion that counted an additional archived fixture; it now checks active scenarios. Finance/client, storage, preview HTTP, and SQLite backup/restore/import checks pass. The checkout `dist` and running service were not changed.
+
+**Next:** C03, require explicit scenario costs and preserve historical quote versions.
