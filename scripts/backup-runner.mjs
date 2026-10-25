@@ -1,4 +1,5 @@
 import { chmod, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -97,7 +98,7 @@ async function saveStatusAt(path, directory, status) {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
+if (process.argv[1] && realpathSync(process.argv[1]) === resolve(import.meta.filename)) {
   try {
     const status = await runScheduledBackup();
     console.log(JSON.stringify({ ok: status.state === 'success', state: status.state, lastSuccess: status.lastSuccess, failureCategory: status.failureCategory }));

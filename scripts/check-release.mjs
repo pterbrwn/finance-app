@@ -32,6 +32,14 @@ try{
     assert.equal(result.status,0,`${script} failed: ${result.stderr||result.stdout}`);return result.stdout.trim();
   };
   const imported=JSON.parse(run('import-legacy-json.mjs',[sourcePath,databasePath,configPath]));assert.equal(imported.imported,true);assert.equal(imported.schemaVersion,release.schemaVersion);
+  const currentLike=join(directory,'service-current');await symlink(releaseRoot,currentLike,'dir');
+  const backupViaService=spawnSync(join(currentLike,'scripts/start-backup.sh'),[],{cwd:directory,encoding:'utf8',env:{...process.env,LEDGER_NODE_BIN:runtime,LEDGER_CONFIG_FILE:configPath,LEDGER_LOCAL_DATA_DIR:dataDirectory}});
+  assert.equal(backupViaService.status,0,`packaged backup service wrapper failed: ${backupViaService.stderr||backupViaService.stdout}`);
+  const backupStatus=JSON.parse(await readFile(join(dataDirectory,'backups/backup-status.json'),'utf8'));
+  assert.equal(backupStatus.state,'success','packaged backup service wrapper publishes a verified status when invoked through the current symlink');
+  const scheduledBackups=(await readdir(join(dataDirectory,'backups'))).filter(name=>/^daily-.*\.sqlite$/.test(name));
+  assert.equal(scheduledBackups.length,1,'packaged backup service wrapper creates its daily SQLite backup');
+  const scheduledBackupInfo=await stat(join(dataDirectory,'backups',scheduledBackups[0]));assert.equal(scheduledBackupInfo.mode&0o077,0);assert.ok(scheduledBackupInfo.size>0);
   const backupPath=join(directory,'backup.sqlite'),restoredPath=join(directory,'restored.sqlite');
   const backup=JSON.parse(run('sqlite-backup.mjs',[databasePath,backupPath]));assert.equal(backup.schemaVersion,release.schemaVersion);
   run('sqlite-restore.mjs',[backupPath,restoredPath]);
