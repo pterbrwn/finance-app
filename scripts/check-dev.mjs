@@ -68,23 +68,24 @@ try {
       headers: { 'Content-Type': 'application/json', ...headers },
       body: input === undefined ? undefined : JSON.stringify(input)
     });
+    // Node fetch replaces Host and Sec-Fetch-Mode. Use raw HTTP when testing
+    // browser-controlled headers so assertions exercise the intended request.
+    const rawGetStatus = (path, headers) => new Promise((resolve, reject) => {
+      get(origin + path, { headers }, response => {
+        response.resume();
+        resolve(response.statusCode);
+      }).on('error', reject);
+    });
     assert.match(await (await call('/')).text(), /Ledger · Personal finance/);
     const state = await (await call('/api/state')).json();
     assert.equal(state.setup.configured, false);
     assert.equal(state.setup.localOnly, true);
     assert.deepEqual(state.transactions, []);
-    // Node 20 fetch replaces Host; use http.get to send the actual hostile header.
-    const invalidHostStatus = await new Promise((resolve, reject) => {
-      get(origin + '/api/state', { headers: { Host: 'untrusted.test' } }, response => {
-        response.resume();
-        resolve(response.statusCode);
-      }).on('error', reject);
-    });
-    assert.equal(invalidHostStatus, 403);
+    assert.equal(await rawGetStatus('/api/state', { Host: 'untrusted.test' }), 403);
     assert.equal((await call('/api/budget', { category: 'Groceries', amount: 50000 }, { Origin: 'https://other.test' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
-    assert.equal((await call('/', undefined, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' })).status, 200);
-    assert.equal((await call('/api/state', undefined, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' })).status, 403);
+    assert.equal(await rawGetStatus('/', { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' }), 200);
+    assert.equal(await rawGetStatus('/api/state', { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' }), 403);
     assert.equal((await call('/api/state', undefined, { 'X-Forwarded-For': '100.100.100.1' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'Tailscale-User-Login': 'other@example.test' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'Tailscale-User-Login': 'owner@example.test' })).status, 200);
