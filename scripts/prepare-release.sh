@@ -20,14 +20,13 @@ trap 'rm -rf "$work_dir"' EXIT
 mkdir -p "$work_dir/source" "$work_dir/release/scripts" "$work_dir/release/dist"
 git -C "$repo_root" archive --format=tar "$release_id" | tar -xf - -C "$work_dir/source"
 (cd "$work_dir/source" && LEDGER_BUILD_ID="$release_id" "$node_bin" scripts/build.mjs)
-cp "$work_dir/source/dist/server/index.js" "$work_dir/release/dist/server-index.js"
+cp -R "$work_dir/source/dist/." "$work_dir/release/dist/"
+cp "$work_dir/source/package.json" "$work_dir/release/package.json"
 for file in dev-server.mjs runtime.mjs local-storage.mjs sync.mjs start-ledger.sh start-sync.sh; do
   cp "$work_dir/source/scripts/$file" "$work_dir/release/scripts/$file"
 done
-mkdir -p "$work_dir/release/dist/server"
-mv "$work_dir/release/dist/server-index.js" "$work_dir/release/dist/server/index.js"
 printf '{"buildId":"%s","node":"24.22.1"}\n' "$release_id" > "$work_dir/release/release.json"
-chmod 644 "$work_dir/release/release.json" "$work_dir/release/dist/server/index.js"
+chmod 644 "$work_dir/release/release.json"
 chmod 755 "$work_dir/release/scripts/start-ledger.sh" "$work_dir/release/scripts/start-sync.sh"
 mv "$work_dir/release" "$release_root/$release_id"
 echo "Prepared immutable release $release_id at $release_root/$release_id"

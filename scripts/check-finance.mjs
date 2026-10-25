@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
-const source = await readFile(new URL('../dist/server/index.js', import.meta.url),'utf8');
-const { default: worker, totals, fromPlaid, categoryFor, applyChanges, applySyncPages, parseCSV } = await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const { default: worker, totals, fromPlaid, categoryFor, applyChanges, applySyncPages, parseCSV } = await import('../dist/server/index.js');
 globalThis.crypto ||= webcrypto;
 
 assert.deepEqual(totals([
@@ -109,9 +107,14 @@ try {
   assert.ok(!page.headers.get('Content-Security-Policy').includes('plaid.com'));
 } finally {globalThis.fetch=realFetch;env.LOCAL_ONLY=false;}
 
-// Smoke the embedded client without a browser; visual layout remains unverified.
+// Smoke the allowlisted browser module without a browser; visual layout remains unverified.
 const html=await (await worker.fetch(new Request('https://ledger.test/'),env)).text();
-const client=html.match(/<script>([\s\S]*)<\/script>/)[1];
+assert.ok(html.includes('<script type="module" src="/assets/app.js"></script>'));
+assert.ok(!html.includes('<script>'));
+const assetResponse=await worker.fetch(new Request('https://ledger.test/assets/app.js'),env);
+assert.equal(assetResponse.headers.get('Content-Type'),'text/javascript; charset=utf-8');
+const client=await assetResponse.text();
+assert.equal((await worker.fetch(new Request('https://ledger.test/assets/../worker/index.js'),env)).status,404);
 const elements=new Map();
 const element=id=>{if(!elements.has(id))elements.set(id,{innerHTML:'',textContent:'',className:'',addEventListener(){}});return elements.get(id);};
 vm.runInNewContext(client,{document:{getElementById:element,querySelectorAll:()=>[]},window:{scrollTo(){}},fetch:async()=>({ok:true,json:async()=>({items:[],accounts:[],transactions:[],budgets:{},setup:{configured:false}})}),URL,Date,Intl,Map,Set,JSON,Promise,console,setTimeout,clearTimeout,location:{href:'https://ledger.test/'},history:{replaceState(){}},sessionStorage:{getItem:()=>null}});

@@ -86,7 +86,14 @@ try {
         resolve(response.statusCode);
       }).on('error', reject);
     });
-    assert.match(await (await call('/')).text(), /Ledger · Personal finance/);
+    const page = await (await call('/')).text();
+    assert.match(page, /Ledger · Personal finance/);
+    assert.ok(page.includes('<script type="module" src="/assets/app.js"></script>'));
+    assert.ok(!page.includes('<script>'));
+    assert.equal((await call('/assets/app.js')).headers.get('Content-Type'), 'text/javascript; charset=utf-8');
+    assert.equal((await call('/assets/styles.css')).headers.get('Content-Type'), 'text/css; charset=utf-8');
+    assert.equal((await call('/assets/../worker/index.js')).status, 404);
+    assert.equal((await call('/api/health')).status, 200);
     const state = await (await call('/api/state')).json();
     assert.equal(state.setup.configured, false);
     assert.equal(state.setup.localOnly, true);
@@ -120,7 +127,7 @@ try {
     assert.equal(JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')).owner, 'local-owner');
     assert.equal((await stat(directory)).mode & 0o777, 0o700);
     assert.equal((await stat(join(directory, 'state.json'))).mode & 0o777, 0o600);
-    console.log('Local server checks passed: single-writer lock, HTTP preview, Host/Origin guards, CSV import, duplicate detection, concurrent writes, and restart persistence.');
+    console.log('Local server checks passed: single-writer lock, static asset allowlist, health status, Host/Origin guards, CSV import, duplicate detection, concurrent writes, and restart persistence.');
   } else {
     console.log('HTTP preview checks not run. Run npm run check:local-http on a host that permits local servers.');
   }

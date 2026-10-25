@@ -1,71 +1,23 @@
 // The loopback-only Node server supplies the local owner's identity.
-const CATEGORIES = ['Housing', 'Groceries', 'Dining', 'Shopping', 'Transport', 'Utilities', 'Health', 'Entertainment', 'Travel', 'Other', 'Income', 'Transfers'];
-const STATE_KEY = 'finance/owner-v1.json';
-const blankState = () => ({ version: 1, owner: null, items: [], accounts: [], transactions: [], holdings: [], customCategories: [], budgets: {}, lastSync: null, lease: null });
+import { CATEGORIES } from '../shared/categories.mjs';
+import { cents } from '../shared/money.mjs';
+import { accountRecord, investmentHoldings } from '../shared/investments.mjs';
+import { categoryFor, fromPlaid, totals } from '../shared/reporting.mjs';
+import { applyChanges, applySyncPages } from '../shared/reconciliation.mjs';
+import { BUILD_ID, UI_ASSETS } from './generated.mjs';
+import { repositoryFor } from '../server/repository.mjs';
+
+export { categoryFor, fromPlaid, totals, applyChanges, applySyncPages, investmentHoldings };
+
 const categories = state => [...CATEGORIES, ...(state.customCategories || [])];
-const cents = value => Number.isFinite(value) ? Math.round(value * 100) : null;
-const accountRecord = (a, itemId) => ({ id: a.account_id, itemId, name: a.name, mask: a.mask, type: a.type, subtype: a.subtype, balance: cents(a.balances.current), currency: a.balances.iso_currency_code || a.balances.unofficial_currency_code || 'UNKNOWN' });
-
-export function investmentHoldings(data, itemId) {
-  const securities = new Map(data.securities.map(s => [s.security_id, s]));
-  return data.holdings.map(h => {
-    const security = securities.get(h.security_id);
-    return { itemId, accountId: h.account_id, securityId: h.security_id, name: security?.name || 'Unnamed holding', ticker: security?.ticker_symbol || null, quantity: h.quantity, value: cents(h.institution_value), costBasis: cents(h.cost_basis), currency: h.iso_currency_code || h.unofficial_currency_code || 'UNKNOWN', asOf: h.institution_price_as_of || security?.close_price_as_of || null };
-  });
-}
-
-export function categoryFor(t) {
-  const p = t.personal_finance_category?.primary || '', d = t.personal_finance_category?.detailed || '';
-  if (p.startsWith('TRANSFER') || d === 'LOAN_PAYMENTS_CREDIT_CARD_PAYMENT') return 'Transfers';
-  if (d === 'LOAN_PAYMENTS_MORTGAGE_PAYMENT') return 'Housing';
-  return ({ INCOME: 'Income', RENT_AND_UTILITIES: d === 'RENT_AND_UTILITIES_RENT' ? 'Housing' : 'Utilities', FOOD_AND_DRINK: d.includes('GROCER') ? 'Groceries' : 'Dining', TRANSPORTATION: 'Transport', TRAVEL: 'Travel', MEDICAL: 'Health', PERSONAL_CARE: 'Health', ENTERTAINMENT: 'Entertainment', GENERAL_MERCHANDISE: 'Shopping', HOME_IMPROVEMENT: 'Housing' })[p] || 'Other';
-}
-export function fromPlaid(t, itemId) {
-  if (!Number.isFinite(t.amount)) throw new Error('Invalid transaction amount');
-  return { id: t.transaction_id, itemId, accountId: t.account_id, date: t.date, merchant: t.merchant_name || t.name || 'Transaction', amount: Math.round(t.amount * 100), category: categoryFor(t), pending: !!t.pending, currency: t.iso_currency_code || t.unofficial_currency_code || 'UNKNOWN' };
-}
-export function totals(rows) {
-  return rows.filter(t => !t.pending && t.currency === 'USD').reduce((s, t) => {
-    const c = t.override || t.category;
-    if (c === 'Income') s.income -= t.amount;
-    else if (c !== 'Transfers') { s.spend += t.amount; s.categories[c] = (s.categories[c] || 0) + t.amount; }
-    return s;
-  }, { income: 0, spend: 0, categories: {} });
-}
-export function applyChanges(state, itemId, added, modified, removed) {
-  const map = new Map(state.transactions.map(t => [t.id, t]));
-  // Capture pending overrides before removed records disappear in this same batch.
-  const overrides = new Map(state.transactions.filter(t => t.override).map(t => [t.id, t.override]));
-  for (const t of removed) map.delete(t.transaction_id);
-  for (const t of [...added, ...modified]) {
-    const override = overrides.get(t.transaction_id) || overrides.get(t.pending_transaction_id);
-    map.set(t.transaction_id, { ...fromPlaid(t, itemId), ...(override ? { override } : {}) });
-    if (t.pending_transaction_id && t.pending_transaction_id !== t.transaction_id) map.delete(t.pending_transaction_id);
-  }
-  state.transactions = [...map.values()];
-}
-export function applySyncPages(state, itemId, pages) {
-  const added = pages.flatMap(page => page.added || []);
-  const modified = pages.flatMap(page => page.modified || []);
-  const removed = pages.flatMap(page => page.removed || []);
-  applyChanges(state, itemId, added, modified, removed);
-}
 const apiError = (message, status = 400) => Object.assign(new Error(message), { status });
 function response(data, status = 200) { return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }); }
 function ready(env) { return !env.LOCAL_ONLY && !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET && env.TOKEN_ENCRYPTION_KEY && ['sandbox', 'production'].includes(env.PLAID_ENV)); }
 async function readState(env) {
-  if (!env.BUCKET) throw apiError('Storage is unavailable. Please try again later.', 503);
-  const object = await env.BUCKET.get(STATE_KEY);
-  return { state: object ? await object.json() : blankState(), etag: object?.etag };
+  return repositoryFor(env).read();
 }
 async function mutate(env, update) {
-  for (let n = 0; n < 4; n++) {
-    const { state, etag } = await readState(env);
-    await update(state);
-    const saved = await env.BUCKET.put(STATE_KEY, JSON.stringify(state), { onlyIf: etag ? { etagMatches: etag } : { etagDoesNotMatch: '*' }, httpMetadata: { contentType: 'application/json' } });
-    if (saved) return state;
-  }
-  throw apiError('Another update is in progress. Please try again.', 409);
+  return repositoryFor(env).mutate(update);
 }
 async function body(request) {
   const text = await request.text();
@@ -194,7 +146,11 @@ export default {
   async fetch(request, env) {
     try {
       const url = new URL(request.url), path = url.pathname;
-      if (path === '/' && request.method === 'GET') return new Response(page(), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': ready(env) ? "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.plaid.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.plaid.com; frame-src https://*.plaid.com; connect-src 'self' https://*.plaid.com; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" : "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'none'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" } });
+      if (request.method === 'GET' && Object.hasOwn(UI_ASSETS, path)) {
+        const contentType = path.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8';
+        return new Response(UI_ASSETS[path], { headers: { 'Content-Type': contentType, 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } });
+      }
+      if (path === '/' && request.method === 'GET') return new Response(page(), { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': ready(env) ? "default-src 'self'; script-src 'self' https://cdn.plaid.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://*.plaid.com; frame-src https://*.plaid.com; connect-src 'self' https://*.plaid.com; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'none'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'" } });
       if (!path.startsWith('/api/')) return new Response('Not found', { status: 404 });
       if (request.method !== 'GET' && request.method !== 'POST') return response({ error: 'Method not allowed' }, 405);
       if (request.method === 'POST' && request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) return response({ error: 'Request origin is not allowed.' }, 403);
@@ -299,5 +255,5 @@ export default {
 };
 
 function page() {
-  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Your spending, beautifully in focus. A private personal finance dashboard."><title>Ledger · Personal finance</title><style>' + STYLES + '</style></head><body><div id="app"></div><div id="toast" role="status" aria-live="polite"></div><script>' + browserApp.toString() + ';browserApp();</script></body></html>';
+  return '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="Your spending, beautifully in focus. A private personal finance dashboard."><title>Ledger · Personal finance</title><link rel="stylesheet" href="/assets/styles.css"></head><body><div id="app"></div><div id="toast" role="status" aria-live="polite"></div><script type="module" src="/assets/app.js"></script></body></html>';
 }

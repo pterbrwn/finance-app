@@ -55,3 +55,5 @@ function browserApp() {
   async function resumeOAuth(){if(data.setup.localOnly)return;if(!new URL(location.href).searchParams.has('oauth_state_id'))return;let stored;try{stored=JSON.parse(sessionStorage.getItem('ledger-link'));}catch{}if(!stored||Date.now()-stored.created>30*60_000){toast('Bank authorization expired. Please connect again.');history.replaceState(null,'','/');return;}busy=true;render();try{await openLink(stored.token,stored.itemId,location.href);}catch(e){toast(e.message);}finally{busy=false;history.replaceState(null,'','/');render();}}
   render();refresh().then(resumeOAuth);
 }
+
+browserApp();

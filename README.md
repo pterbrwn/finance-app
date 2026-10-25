@@ -14,7 +14,7 @@ A personal finance dashboard hosted on a Jetson. Source code lives at https://gi
 
 ## Run locally
 
-Requires Node 20.11+ and Bash. There are no npm dependencies to install.
+Requires the pinned Node.js 24.22.1 ARM64 runtime and Bash. There are no npm dependencies to install. Install the app-specific runtime once with `scripts/install-node-runtime.sh`; it does not replace the system Node installation.
 
 ```sh
 npm run setup:local
@@ -112,4 +112,4 @@ git config core.hooksPath .githooks
 
 Pre-commit checks inspect staged content, reject private/generated paths even if force-added, and scan staged changes for secrets. Pre-push scans Git history. Hooks fail if Gitleaks is unavailable. Only `config.example.json` with blank credentials belongs in Git.
 
-Application files: `worker/index.js` (API and finance logic), `ui/browser.js`, `ui/styles.css`, `scripts/dev-server.mjs` (loopback HTTP adapter), and `scripts/runtime.mjs` (private local configuration). `dist/` is generated from source and has no cloud deployment manifest.
+Application files: `worker/index.js` (API routes), `server/repository.mjs` (state repository boundary), `shared/` (financial and reconciliation rules), `ui/browser.js`, `ui/styles.css`, `scripts/dev-server.mjs` (loopback HTTP adapter), and `scripts/runtime.mjs` (private local configuration). The HTML shell loads only allowlisted static assets from `/assets/app.js` and `/assets/styles.css`; `dist/` is generated from source and has no cloud deployment manifest.
