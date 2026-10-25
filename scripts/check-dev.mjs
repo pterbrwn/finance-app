@@ -83,6 +83,8 @@ try {
     assert.equal(invalidHostStatus, 403);
     assert.equal((await call('/api/budget', { category: 'Groceries', amount: 50000 }, { Origin: 'https://other.test' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
+    assert.equal((await call('/', undefined, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' })).status, 200);
+    assert.equal((await call('/api/state', undefined, { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'X-Forwarded-For': '100.100.100.1' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'Tailscale-User-Login': 'other@example.test' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'Tailscale-User-Login': 'owner@example.test' })).status, 200);

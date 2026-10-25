@@ -33,7 +33,10 @@ const server = createServer(async (incoming, outgoing) => {
     reject(400, 'Invalid request path.');
     return;
   }
-  if (incoming.headers['sec-fetch-site'] === 'cross-site') {
+  // Permit opening the dashboard from an external link or OAuth redirect. Its
+  // API requests originate from the dashboard; cross-site API calls stay blocked.
+  const navigation = incoming.method === 'GET' && incoming.url.split('?')[0] === '/' && incoming.headers['sec-fetch-mode'] === 'navigate' && incoming.headers['sec-fetch-dest'] === 'document';
+  if (incoming.headers['sec-fetch-site'] === 'cross-site' && !navigation) {
     incoming.resume();
     reject(403, 'Cross-site requests are not allowed.');
     return;
