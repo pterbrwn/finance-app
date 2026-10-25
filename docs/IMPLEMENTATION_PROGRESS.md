@@ -188,3 +188,16 @@ Code-only log. No production records, account names, credentials, private origin
 - A later scenario fixture exposed a one-cent rounding residue for some fixed-rate terms. The final modeled period now pays the remaining principal plus interest, preserving the documented final-payment cap.
 
 **Next:** T14, saved home-purchase scenarios.
+
+
+## T14 — Saved home-purchase scenarios
+
+**Status:** Implemented in source; automated finance, SQLite, and isolated HTTP checks pass.
+
+- Added a versioned, deterministic purchase calculator for down payment, financed fees, fixed note rate/term, escrowed and non-escrowed costs, PMI or explicit no-PMI, closing/prepaids/credits/earnest, moving/repairs, retained reserves, eligible unallocated cash, and optional linked goal funding.
+- Results show loan principal/P&I/interest, lender payment, all-in ownership outflow, remaining cash to close, already-paid earnest, all-in funding target, allocated and free cash, shortfall, cash after close, cash-flow fit, and informational DTI. Unknown income leaves the affected output unavailable; rent replacement vs retained housing is explicit.
+- Added server previews and save/duplicate/edit/archive/compare flows. Each edit preserves prior quote inputs, rate source/as-of, APR/points/lock information, funding snapshot, result, and calculation version. Goal target updates and Housing budget creation require separate explicit actions.
+- Stress views cover rate changes (-1, -0.5, +0.5, +1, +2 percentage points), tax/insurance and maintenance increases, and income reductions. The app makes no lender approval claim and assumes no property appreciation or investment returns.
+- Golden tests cover the $400,000 purchase and $88,000 cash-to-close example, $2,022.62 P&I and $3,047.62 ownership outflow, credits/earnest treatment, escrow counted once, reserve/shortfall, missing income, DTI, stress cases, quote version history, explicit goal/budget creation, and UI rendering. Finance, SQLite, and isolated HTTP suites pass from a disposable source copy; checkout `dist` and running service were not changed.
+
+**Next:** T15, balance sheet overview and reports.

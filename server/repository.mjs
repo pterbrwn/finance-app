@@ -13,6 +13,7 @@ export const blankState = () => ({
   properties: [],
   mortgages: [],
   mortgageSnapshots: [],
+  scenarios: [],
   customCategories: [],
   budgets: {},
   lastSync: null,
