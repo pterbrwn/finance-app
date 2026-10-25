@@ -14,6 +14,7 @@
     "validate": "bash scripts/run-node.sh scripts/validate-artifact.mjs",
     "check:source": "bash scripts/run-node.sh scripts/check-source.mjs",
     "check:sqlite": "bash scripts/run-node.sh scripts/check-sqlite.mjs",
+    "import:legacy": "bash scripts/run-node.sh scripts/import-legacy-json.mjs",
     "check": "npm run build && npm run validate && bash scripts/run-node.sh scripts/check-finance.mjs && bash scripts/run-node.sh scripts/check-dev.mjs && npm run check:sqlite"
   },
   "dependencies": {

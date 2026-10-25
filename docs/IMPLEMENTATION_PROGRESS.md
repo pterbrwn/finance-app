@@ -52,7 +52,7 @@ Code-only log. No production records, account names, credentials, private origin
 
 ## T04a — SQLite adapter and recovery commands
 
-**Status:** Complete. Commit recorded below after verification.
+**Status:** Complete. Commit: `eaa9b51`.
 
 - Verified `better-sqlite3@13.0.3` loads and executes SQLite 3.53.4 on the host's Linux ARM64 / Ubuntu 22.04 / GLIBC 2.35 environment under pinned Node 24.22.1. `decimal.js@10.6.0` and the lockfile are pinned.
 - Added schema migration 001, a local SQLite repository with foreign keys, WAL, 5-second busy timeout, atomic state writes, normalized record tables, and a configuration-selected adapter. JSON remains the active default until migration gates are explicitly completed.
@@ -60,4 +60,14 @@ Code-only log. No production records, account names, credentials, private origin
 - Tested constraint failure rollback, integrity and foreign-key checks, backup API output and permissions, and restore in a disposable synthetic directory.
 - Full finance, storage, artifact, SQLite, and isolated HTTP checks passed in a disposable source-only copy under Node 24.
 
-**Next:** T04b, explicit legacy JSON importer and checksum/idempotency validation. Production remains on JSON until golden-data comparison and rollback gates pass.
+## T04b — Explicit legacy importer
+
+**Status:** Complete. Commit recorded below after verification.
+
+- Added an explicit JSON-to-SQLite import command. It validates JSON shape and relational constraints before commit, computes and records the exact source checksum, and refuses to merge into a populated database.
+- It verifies encrypted token/IV pairs locally using the existing AES-256-GCM key, then preserves their original ciphertext, IV, provider cursors, record IDs, category overrides, balances, and budget limits. It never prints token/config values.
+- Missing product/environment fields remain missing. The importer reports how many items have unspecified environment and does not infer production or sandbox from the private config.
+- Same-source reruns are idempotent. Synthetic checks verify key preservation, unknown environment handling, counts, idempotency, integrity, foreign keys, backup/restore, and transaction rollback.
+- No production database was created or activated. The live service continues to use the original JSON state.
+
+**Next:** complete golden-fixture comparison and operational migration/restore rehearsal before selecting SQLite in a production config. Continue with T05 after the migration gates are addressed; do not treat the implementation branch as production-ready.
