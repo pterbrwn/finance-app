@@ -23,31 +23,50 @@ try {
   const initialBackup = (await readdir(backupDir)).find(name => name.startsWith('daily-') && name.endsWith('.sqlite'));
   assert.ok(initialBackup);
   const sourceBackup = join(backupDir, initialBackup);
+  let oldestGeneratedBackup;
   for (let offset = 1; offset <= 40; offset++) {
     const date = new Date(Date.UTC(2026, 10, 1 - offset, 12));
     const stamp = date.toISOString().replaceAll(':', '-');
-    await copyFile(sourceBackup, join(backupDir, `daily-${stamp}.sqlite`));
-    await chmod(join(backupDir, `daily-${stamp}.sqlite`), 0o600);
+    const path = join(backupDir, `daily-${stamp}.sqlite`);
+    await copyFile(sourceBackup, path);
+    await chmod(path, 0o600);
+    if (offset === 40) oldestGeneratedBackup = path;
   }
   const protectedPath = join(backupDir, 'pre-migration-1-to-2-2026-10-01T00-00-00.000Z.sqlite');
   await copyFile(sourceBackup, protectedPath);
   await chmod(protectedPath, 0o600);
+  const unknownBackups = new Map([
+    ['archive.sqlite', Buffer.from('synthetic archive bytes')],
+    ['daily-owner-copy.sqlite', Buffer.from('synthetic owner backup bytes')],
+    ['daily-2026-02-30T00-00-00.000Z.sqlite', Buffer.from('synthetic impossible-date backup bytes')]
+  ]);
+  for (const [name, bytes] of unknownBackups) {
+    const path = join(backupDir, name);
+    await writeFile(path, bytes, { mode: 0o600 });
+    await chmod(path, 0o600);
+  }
 
   const next = await runScheduledBackup({ dataDir, configurationPath: configPath, now: () => new Date('2026-11-01T12:00:00.000Z') });
   assert.equal(next.state, 'success');
   assert.equal(next.retainedCount, 11, 'retains seven daily, four weekly with overlap, and one protected migration backup');
   const retainedFiles = (await readdir(backupDir)).filter(name => name.endsWith('.sqlite'));
-  assert.equal(retainedFiles.length, 11);
+  assert.equal(retainedFiles.length, 14, 'retains eleven recognized backups plus three unrecognized SQLite files');
   assert.ok(retainedFiles.includes('pre-migration-1-to-2-2026-10-01T00-00-00.000Z.sqlite'));
+  await assert.rejects(stat(oldestGeneratedBackup), { code: 'ENOENT' }, 'retention prunes an old recognized daily backup');
+  for (const [name, bytes] of unknownBackups) assert.deepEqual(await readFile(join(backupDir, name)), bytes, `${name} is preserved byte-for-byte`);
   for (const name of retainedFiles) assert.equal((await stat(join(backupDir, name))).mode & 0o777, 0o600);
   assert.equal((await stat(backupDir)).mode & 0o777, 0o700);
   const retention = retainedBackupNames([
     { name: 'daily-2026-01-01T00-00-00.000Z.sqlite' },
     { name: 'daily-2026-01-02T00-00-00.000Z.sqlite' },
     { name: 'archive.sqlite' },
+    { name: 'daily-owner-copy.sqlite' },
+    { name: 'daily-2026-02-30T00-00-00.000Z.sqlite' },
     { name: 'pre-migration-1-to-2-2026-01-01T00-00-00.000Z.sqlite' }
   ]);
   assert.ok(retention.has('archive.sqlite') === false, 'unknown filenames do not enter the retention set');
+  assert.ok(retention.has('daily-owner-copy.sqlite') === false, 'unrecognized daily names do not enter the retention set');
+  assert.ok(retention.has('daily-2026-02-30T00-00-00.000Z.sqlite') === false, 'impossible timestamps do not enter the retention set');
   assert.ok(retention.has('pre-migration-1-to-2-2026-01-01T00-00-00.000Z.sqlite'));
 
   const beforeFailure = [...retainedFiles].sort();

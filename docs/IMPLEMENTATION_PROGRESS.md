@@ -392,3 +392,14 @@ Code-only log. No production records, account names, credentials, private origin
 - The local loopback/proxy header tests are synthetic; they do not prove the live HTTPS proxy strips forged identity headers. C10's required owner-device screen-reader and remaining manual browser checks are still open, so this automated gate does not authorize C12/C13 activation.
 
 **Next:** C10 manual acceptance remains an owner desktop dependency. After it is recorded, resume C12 with the private storage/key reconciliation and recovery checks; activate only after that operational gate passes.
+
+
+## R01 — Fail-safe backup retention
+
+**Status:** Implemented and verified in a disposable source copy.
+
+- Scheduled retention and backup selection now share one strict generated-daily filename parser. It rejects malformed and impossible dates, so pruning only considers valid timestamped backups outside the seven-daily/four-weekly keep set.
+- Synthetic scheduled-backup acceptance confirms `daily-owner-copy.sqlite`, an archive file, and a malformed timestamped name survive byte-for-byte; an old recognized daily backup is pruned. Existing pre-migration protection, retention counts, failed-backup preservation, private modes, and backup/restore lock contention still pass.
+- Pinned Node 24.22.1 `scripts/check-backup.mjs` passed in a disposable source copy. No owner backup directory, live service, preview records, timer, or root `dist` was touched.
+
+**Next:** R02, correct net-worth classification for liabilities with conflicting asset subtypes.

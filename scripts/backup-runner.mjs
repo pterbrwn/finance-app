@@ -4,7 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { retainedBackupNames } from './backup-retention.mjs';
+import { parseDailyBackupName, retainedBackupNames } from './backup-retention.mjs';
 
 const execFileAsync = promisify(execFile);
 const dataDirectory = resolve(process.env.LEDGER_LOCAL_DATA_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'ledger'));
@@ -71,7 +71,7 @@ export async function runScheduledBackup({ dataDir = dataDirectory, configuratio
     }
     const retained = retainedBackupNames(backupFiles);
     for (const entry of backupFiles) {
-      if (entry.name.startsWith('daily-') && entry.name.endsWith('.sqlite') && !retained.has(entry.name)) await rm(join(backupDir, entry.name));
+      if (parseDailyBackupName(entry.name) && !retained.has(entry.name)) await rm(join(backupDir, entry.name));
     }
     const status = { state: 'success', lastAttempt: attemptedAt, lastSuccess: attemptedAt, failureCategory: null, retainedCount: retained.size };
     await saveStatusAt(statusFile, backupDir, status);

@@ -1,5 +1,14 @@
 import { basename } from 'node:path';
 
+export function parseDailyBackupName(value) {
+  const name = basename(value);
+  const match = /^daily-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})\.(\d{3})Z\.sqlite$/.exec(name);
+  if (!match) return null;
+  const date = new Date(`${match[1]}T${match[2]}:${match[3]}:${match[4]}.${match[5]}Z`);
+  if (!Number.isFinite(date.getTime()) || `daily-${date.toISOString().replaceAll(':', '-')}.sqlite` !== name) return null;
+  return { name, date };
+}
+
 function isoWeekKey(date) {
   const utc = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
   const day = utc.getUTCDay() || 7;
@@ -12,9 +21,8 @@ function isoWeekKey(date) {
 export function retainedBackupNames(entries, { dailyCount = 7, weeklyCount = 4 } = {}) {
   const daily = entries
     .map(entry => {
-      const name = basename(entry.name);
-      const match = /^daily-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})\.(\d{3})Z\.sqlite$/.exec(name);
-      return match ? { ...entry, name, date: new Date(`${match[1]}T${match[2]}:${match[3]}:${match[4]}.${match[5]}Z`) } : null;
+      const parsed = parseDailyBackupName(entry.name);
+      return parsed ? { ...entry, ...parsed } : null;
     })
     .filter(Boolean)
     .filter(entry => Number.isFinite(entry.date.getTime()))
