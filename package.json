@@ -18,7 +18,8 @@
     "check:browser": "bash scripts/run-node.sh scripts/check-browser.mjs",
     "measure:performance": "bash scripts/run-node.sh scripts/measure-performance.mjs",
     "import:legacy": "bash scripts/run-node.sh scripts/import-legacy-json.mjs",
-    "check": "npm run build && npm run validate && bash scripts/run-node.sh scripts/check-finance.mjs && bash scripts/run-node.sh scripts/check-dev.mjs && npm run check:sqlite && npm run check:backup"
+    "check": "npm run build && npm run validate && bash scripts/run-node.sh scripts/check-finance.mjs && bash scripts/run-node.sh scripts/check-dev.mjs && npm run check:sqlite && npm run check:backup && npm run check:runtime",
+    "check:runtime": "bash scripts/run-node.sh scripts/check-runtime-status.mjs"
   },
   "dependencies": {
     "better-sqlite3": "13.0.3",

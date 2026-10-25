@@ -10,20 +10,18 @@ import { createSqliteRepositoryAt } from '../dist/server/sqlite-repository.mjs';
 export const configPath = resolve(process.env.LEDGER_CONFIG_FILE || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'ledger/config.json'));
 export const dataDirectory = resolve(process.env.LEDGER_LOCAL_DATA_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'ledger'));
 const execFileAsync=promisify(execFile);
-async function getSyncTimerStatus(){
+async function readTimerStatus(unit){
   try{
-    const {stdout}=await execFileAsync('systemctl',['--user','show','ledger-sync.timer','--property=UnitFileState,ActiveState,NextElapseUSecRealtime','--value'],{timeout:2000,encoding:'utf8'});
-    const [enabledState,activeState,nextRun]=stdout.trim().split('\n');
-    return{state:'available',enabled:['enabled','enabled-runtime','linked'].includes(enabledState),active:activeState==='active',enabledState:enabledState||'unknown',activeState:activeState||'unknown',nextRun:nextRun&&nextRun!=='n/a'?nextRun:null,checkedAt:new Date().toISOString()};
-  }catch(error){return{state:'unavailable',enabled:null,active:null,reason:error.code==='ENOENT'?'systemd user manager is unavailable':'systemd timer status could not be read',checkedAt:new Date().toISOString()};}
+    const {stdout}=await execFileAsync('systemctl',['--user','show',unit,'--property=UnitFileState,ActiveState,NextElapseUSecRealtime'],{timeout:2000,encoding:'utf8'});
+    const properties=Object.fromEntries(stdout.trim().split(/\r?\n/).map(line=>{const index=line.indexOf('=');return index<0?[]:[line.slice(0,index),line.slice(index+1)];}).filter(pair=>pair.length));
+    if(!properties.UnitFileState||!properties.ActiveState)throw new Error('timer status incomplete');
+    const enabledState=properties.UnitFileState,activeState=properties.ActiveState,nextRun=properties.NextElapseUSecRealtime;
+    return{state:'available',enabled:['enabled','enabled-runtime','linked'].includes(enabledState),active:activeState==='active',enabledState,activeState,nextRun:nextRun&&nextRun!=='n/a'?nextRun:null,checkedAt:new Date().toISOString()};
+  }catch(error){return{state:'unavailable',enabled:null,active:null,reason:error.code==='ENOENT'?'systemd user manager is unavailable':'timer status could not be read',checkedAt:new Date().toISOString()};}
 }
 async function getBackupStatus(storageMode){
-  let timer;
-  try{
-    const {stdout}=await execFileAsync('systemctl',['--user','show','ledger-backup.timer','--property=UnitFileState,ActiveState,NextElapseUSecRealtime','--value'],{timeout:2000,encoding:'utf8'});
-    const [enabledState,activeState,nextRun]=stdout.trim().split('\n');
-    timer={state:'available',enabled:['enabled','enabled-runtime','linked'].includes(enabledState),active:activeState==='active',nextRun:nextRun&&nextRun!=='n/a'?nextRun:null};
-  }catch(error){timer={state:'unavailable',enabled:null,active:null,reason:error.code==='ENOENT'?'systemd user manager is unavailable':'backup timer status could not be read'};}
+  const {state,enabled,active,reason,nextRun}=await readTimerStatus('ledger-backup.timer');
+  const timer={state,enabled,active,...(reason?{reason}:{}),nextRun};
   if(storageMode!=='sqlite')return{state:'not_configured',lastAttempt:null,lastSuccess:null,failureCategory:null,timer,checkedAt:new Date().toISOString()};
   let result={state:'not_run',lastAttempt:null,lastSuccess:null,failureCategory:null};
   try{
@@ -64,7 +62,7 @@ export async function localRuntime() {
     PLAID_SECRET: enabled ? config.plaidSecret : undefined,
     TOKEN_ENCRYPTION_KEY: enabled ? config.tokenEncryptionKey : undefined,
     PLAID_REDIRECT_URI: enabled ? config.plaidRedirectUri : undefined,
-    getSyncTimerStatus,
+    getSyncTimerStatus: () => readTimerStatus('ledger-sync.timer'),
     getBackupStatus: () => getBackupStatus(config.storageMode)
   };
 }
