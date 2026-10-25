@@ -1,7 +1,18 @@
 // The loopback-only Node server supplies the local owner's identity.
 const CATEGORIES = ['Housing', 'Groceries', 'Dining', 'Shopping', 'Transport', 'Utilities', 'Health', 'Entertainment', 'Travel', 'Other', 'Income', 'Transfers'];
 const STATE_KEY = 'finance/owner-v1.json';
-const blankState = () => ({ version: 1, owner: null, items: [], accounts: [], transactions: [], budgets: {}, lastSync: null, lease: null });
+const blankState = () => ({ version: 1, owner: null, items: [], accounts: [], transactions: [], holdings: [], customCategories: [], budgets: {}, lastSync: null, lease: null });
+const categories = state => [...CATEGORIES, ...(state.customCategories || [])];
+const cents = value => Number.isFinite(value) ? Math.round(value * 100) : null;
+const accountRecord = (a, itemId) => ({ id: a.account_id, itemId, name: a.name, mask: a.mask, type: a.type, subtype: a.subtype, balance: cents(a.balances.current), currency: a.balances.iso_currency_code || a.balances.unofficial_currency_code || 'UNKNOWN' });
+
+export function investmentHoldings(data, itemId) {
+  const securities = new Map(data.securities.map(s => [s.security_id, s]));
+  return data.holdings.map(h => {
+    const security = securities.get(h.security_id);
+    return { itemId, accountId: h.account_id, securityId: h.security_id, name: security?.name || 'Unnamed holding', ticker: security?.ticker_symbol || null, quantity: h.quantity, value: cents(h.institution_value), costBasis: cents(h.cost_basis), currency: h.iso_currency_code || h.unofficial_currency_code || 'UNKNOWN', asOf: h.institution_price_as_of || security?.close_price_as_of || null };
+  });
+}
 
 export function categoryFor(t) {
   const p = t.personal_finance_category?.primary || '', d = t.personal_finance_category?.detailed || '';
@@ -66,7 +77,8 @@ async function plaid(env, path, params) {
   const result = await fetch(`https://${env.PLAID_ENV}.plaid.com${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Plaid-Version': '2020-09-14' }, body: JSON.stringify({ client_id: env.PLAID_CLIENT_ID, secret: env.PLAID_SECRET, ...params }), signal: AbortSignal.timeout(25000) });
   const data = await result.json();
   if (!result.ok) {
-    const error = apiError(data.error_code === 'ITEM_LOGIN_REQUIRED' ? 'Reconnect this bank to resume updates.' : 'The bank connection could not be updated. Please try again later.', 502);
+    const messages = { ITEM_LOGIN_REQUIRED: 'Reconnect this account to resume updates.', PRODUCT_NOT_ENABLED: 'Enable the requested product in your Plaid dashboard before connecting this account.', INSTITUTION_NOT_SUPPORTED: 'This provider does not support the selected connection type.', NO_INVESTMENT_ACCOUNTS: 'No supported investment accounts were found at this provider.', PRODUCT_NOT_READY: 'Account data is still being prepared. Try syncing again shortly.', ADDITIONAL_CONSENT_REQUIRED: 'Reconnect this account to authorize the required data access.' };
+    const error = apiError(messages[data.error_code] || 'The account connection could not be updated. Please try again later.', 502);
     error.plaidCode = data.error_code; throw error;
   }
   return data;
@@ -78,7 +90,7 @@ async function tokenKey(env) {
   return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 const base64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes)));
-export function parseCSV(text) {
+export function parseCSV(text, allowedCategories = CATEGORIES) {
   const rows = []; let row = [], value = '', quoted = false;
   text = text.replace(/^\uFEFF/, '');
   for (let i = 0; i < text.length; i++) {
@@ -101,7 +113,7 @@ export function parseCSV(text) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date+'T12:00:00Z').toISOString().slice(0,10) !== date) throw apiError('Invalid YYYY-MM-DD date at CSV row '+(index+2)+'.');
     if (!merchant || merchant.length > 300) throw apiError('Invalid merchant at CSV row '+(index+2)+'.');
     if (!/^-?\d{1,9}(\.\d{1,2})?$/.test(amount)) throw apiError('Use a plain amount with up to two decimal places at CSV row '+(index+2)+'.');
-    if (!CATEGORIES.includes(category)) throw apiError('Unknown category at CSV row '+(index+2)+'. Use Other or a dashboard category.');
+    if (!allowedCategories.includes(category)) throw apiError('Unknown category at CSV row '+(index+2)+'. Create the budget bucket first or use Other.');
     if (get('currency') && get('currency') !== 'USD') throw apiError('CSV import currently supports USD only.');
     const status = get('status').toLowerCase();
     if (status && !['pending','posted'].includes(status)) throw apiError('Use Posted or Pending status at CSV row '+(index+2)+'.');
@@ -129,6 +141,19 @@ async function syncBanks(env) {
     for (const item of acquired.items) {
       try {
         const access_token = await decryptToken(env, item.token);
+        if (item.product === 'investments') {
+          const data = await plaid(env, '/investments/holdings/get', { access_token });
+          const holdings = investmentHoldings(data, item.id);
+          await mutate(env, s => {
+            if (s.lease?.id !== leaseId) throw apiError('Sync was superseded. Please try again.', 409);
+            const liveItem = s.items.find(i => i.id === item.id);
+            if (!liveItem) return;
+            s.holdings = (s.holdings || []).filter(h => h.itemId !== item.id).concat(holdings);
+            s.accounts = s.accounts.filter(a => a.itemId !== item.id).concat(data.accounts.map(a => accountRecord(a, item.id)));
+            liveItem.lastSync = new Date().toISOString(); liveItem.error = null;
+          });
+          continue;
+        }
         let result;
         for (let attempt = 0; attempt < 3; attempt++) {
           let cursor = item.cursor || undefined;
@@ -151,7 +176,7 @@ async function syncBanks(env) {
           if (!liveItem) return;
           applySyncPages(s, item.id, result.pages);
           liveItem.cursor = result.cursor; liveItem.lastSync = new Date().toISOString(); liveItem.error = null;
-          s.accounts = s.accounts.filter(a => a.itemId !== item.id).concat(accountData.accounts.map(a => ({ id: a.account_id, itemId: item.id, name: a.name, mask: a.mask, type: a.type, subtype: a.subtype, balance: a.balances.current === null ? null : Math.round(a.balances.current * 100), currency: a.balances.iso_currency_code || a.balances.unofficial_currency_code || 'UNKNOWN' })));
+          s.accounts = s.accounts.filter(a => a.itemId !== item.id).concat(accountData.accounts.map(a => accountRecord(a, item.id)));
         });
       } catch (e) {
         failures.push({ bank: item.name, message: e.status ? e.message : 'Bank update failed. Try again later.' });
@@ -163,7 +188,7 @@ async function syncBanks(env) {
   } finally { await mutate(env, s => { if (s.lease?.id === leaseId) s.lease = null; }); }
 }
 function publicState(state, env) {
-  return { ...state, owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured' } };
+  return { ...state, categories: categories(state), holdings: state.holdings || [], owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured' } };
 }
 export default {
   async fetch(request, env) {
@@ -187,13 +212,20 @@ export default {
           const item = state.items.find(i => i.id === input.itemId);
           if (!item) throw apiError('Bank connection not found.', 404);
           params.access_token = await decryptToken(env, item.token);
-        } else { params.products = ['transactions']; params.transactions = { days_requested: 365 }; }
+        } else {
+          const product = input.product || 'transactions';
+          if (!['transactions', 'investments'].includes(product)) throw apiError('Choose bank or investment accounts.');
+          params.products = [product];
+          if (product === 'transactions') params.transactions = { days_requested: 365 };
+        }
         const data = await plaid(env, '/link/token/create', params);
         return response({ link_token: data.link_token });
       }
       if (path === '/api/exchange-token' && request.method === 'POST') {
         const input = await body(request);
         if (typeof input.public_token !== 'string' || input.public_token.length > 500) throw apiError('Invalid bank authorization.');
+        const product = input.product || 'transactions';
+        if (!['transactions', 'investments'].includes(product)) throw apiError('Choose bank or investment accounts.');
         // Validate encryption before consuming the one-time public token.
         await tokenKey(env);
         const data = await plaid(env, '/item/public_token/exchange', { public_token: input.public_token });
@@ -201,21 +233,21 @@ export default {
         await mutate(env, s => {
           if (s.owner && s.owner !== user) throw apiError('Access denied.', 403);
           s.owner = user;
-          if (!s.items.some(i => i.id === data.item_id)) s.items.push({ id: data.item_id, name: String(input.name || 'Connected bank').slice(0,100), token, cursor: null, lastSync: null, error: null });
+          if (!s.items.some(i => i.id === data.item_id)) s.items.push({ id: data.item_id, name: String(input.name || 'Connected account').slice(0,100), product, token, cursor: null, lastSync: null, error: null });
         });
         return response({ connected: true, ...await syncBanks(env) });
       }
       if (['/api/sync', '/api/scheduled-sync'].includes(path) && request.method === 'POST') return response(await syncBanks(env));
       if (path === '/api/category' && request.method === 'POST') {
         const input = await body(request);
-        if (!CATEGORIES.includes(input.category)) throw apiError('Choose a valid category.');
+        if (!categories(state).includes(input.category)) throw apiError('Choose a valid category.');
         await mutate(env, s => { const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); t.override = input.category; });
         return response({ ok: true });
       }
       if (path === '/api/import' && request.method === 'POST') {
         const input = await body(request);
         if (typeof input.csv !== 'string' || input.csv.length > 1_000_000 || typeof input.account !== 'string' || !input.account.trim() || input.account.trim().length > 100) throw apiError('Choose a CSV under 1 MB and enter an account name.');
-        const transactions = parseCSV(input.csv), name = input.account.trim();
+        const transactions = parseCSV(input.csv, categories(state)), name = input.account.trim();
         const accountId = 'csv:' + await hash(name.toLowerCase()), fileId = await hash(accountId+'\n'+input.csv);
         let imported = 0, skipped = 0;
         await mutate(env, s => {
@@ -228,8 +260,29 @@ export default {
       }
       if (path === '/api/budget' && request.method === 'POST') {
         const input = await body(request);
-        if (!CATEGORIES.includes(input.category) || ['Income','Transfers'].includes(input.category) || !Number.isSafeInteger(input.amount) || input.amount < 0 || input.amount > 100_000_000) throw apiError('Enter a valid monthly budget.');
+        if (!categories(state).includes(input.category) || ['Income','Transfers'].includes(input.category) || !Number.isSafeInteger(input.amount) || input.amount < 0 || input.amount > 100_000_000) throw apiError('Enter a valid monthly budget.');
         await mutate(env, s => { s.owner = user; s.budgets[input.category] = input.amount; });
+        return response({ ok: true });
+      }
+      if (path === '/api/category-create' && request.method === 'POST') {
+        const input = await body(request), name = typeof input.name === 'string' ? input.name.trim().replace(/\s+/g, ' ') : '';
+        if (!name || name.length > 40 || !/^[\p{L}\p{N}][\p{L}\p{N} .&'()/_-]*$/u.test(name) || Object.hasOwn(Object.prototype, name)) throw apiError('Use a bucket name up to 40 characters, starting with a letter or number.');
+        if (!Number.isSafeInteger(input.amount) || input.amount < 0 || input.amount > 100_000_000) throw apiError('Enter a valid monthly budget.');
+        await mutate(env, s => {
+          if (categories(s).some(c => c.toLowerCase() === name.toLowerCase())) throw apiError('A bucket with this name already exists.', 409);
+          if ((s.customCategories || []).length >= 50) throw apiError('Use up to 50 custom budget buckets.');
+          s.owner = user; s.customCategories = [...(s.customCategories || []), name]; s.budgets[name] = input.amount;
+        });
+        return response({ ok: true, category: name });
+      }
+      if (path === '/api/investment-account' && request.method === 'POST') {
+        const input = await body(request), name = typeof input.name === 'string' ? input.name.trim() : '';
+        if (!name || name.length > 100 || !Number.isSafeInteger(input.balance) || input.balance < 0 || input.balance > 1_000_000_000_000 || !['hsa', '401k', 'ira', 'brokerage', 'other'].includes(input.subtype)) throw apiError('Enter an account name, type, and a valid USD balance.');
+        const id = 'manual-investment:' + await hash(name.toLowerCase());
+        await mutate(env, s => {
+          s.owner = user;
+          s.accounts = s.accounts.filter(a => a.id !== id).concat({ id, itemId: null, name, type: 'investment', subtype: input.subtype, balance: input.balance, currency: 'USD', manual: true, updatedAt: new Date().toISOString() });
+        });
         return response({ ok: true });
       }
       if (path === '/api/disconnect' && request.method === 'POST') {
@@ -237,7 +290,7 @@ export default {
         if (!item) throw apiError('Bank connection not found.', 404);
         if (state.lease && state.lease.expiresAt > Date.now()) throw apiError('Wait for the current sync to finish before disconnecting.', 409);
         await plaid(env, '/item/remove', { access_token: await decryptToken(env, item.token) });
-        await mutate(env, s => { s.items = s.items.filter(i => i.id !== item.id); s.accounts = s.accounts.filter(a => a.itemId !== item.id); s.transactions = s.transactions.filter(t => t.itemId !== item.id); });
+        await mutate(env, s => { s.items = s.items.filter(i => i.id !== item.id); s.accounts = s.accounts.filter(a => a.itemId !== item.id); s.transactions = s.transactions.filter(t => t.itemId !== item.id); s.holdings = (s.holdings || []).filter(h => h.itemId !== item.id); });
         return response({ ok: true });
       }
       return response({ error: 'Not found' }, 404);
