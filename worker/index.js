@@ -177,6 +177,7 @@ export default {
       if (!user) return response({ error: 'Local owner access is required.' }, 401);
       const { state } = await readState(env);
       if (state.owner && state.owner !== user) return response({ error: 'This dashboard belongs to another account.' }, 403);
+      if (path === '/api/health' && request.method === 'GET') return response({ codeVersion: typeof BUILD_ID === 'string' ? BUILD_ID : 'unversioned', schemaVersion: Number.isInteger(state.version) ? state.version : null, configurationReady: ready(env), localOnly: !!env.LOCAL_ONLY, lastSync: state.lastSync || null });
       if (['/api/link-token', '/api/exchange-token', '/api/sync', '/api/scheduled-sync', '/api/disconnect'].includes(path) && !ready(env)) return response({ error: 'Bank connections are disabled. Import CSV files for local-only operation.' }, 503);
       if (path === '/api/state' && request.method === 'GET') return response(publicState(state, env));
       if (path === '/api/link-token' && request.method === 'POST') {

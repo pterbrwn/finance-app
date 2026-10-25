@@ -13,7 +13,7 @@ const configFile = join(directory, 'config.json');
 await writeFile(configFile, JSON.stringify({ enablePlaid: false, publicOrigin: 'https://ledger.example.ts.net', tailscaleLogin: 'owner@example.test' }), { mode: 0o600 });
 let child;
 async function start() {
-  child = spawn(process.execPath, ['scripts/dev-server.mjs'], {
+  child = spawn('bash', ['scripts/start-ledger.sh'], {
     cwd: new URL('..', import.meta.url),
     env: { ...process.env, PORT: '0', LEDGER_LOCAL_DATA_DIR: directory, LEDGER_CONFIG_FILE: configFile },
     stdio: ['ignore', 'pipe', 'pipe']
@@ -30,6 +30,15 @@ async function start() {
     child.once('error', error => { clearTimeout(timeout); reject(error); });
     child.once('close', code => { clearTimeout(timeout); reject(new Error('Local server exited: ' + code + ' ' + output)); });
   });
+}
+async function assertSecondWriterBlocked(directory, configFile) {
+  const second = spawn('bash', ['scripts/start-ledger.sh'], {
+    cwd: new URL('..', import.meta.url),
+    env: { ...process.env, PORT: '0', LEDGER_LOCAL_DATA_DIR: directory, LEDGER_CONFIG_FILE: configFile },
+    stdio: ['ignore', 'ignore', 'ignore']
+  });
+  const [code] = await once(second, 'exit');
+  assert.notEqual(code, 0, 'a second server for the same data directory must fail');
 }
 async function stop() {
   if (child && child.exitCode === null) {
@@ -63,6 +72,7 @@ try {
   await rm(join(directory, 'state.json'));
   if (process.argv.includes('--http')) {
     let origin = await start();
+    await assertSecondWriterBlocked(directory, configFile);
     const call = (path, input, headers = {}) => fetch(origin + path, {
       method: input === undefined ? 'GET' : 'POST',
       headers: { 'Content-Type': 'application/json', ...headers },
@@ -110,7 +120,7 @@ try {
     assert.equal(JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')).owner, 'local-owner');
     assert.equal((await stat(directory)).mode & 0o777, 0o700);
     assert.equal((await stat(join(directory, 'state.json'))).mode & 0o777, 0o600);
-    console.log('Local server checks passed: HTTP preview, Host/Origin guards, CSV import, duplicate detection, concurrent writes, and restart persistence.');
+    console.log('Local server checks passed: single-writer lock, HTTP preview, Host/Origin guards, CSV import, duplicate detection, concurrent writes, and restart persistence.');
   } else {
     console.log('HTTP preview checks not run. Run npm run check:local-http on a host that permits local servers.');
   }

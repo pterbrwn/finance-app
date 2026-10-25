@@ -50,6 +50,10 @@ const call=(path,input,user='owner',origin)=>worker.fetch(new Request('https://l
 assert.equal((await call('state',undefined,null)).status,401);
 assert.equal((await call('sync',{},'owner','https://other.test')).status,403);
 assert.equal((await call('scheduled-sync',{},null)).status,401);
+const health=await (await call('health')).json();
+assert.equal(health.schemaVersion,1);
+assert.equal(typeof health.codeVersion,'string');
+assert.equal(health.configurationReady,true);
 let syncCalls=0;const seen=[];const realFetch=globalThis.fetch;
 globalThis.fetch=async (url,options)=>{
   const input=JSON.parse(options.body);seen.push({url,input});

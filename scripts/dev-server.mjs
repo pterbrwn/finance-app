@@ -3,6 +3,7 @@ import { webcrypto } from 'node:crypto';
 import { localRuntime } from './runtime.mjs';
 import worker from '../dist/server/index.js';
 
+if (process.env.LEDGER_WRITER_LOCKED !== '1') throw new Error('Start Ledger through scripts/start-ledger.sh to acquire the data-directory lock.');
 globalThis.crypto ||= webcrypto;
 const env = await localRuntime();
 

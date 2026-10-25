@@ -33,19 +33,22 @@ The app must run on the Jetson, and both devices must be connected to Tailscale.
 
 ## Jetson service
 
-Build first, then install the provided user units. These unit paths assume the checkout is `~/Development/finance-app` and Node is `/usr/bin/node`; adjust the units for a different installation.
+The application uses the pinned Node 24.22.1 ARM64 runtime in `~/.local/share/ledger/runtimes/`, separate from the system Node installation. The service units point to an immutable release through `~/.local/share/ledger/current`; prepare releases from committed source and validate them before changing this symlink.
 
 ```sh
-npm run build
+scripts/install-node-runtime.sh
+scripts/prepare-release.sh "$(git rev-parse --short=12 HEAD)"
+scripts/activate-release.sh "$(git rev-parse --short=12 HEAD)"
 mkdir -p ~/.config/systemd/user
 cp deploy/ledger*.service deploy/ledger-sync.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now ledger.service
+systemctl --user enable ledger.service
+systemctl --user restart ledger.service
 ```
 
 Use `systemctl --user status ledger.service` and `journalctl --user -u ledger.service` to inspect it. To keep user services running after SSH logout and at boot, enable lingering for your user with `loginctl enable-linger "$USER"` if permitted by the host.
 
-Run a single server process per data directory. Financial state is written atomically and updates are serialized within that process. A database would be needed for multiple server processes or very large histories. Back up the private state and configuration locally before upgrades; backups must stay outside Git.
+All server start paths use the same non-blocking `flock` under the private data directory, so a second process cannot write the JSON state concurrently. Financial state is written atomically and updates are serialized within the process as well. The user timer talks to the running service and never starts another writer. Check `/api/health` for the code/schema version and safe readiness status. Back up the private state and matching configuration/key locally before upgrades; backups must stay outside Git. To roll code back, activate a previously prepared release and restart the service; database/schema rollback also requires a compatible backup and migration plan.
 
 ## Connect banks
 

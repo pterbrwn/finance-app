@@ -5,8 +5,8 @@ After=ledger.service
 
 [Service]
 Type=oneshot
-WorkingDirectory=%h/Development/finance-app
-ExecStart=/usr/bin/node scripts/sync.mjs
+WorkingDirectory=%h/.local/share/ledger/current
+ExecStart=%h/.local/share/ledger/current/scripts/start-sync.sh
 Environment=PORT=3001
 UMask=0077
 NoNewPrivileges=true

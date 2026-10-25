@@ -4,8 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Development/finance-app
-ExecStart=/usr/bin/node scripts/dev-server.mjs
+WorkingDirectory=%h/.local/share/ledger/current
+ExecStart=%h/.local/share/ledger/current/scripts/start-ledger.sh
 Environment=PORT=3001
 Restart=on-failure
 RestartSec=5
