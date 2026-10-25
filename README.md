@@ -122,6 +122,8 @@ npm run check:source
 
 The HTTP suite uses disposable synthetic data and tests imports, restart persistence, permissions, Host/Origin protections, Tailscale identity checks, and local-only mode. It does not load your private config or production records.
 
+On mobile, transaction rows keep the amount visible alongside the merchant and category. Dialogs have accessible titles, return focus to their launch control, and support Escape; charts include numeric data tables. Source-render checks cover the responsive structure, but release acceptance still requires a real browser at 320 px and 390 px, 200% zoom, keyboard-only workflows, and manual assistive-technology review.
+
 The repository ignores local config, runtime state, bank exports, databases, logs, certificates, generated builds, and hosting metadata. Install [Gitleaks](https://github.com/gitleaks/gitleaks), ensure it is on PATH, and enable the included hooks:
 
 ```sh

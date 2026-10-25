@@ -214,3 +214,16 @@ Code-only log. No production records, account names, credentials, private origin
 - Tests cover cash/investment/property/debt reconciliation, linked mortgage and holdings double-count protection, partial coverage, snapshot idempotency, and Overview rendering. Finance, SQLite, and isolated HTTP suites pass in a disposable source copy; checkout `dist` and running service were not changed.
 
 **Next:** T16, mobile and accessibility polish.
+
+
+## T16 — Mobile, accessibility, and workflow polish
+
+**Status:** Code changes implemented and isolated UI/finance checks pass. Real viewport and assistive-technology verification remains part of T17.
+
+- Transactions become readable mobile cards at narrow widths; merchant, category, date, and amount remain visible without horizontal scrolling. Table roles/labels remain explicit, and bulk selection has its own touch target.
+- Buttons, fields, navigation, pagination, and dialog actions meet a 44 px minimum on mobile. Focus indicators remain visible, category and transaction status updates use live regions, and transaction filters/results are announced.
+- Native dialogs receive an accessible heading, Escape reliably closes them, and focus returns to the invoking control. Stable data-attribute focus restoration preserves focus after rerenders. Inline validation remains attached to its form and unsaved scenario previews do not replace the form.
+- Weekly spending and mortgage principal/interest charts now expose numeric table alternatives. Category breakdowns already expose names and percentages as text.
+- Browser-render assertions and the full finance, SQLite, and isolated HTTP checks pass from a disposable source copy. This ARM64 environment has no installed browser, Playwright, or axe runner, so the requested 320/390 px, 200% zoom, keyboard-only, screen-reader, and slow/offline browser workflows have not been manually verified here; keep them on the T17 release checklist.
+
+**Next:** T17, operational acceptance and release gate. Do not activate production until the browser and operational checks are performed in the owner environment.

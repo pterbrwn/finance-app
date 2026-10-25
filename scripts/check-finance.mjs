@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
+import { readFile } from 'node:fs/promises';
 const { default: worker, totals, fromPlaid, categoryFor, applyChanges, applySyncPages, parseCSV } = await import('../dist/server/index.js');
 const { accountRecord, investmentHoldings } = await import('../dist/shared/investments.mjs');
 const { budgetMonthKey, resolveBudget } = await import('../dist/shared/budgets.mjs');
@@ -368,6 +369,9 @@ async function clientPage(href,stateOrError){
 }
 const pageBase={items:[],accounts:[],transactions:[],budgets:{},setup:{configured:false,localOnly:true}};
 const balanceHtml=await clientPage('https://ledger.test/',{...pageBase,balanceSheet:{asOf:'2026-10-25T12:00:00.000Z',netWorthLabel:'Known net worth · partial coverage',totals:{cash:10000,investments:25000,property:40000000,liabilities:32005000,assets:40037000,netWorth:8032000},coverage:{includedAccounts:2,accountCount:4,staleAccounts:0,nonUsdAccounts:1,unknownBalanceAccounts:1,missingPropertyValuations:0,incompletePropertyDebt:0,excludedAccounts:2},includedAccounts:[],excludedAccounts:[],properties:[]},balanceSheetSnapshots:[]});assert.ok(balanceHtml.includes('Balance sheet'));assert.ok(balanceHtml.includes('Record today’s snapshot'));assert.ok(balanceHtml.includes('Month over month'));
+const mobileTransactionsHtml=await clientPage('https://ledger.test/?page=transactions',{...pageBase,accounts:[{id:'checking',name:'Checking'}],transactions:[{id:'mobile-tx',merchant:'A very long example merchant name',amount:12345,date:'2026-10-25',category:'Dining',currency:'USD'}]});assert.ok(mobileTransactionsHtml.includes('transaction-table'));assert.ok(mobileTransactionsHtml.includes('role="table" aria-label="Transactions"'));assert.ok(mobileTransactionsHtml.includes('transaction-cell-amount'));assert.ok(mobileTransactionsHtml.includes('mobile-cell-label'));assert.ok(mobileTransactionsHtml.includes('Amount'));
+const accessibleChartHtml=await clientPage('https://ledger.test/',{...pageBase,transactions:[{id:'chart-tx',merchant:'Example',amount:1000,date:'2026-10-25',category:'Dining',currency:'USD'}],balanceSheet:{asOf:'2026-10-25T12:00:00.000Z',netWorthLabel:'Net worth',totals:{cash:0,investments:0,property:0,liabilities:0,assets:0,netWorth:0},coverage:{includedAccounts:0,accountCount:0,staleAccounts:0,nonUsdAccounts:0,unknownBalanceAccounts:0,missingPropertyValuations:0,incompletePropertyDebt:0,excludedAccounts:0},includedAccounts:[],excludedAccounts:[],properties:[]}});assert.ok(accessibleChartHtml.includes('View weekly spending data'));assert.ok(accessibleChartHtml.includes('Week 1'));
+const mobileStyles=await readFile(new URL('../ui/styles.css',import.meta.url),'utf8');assert.match(mobileStyles,/transaction-table tbody tr\{display:grid/);assert.match(mobileStyles,/min-height:44px/);assert.match(mobileStyles,/max-width:600px/);
 const manualHtml=await clientPage('https://ledger.test/',{...pageBase,accounts:[{id:'manual-1',name:'Manual Savings',balance:123456,currency:'USD'}]});
 assert.ok(manualHtml.includes('Your records are ready'));
 assert.ok(manualHtml.includes('Manual Savings'));
