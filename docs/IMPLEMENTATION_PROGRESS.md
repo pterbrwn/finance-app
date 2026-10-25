@@ -403,3 +403,14 @@ Code-only log. No production records, account names, credentials, private origin
 - Pinned Node 24.22.1 `scripts/check-backup.mjs` passed in a disposable source copy. No owner backup directory, live service, preview records, timer, or root `dist` was touched.
 
 **Next:** R02, correct net-worth classification for liabilities with conflicting asset subtypes.
+
+
+## R02 — Authoritative net-worth account classification
+
+**Status:** Implemented and verified in a disposable source copy.
+
+- Net-worth totals now classify debt types before asset subtypes. Explicit depository, investment, retirement, and HSA types retain their intended class; cash and investment subtype inference is limited to compatible asset/other account types.
+- Synthetic exact-total checks cover a $100 liability marked cash, conflicting cash/investment subtypes, positive and negative debt balances, and compatible asset/other cash and brokerage records. The manual-account API regression confirms a liability with subtype cash appears as debt and does not increase cash/assets.
+- Pinned Node 24.22.1 finance checks passed after a build in a disposable source copy. No schema, data, service, timer, preview, or root `dist` changed.
+
+**Next:** R03, make transaction filtering follow the effective displayed category in both repositories and the worker fallback.

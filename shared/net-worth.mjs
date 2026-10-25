@@ -5,12 +5,13 @@ export function summarizeBalanceSheet(accounts=[],items=[],propertySummary={prop
   const coverage={accountCount:accounts.length,includedAccounts:0,unknownBalanceAccounts:0,nonUsdAccounts:0,staleAccounts:0,excludedAccounts:0,propertyCount:properties.length,missingPropertyValuations:0,stalePropertyValuations:0,incompletePropertyDebt:0,missingMortgageBalances:0,staleMortgageBalances:0};
   for(const account of accounts){
     let reason=null;if(account.archivedAt)reason='archived';else if(account.includeInReporting===false)reason='excluded from reports';else if(linkedLiabilityIds.has(account.id))reason='included with linked mortgage';else if(account.currency!=='USD')reason='non-USD balance';else if(!Number.isSafeInteger(account.balance))reason='unknown balance';
-    const type=String(account.type||'').toLowerCase(),cash=type==='depository'||String(account.subtype||'').toLowerCase()==='cash',investment=['investment','retirement','hsa'].includes(type)||['401k','ira','brokerage','hsa'].includes(String(account.subtype||'').toLowerCase()),debt=['credit','loan','liability','mortgage'].includes(type),asset=['asset','other'].includes(type);
-    if(!reason&&!cash&&!investment&&!debt&&!asset)reason='unsupported account type';
+    const type=String(account.type||'').toLowerCase(),subtype=String(account.subtype||'').toLowerCase(),debt=['credit','loan','liability','mortgage'].includes(type),assetLike=['asset','other'].includes(type);
+    const kind=debt?'debts':type==='depository'||assetLike&&subtype==='cash'?'cash':['investment','retirement','hsa'].includes(type)||assetLike&&['401k','ira','brokerage','hsa'].includes(subtype)?'investments':assetLike?'otherAssets':null;
+    if(!reason&&!kind)reason='unsupported account type';
     if(reason){coverage.excludedAccounts++;if(reason==='non-USD balance')coverage.nonUsdAccounts++;if(reason==='unknown balance')coverage.unknownBalanceAccounts++;excludedAccounts.push({id:account.id,name:account.name,reason});continue;}
     const item=account.itemId?itemById.get(account.itemId):null,observedAt=account.manual?account.balanceAsOf:account.balanceAsOf||item?.lastSuccess||item?.lastSync||null,age=observedAt?now.getTime()-Date.parse(observedAt.length===10?observedAt+'T23:59:59Z':observedAt):Infinity,stale=!Number.isFinite(age)||age>24*60*60*1000;
     if(stale)coverage.staleAccounts++;
-    const kind=cash?'cash':investment?'investments':debt?'debts':'otherAssets',amount=debt?Math.abs(account.balance):account.balance;totals[kind]+=amount;coverage.includedAccounts++;
+    const amount=kind==='debts'?Math.abs(account.balance):account.balance;totals[kind]+=amount;coverage.includedAccounts++;
     includedAccounts.push({id:account.id,name:account.name,kind,amount,currency:'USD',source:account.manual?'Manual':'Connected',observedAt,stale});
   }
   const propertyRows=properties.map(property=>{
