@@ -153,3 +153,16 @@ Code-only log. No production records, account names, credentials, private origin
 - Tests cover rate-limit retry, concurrent trigger joining, job status and restart recovery, investment endpoint routing, failed snapshot preservation, and timer/job status rendering. Full finance, SQLite, and local HTTP suites passed in isolated copies under Node 24. The project checkout `dist` and live service were not changed.
 
 **Next:** T11, transaction maintenance and safer CSV import/export workflows.
+
+## T11 — Transaction maintenance and imports
+
+**Status:** Core transaction review, pagination, and reversible CSV import workflows are implemented.
+
+- Added stable date/ID ordered server pagination with search, category, account, date range, and review filters. Transactions keeps search, category, account, date, review, month, and page state in the URL and fetches bounded pages. The review queue includes explicit review flags, low-confidence records, and uncategorized/Other rows.
+- Added selection up to 100 transactions, revision-checked bulk categorization, persisted before-values, and undo that skips later-edited or missing transactions instead of overwriting newer work.
+- Rebuilt CSV import as a preview/commit flow. It maps columns, supports YYYY-MM-DD, MM/DD/YYYY, DD/MM/YYYY, and positive/negative spending conventions, validates quotes and exact row shape, previews unknown categories for explicit mapping, detects overlap candidates, and requires an explicit choice to retain matching purchases.
+- Exact file and account reimports are idempotent. Import batches retain the exact transaction IDs they created; undo removes only those rows. Malformed files fail during preview before any writes. Identical legitimate purchases remain separate.
+- CSV export escapes formula-like merchant/category/text values after leading whitespace/control characters without altering stored values; amount fields remain numeric.
+- Tests cover parser mappings/sign/date, malformed rows, exact-file repeats, reordered overlap review, explicit preservation of duplicates, batch-scoped undo, paged filters/stable ordering, bulk edit/undo and later-edit protection, and local HTTP import persistence. Full finance, SQLite, and HTTP suites pass in isolated Node 24 copies. Checkout `dist` remains unchanged.
+
+**Next:** T12, goals and funding allocation.

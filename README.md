@@ -80,7 +80,7 @@ The updater skips unconfigured or unconnected providers. Sync requests create or
 
 ## CSV import
 
-Use Transactions or Banks & accounts → Import CSV. Required columns: `Date`, `Merchant`, `Amount`. Dates are YYYY-MM-DD; positive amounts are spending, negative amounts are credits. Optional: `Category`, `Currency` (USD), `Status` (Posted or Pending). Limits: 1 MB, 5,000 transactions per file.
+Use Transactions or Accounts → Import CSV. The preview lets you map date, merchant, amount, and category columns; choose ISO, US, or day-first dates; and set the spending sign convention. Unknown categories must be mapped before commit. Rows are shape and quote validated, limited to 1 MB and 5,000 transactions, and USD only. Matching date/merchant/amount rows are shown for review and are never silently merged; identical real purchases can be kept. Exact file reimports are skipped. A committed batch can be undone from the preview dialog.
 
 Synthetic example:
 
@@ -90,11 +90,11 @@ Date,Merchant,Amount,Category,Currency,Status
 2026-10-21,Example Payroll,-2500.00,Income,USD,Posted
 ```
 
-The same file imported into the same account is idempotent. Overlapping or modified files are not reconciled with each other or Plaid. Keep CSV accounts separate from accounts synced for the same dates. Native bank formats may need column and amount-sign conversion.
+The same exact file imported into the same account is idempotent. Overlapping or modified files require review and can create separate transactions; they are not reconciled with Plaid. Keep CSV accounts separate from accounts synced for the same dates unless you explicitly reconcile them. Formula-like text is escaped only in exported CSV and stored merchant/category values are unchanged.
 
 ## Dashboard states and navigation
 
-The dashboard starts with your actual saved state, including an honest empty view for new accounts. Sample data appears only after you choose **Explore sample data** or **Open sample preview**, and the preview has an always-visible exit action. Loading failures show an error without substituting example balances. A failed refresh keeps the last loaded records visible with a stale/error notice. The Overview, Transactions, Budgets, Accounts, Investments, Goals, Home planner, and Settings pages are addressable with `?page=...`; month, search, category, and account filters are kept in the URL for links and browser history. On narrow screens the navigation scrolls horizontally while keeping every destination reachable.
+The dashboard starts with your actual saved state, including an honest empty view for new accounts. Sample data appears only after you choose **Explore sample data** or **Open sample preview**, and the preview has an always-visible exit action. Loading failures show an error without substituting example balances. A failed refresh keeps the last loaded records visible with a stale/error notice. The Overview, Transactions, Budgets, Accounts, Investments, Goals, Home planner, and Settings pages are addressable with `?page=...`; month, search, category, account, date, review, and page filters are kept in the URL for links and browser history. Transactions are returned in stable server ordered pages. On narrow screens the navigation scrolls horizontally while keeping every destination reachable.
 
 Budgets supports custom expense buckets with optional monthly limits. A custom bucket has a stable ID, can be renamed/reordered/archived, and remains attached to historical assignments when its display name changes. Income and Transfers remain protected system categories. Edits send an expected revision so a stale tab receives a conflict and can reload instead of silently replacing a newer change.
 

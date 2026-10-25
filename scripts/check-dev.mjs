@@ -55,8 +55,10 @@ try {
     body: input === undefined ? undefined : JSON.stringify(input)
   }), { BUCKET: bucket });
   const sample = { account: 'Persisted CSV', csv: 'Date,Merchant,Amount,Category\n2026-10-01,Meijer,42.50,Groceries' };
-  assert.equal((await (await local('import', sample)).json()).imported, 1);
-  assert.equal((await (await local('import', sample)).json()).skipped, 1);
+  const firstPreview=await(await local('import-preview',sample)).json();
+  assert.equal((await (await local('import',{...sample,revision:firstPreview.revision})).json()).imported, 1);
+  const repeatPreview=await(await local('import-preview',sample)).json();
+  assert.equal((await (await local('import',{...sample,revision:repeatPreview.revision})).json()).skipped, 1);
   const saved = await Promise.all([
     local('budget', { category: 'Groceries', amount: 50000 }),
     local('budget', { category: 'Dining', amount: 20000 })
@@ -111,8 +113,10 @@ try {
     assert.equal((await call('/api/link-token', {})).status, 503);
     assert.ok(!(await call('/')).headers.get('Content-Security-Policy').includes('plaid.com'));
     const csv = { account: 'Local CSV', csv: 'Date,Merchant,Amount,Category\n2026-10-01,Meijer,42.50,Groceries' };
-    assert.equal((await (await call('/api/import', csv)).json()).imported, 1);
-    assert.equal((await (await call('/api/import', csv)).json()).skipped, 1);
+    const preview=await(await call('/api/import-preview',csv)).json();
+    assert.equal((await(await call('/api/import',{...csv,revision:preview.revision})).json()).imported, 1);
+    const repeated=await(await call('/api/import-preview',csv)).json();
+    assert.equal((await(await call('/api/import',{...csv,revision:repeated.revision})).json()).skipped, 1);
     await Promise.all([
       call('/api/budget', { category: 'Groceries', amount: 50000 }),
       call('/api/budget', { category: 'Dining', amount: 20000 })

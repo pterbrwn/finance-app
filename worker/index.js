@@ -53,7 +53,7 @@ async function mutate(env, update) {
     state.revision = (Number.isSafeInteger(state.revision) ? state.revision : 0) + 1;
   });
 }
-function checkRevision(state,input) { if (input.revision !== undefined && input.revision !== state.revision) throw apiError('This data changed in another tab. Reload it and try again.', 409); }
+function checkRevision(state,input) { const revision=Number.isSafeInteger(state.revision)?state.revision:0;if (input.revision !== undefined && input.revision !== revision) throw apiError('This data changed in another tab. Reload it and try again.', 409); }
 async function body(request) {
   const text = await request.text();
   if (text.length > 2_000_000) throw apiError('This upload is too large.', 413);
@@ -81,37 +81,70 @@ async function tokenKey(env) {
   return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt']);
 }
 const base64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes)));
-export function parseCSV(text, allowedCategories = CATEGORIES) {
-  const rows = []; let row = [], value = '', quoted = false;
-  text = text.replace(/^\uFEFF/, '');
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '"') { if (quoted && text[i + 1] === '"') { value += '"'; i++; } else quoted = !quoted; }
-    else if (c === ',' && !quoted) { row.push(value); value = ''; }
-    else if ((c === '\n' || c === '\r') && !quoted) { row.push(value); if (row.some(v => v.trim())) rows.push(row); row = []; value = ''; if (c === '\r' && text[i+1] === '\n') i++; }
-    else value += c;
+export function parseCSV(text, allowedCategories = CATEGORIES, options = {}) {
+  const rows=[];let row=[],value='',quoted=false,afterQuote=false,line=1,rowLine=1;
+  text=String(text).replace(/^\uFEFF/,'');
+  for(let i=0;i<text.length;i++){
+    const c=text[i];
+    if(quoted){
+      if(c==="\""&&text[i+1]==='"'){value+='"';i++;}
+      else if(c==='"'){quoted=false;afterQuote=true;}
+      else{value+=c;if(c==='\n')line++;}
+    }else if(c==='"'){
+      if(value!==''||afterQuote)throw apiError('Unexpected quote at CSV row '+rowLine+'.');quoted=true;
+    }else if(c===','){
+      row.push(value);value='';afterQuote=false;
+    }else if(c==='\n'||c==='\r'){
+      row.push(value);if(row.some(v=>v.trim()))rows.push({values:row,line:rowLine});row=[];value='';afterQuote=false;if(c==='\r'&&text[i+1]==='\n')i++;line++;rowLine=line;
+    }else if(afterQuote){if(!/\s/.test(c))throw apiError('Unexpected text after a quoted CSV field at row '+rowLine+'.');}
+    else value+=c;
   }
-  if (quoted) throw apiError('A quoted CSV field is not closed.');
-  row.push(value); if (row.some(v => v.trim())) rows.push(row);
-  if (rows.length < 2) throw apiError('Add a header row and at least one transaction.');
-  const header = rows.shift().map(v => v.trim().toLowerCase());
-  for (const name of ['date','merchant','amount']) if (!header.includes(name)) throw apiError('Required CSV columns: Date, Merchant, Amount.');
-  if (new Set(header).size !== header.length) throw apiError('CSV column names must be unique.');
-  if (rows.length > 5000) throw apiError('Import up to 5,000 transactions at a time.');
-  return rows.map((values, index) => {
-    const get = key => (values[header.indexOf(key)] || '').trim();
-    const date = get('date'), merchant = get('merchant'), amount = get('amount'), category = get('category') || 'Other';
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date+'T12:00:00Z').toISOString().slice(0,10) !== date) throw apiError('Invalid YYYY-MM-DD date at CSV row '+(index+2)+'.');
-    if (!merchant || merchant.length > 300) throw apiError('Invalid merchant at CSV row '+(index+2)+'.');
-    if (!/^-?\d{1,9}(\.\d{1,2})?$/.test(amount)) throw apiError('Use a plain amount with up to two decimal places at CSV row '+(index+2)+'.');
-    if (!allowedCategories.includes(category)) throw apiError('Unknown category at CSV row '+(index+2)+'. Create the budget bucket first or use Other.');
-    if (get('currency') && get('currency') !== 'USD') throw apiError('CSV import currently supports USD only.');
-    const status = get('status').toLowerCase();
-    if (status && !['pending','posted'].includes(status)) throw apiError('Use Posted or Pending status at CSV row '+(index+2)+'.');
-    return { date, merchant, amount: Math.round(Number(amount)*100), category, pending: status === 'pending', currency: 'USD' };
+  if(quoted)throw apiError('A quoted CSV field is not closed.');
+  row.push(value);if(row.some(v=>v.trim()))rows.push({values:row,line:rowLine});
+  if(rows.length<2)throw apiError('Add a header row and at least one transaction.');
+  const header=rows.shift().values.map(v=>v.trim());
+  if(new Set(header.map(v=>v.normalize('NFKC').toLocaleLowerCase('en-US'))).size!==header.length)throw apiError('CSV column names must be unique.');
+  if(rows.length>5000)throw apiError('Import up to 5,000 transactions at a time.');
+  const names=Object.fromEntries(header.map(h=>[h.normalize('NFKC').trim().toLocaleLowerCase('en-US'),h]));
+  const mapping={date:names.date,merchant:names.merchant||names.description,amount:names.amount,category:names.category,currency:names.currency,status:names.status,...(options.columnMapping||{})};
+  for(const field of ['date','merchant','amount'])if(!mapping[field]||!header.includes(mapping[field]))throw apiError('Select a CSV column for '+field+'.');
+  for(const field of ['category','currency','status'])if(mapping[field]&&!header.includes(mapping[field]))throw apiError('Select a valid CSV column for '+field+'.');
+  if(new Set([mapping.date,mapping.merchant,mapping.amount]).size!==3)throw apiError('Date, merchant, and amount need separate CSV columns.');
+  const dateFormat=options.dateFormat||'YYYY-MM-DD',amountMode=options.amountMode||'positive-spending',categoryMapping=options.categoryMapping||{};
+  if(!['YYYY-MM-DD','MM/DD/YYYY','DD/MM/YYYY'].includes(dateFormat))throw apiError('Choose a supported date format.');
+  if(!['positive-spending','negative-spending'].includes(amountMode))throw apiError('Choose a supported amount sign convention.');
+  return rows.map(({values,line:rowNumber})=>{
+    if(values.length!==header.length)throw apiError('CSV row '+rowNumber+' has '+values.length+' fields; expected '+header.length+'.');
+    const get=key=>mapping[key]?(values[header.indexOf(mapping[key])]||'').trim():'';
+    let date=get('date');
+    if(dateFormat==='MM/DD/YYYY'&&/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(date)){const [m,d,y]=date.split('/');date=`${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;}
+    if(dateFormat==='DD/MM/YYYY'&&/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(date)){const [d,m,y]=date.split('/');date=`${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`;}
+    const merchant=get('merchant'),amount=get('amount'),sourceCategory=get('category')||'Other';
+    if(!validDateOnly(date))throw apiError('Invalid date at CSV row '+rowNumber+'.');
+    if(!merchant||merchant.length>300)throw apiError('Invalid merchant at CSV row '+rowNumber+'.');
+    if(!/^-?\d{1,9}(\.\d{1,2})?$/.test(amount))throw apiError('Use a plain amount with up to two decimal places at CSV row '+rowNumber+'.');
+    let category=sourceCategory,unknownCategory=null,storedSourceCategory=null;
+    if(!allowedCategories.includes(category)){if(categoryMapping[category]&&allowedCategories.includes(categoryMapping[category])){storedSourceCategory=category;category=categoryMapping[category];}else if(options.allowUnknownCategories){unknownCategory=category;category='Other';}else throw apiError('Unknown category at CSV row '+rowNumber+': '+category+'. Map it to an existing bucket or create that bucket first.');}
+    const currency=get('currency');if(currency&&currency!=='USD')throw apiError('CSV import currently supports USD only.');
+    const status=get('status').toLowerCase();if(status&&!['pending','posted'].includes(status))throw apiError('Use Posted or Pending status at CSV row '+rowNumber+'.');
+    const centsAmount=Math.round(Number(amount)*100)*(amountMode==='negative-spending'?-1:1);
+    return{date,merchant,amount:centsAmount,category,pending:status==='pending',currency:'USD',...(unknownCategory?{unknownCategory}:{}),...(storedSourceCategory?{sourceCategory:storedSourceCategory}:{}),sourceRow:rowNumber};
   });
 }
 async function hash(text) { return [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))].map(b => b.toString(16).padStart(2,'0')).join(''); }
+function transactionFingerprint(row){return [row.date,String(row.merchant||'').normalize('NFKC').trim().replace(/\s+/g,' ').toLocaleLowerCase('en-US'),row.amount,row.currency||'USD'].join('|');}
+async function prepareCsvImport(input,state){
+  if(typeof input.csv!=='string'||input.csv.length>1_000_000||typeof input.account!=='string'||!input.account.trim()||input.account.trim().length>100)throw apiError('Choose a CSV under 1 MB and enter an account name.');
+  const name=input.account.trim(),accountId='csv:'+await hash(name.normalize('NFKC').toLocaleLowerCase('en-US')),fileId=await hash(accountId+'\n'+input.csv);
+  const options={columnMapping:input.columnMapping||{},dateFormat:input.dateFormat||'YYYY-MM-DD',amountMode:input.amountMode||'positive-spending',categoryMapping:input.categoryMapping||{},allowUnknownCategories:true};
+  const rows=parseCSV(input.csv,categories(state),options),unknownCategories=[...new Set(rows.map(row=>row.unknownCategory).filter(Boolean))];
+  const existingBatch=(state.importBatches||[]).find(batch=>batch.id===fileId);
+  const fingerprints=new Map();for(const transaction of state.transactions){const key=transactionFingerprint(transaction);if(!fingerprints.has(key))fingerprints.set(key,[]);fingerprints.get(key).push(transaction);}
+  const overlaps=existingBatch?[]:rows.flatMap((row,index)=>{const candidates=fingerprints.get(transactionFingerprint(row))||[];return candidates.length?[{row:index+1,date:row.date,merchant:row.merchant,amount:row.amount,existingIds:candidates.slice(0,3).map(t=>t.id)}]:[];});
+  const firstRecord=input.csv.replace(/^\uFEFF/,'').split(/\r?\n/,1)[0],headers=[...firstRecord.matchAll(/(?:^|,)(?:"((?:[^"]|"")*)"|([^,]*))/g)].map(match=>(match[1]??match[2]??'').replaceAll('""','"').trim()).filter((_,index)=>index===0||true);
+  return{name,accountId,fileId,rows,unknownCategories,existingBatch,overlaps,revision:Number.isSafeInteger(state.revision)?state.revision:0,headers};
+}
+
 async function encryptToken(env, token) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   return { iv: base64(iv), data: base64(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await tokenKey(env), new TextEncoder().encode(token))) };
@@ -216,6 +249,12 @@ export default {
       if (['/api/link-token', '/api/exchange-token', '/api/sync', '/api/scheduled-sync', '/api/sync-status', '/api/disconnect', '/api/delete-history'].includes(path) && !ready(env)) return response({ error: 'Bank connections are disabled. Import CSV files for local-only operation.' }, 503);
       if (path === '/api/state' && request.method === 'GET') return response(await publicState(state, env));
       if(path==='/api/sync-status'&&request.method==='GET')return response({job:await syncStatus(env)});
+      if(path==='/api/transactions'&&request.method==='GET'){
+        const query=url.searchParams,page=Number(query.get('page')||1),limit=Math.min(100,Math.max(1,Number(query.get('limit')||50))),search=(query.get('search')||'').slice(0,120).toLocaleLowerCase('en-US'),category=query.get('category')||'',accountId=query.get('account')||'',from=query.get('from')||'',to=query.get('to')||'',review=query.get('review')==='true';
+        if(!Number.isSafeInteger(page)||page<1||!Number.isSafeInteger(limit)||from&&!validDateOnly(from)||to&&!validDateOnly(to))throw apiError('Choose a valid transaction page and date range.');
+        const matches=state.transactions.filter(t=>(!search||String(t.merchant||'').toLocaleLowerCase('en-US').includes(search))&&(!category||(t.overrideCategoryId===category||(!t.overrideCategoryId&&(t.override||t.category)===category)||t.override===category||t.category===category))&&(!accountId||t.accountId===accountId)&&(!from||t.date>=from)&&(!to||t.date<=to)&&(!review||t.review===true||t.confidence!==undefined&&t.confidence<0.5||(t.override||t.category)==='Other')).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
+        return response({page,limit,total:matches.length,transactions:matches.slice((page-1)*limit,page*limit),revision:state.revision});
+      }
       if (path === '/api/link-token' && request.method === 'POST') {
         const input = await body(request);
         const params = { user: { client_user_id: user }, client_name: 'Ledger Personal Finance', language: 'en', country_codes: ['US'], ...(env.PLAID_REDIRECT_URI ? { redirect_uri: env.PLAID_REDIRECT_URI } : {}) };
@@ -261,19 +300,44 @@ export default {
         const saved = await mutate(env, s => { checkRevision(s,input); const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); const live = categoryCatalog(s).find(c => c.id === category.id && !c.archivedAt); if (!live) throw apiError('That category is no longer available.', 409); t.override = live.name; t.overrideCategoryId = live.id; });
         return response({ ok: true, revision: saved.revision });
       }
-      if (path === '/api/import' && request.method === 'POST') {
-        const input = await body(request);
-        if (typeof input.csv !== 'string' || input.csv.length > 1_000_000 || typeof input.account !== 'string' || !input.account.trim() || input.account.trim().length > 100) throw apiError('Choose a CSV under 1 MB and enter an account name.');
-        const transactions = parseCSV(input.csv, categories(state)), name = input.account.trim();
-        const accountId = 'csv:' + await hash(name.toLowerCase()), fileId = await hash(accountId+'\n'+input.csv);
-        let imported = 0, skipped = 0;
-        await mutate(env, s => {
-          imported = 0; skipped = 0; s.owner = user;
-          if (!s.accounts.some(a => a.id === accountId)) s.accounts.push({ id: accountId, itemId: null, name, mask: null, type: 'manual', subtype: 'CSV import', balance: null, currency: 'USD' });
-          const ids = new Set(s.transactions.map(t => t.id));
-          transactions.forEach((t,index) => { const id = 'csv:'+fileId+':'+index; if (ids.has(id)) skipped++; else { s.transactions.push({...t,id,accountId,itemId:null}); imported++; } });
+      if(path==='/api/category-bulk'&&request.method==='POST'){
+        const input=await body(request),ids=Array.isArray(input.ids)?[...new Set(input.ids)]:[],category=categoryCatalog(state).find(c=>c.id===input.categoryId&&!c.archivedAt);
+        if(!ids.length||ids.length>100||ids.some(id=>typeof id!=='string')||!category)throw apiError('Choose up to 100 transactions and a valid category.');
+        const id=crypto.randomUUID();const saved=await mutate(env,s=>{checkRevision(s,input);const selected=s.transactions.filter(t=>ids.includes(t.id));if(selected.length!==ids.length)throw apiError('One or more selected transactions are no longer available.',409);s.categoryEditBatches||=[];const changes=selected.map(t=>({id:t.id,override:t.override,overrideCategoryId:t.overrideCategoryId}));for(const t of selected){t.override=category.name;t.overrideCategoryId=category.id;}s.categoryEditBatches.push({id,categoryId:category.id,createdAt:new Date().toISOString(),changes});});
+        return response({ok:true,batchId:id,count:ids.length,revision:saved.revision});
+      }
+      if(path==='/api/category-bulk-undo'&&request.method==='POST'){
+        const input=await body(request),batch=state.categoryEditBatches?.find(item=>item.id===input.batchId);if(!batch)throw apiError('Bulk edit undo record not found.',404);
+        let undone=0;const saved=await mutate(env,s=>{checkRevision(s,input);const index=s.categoryEditBatches.findIndex(item=>item.id===input.batchId);if(index<0)throw apiError('Bulk edit undo record not found.',404);const [record]=s.categoryEditBatches.splice(index,1);for(const prior of record.changes){const transaction=s.transactions.find(t=>t.id===prior.id);if(!transaction||transaction.overrideCategoryId!==record.categoryId)continue;if(prior.override===undefined)delete transaction.override;else transaction.override=prior.override;if(prior.overrideCategoryId===undefined)delete transaction.overrideCategoryId;else transaction.overrideCategoryId=prior.overrideCategoryId;undone++;}});
+        return response({ok:true,revision:saved.revision,undone,skipped:batch.changes.length-undone});
+      }
+      if(path==='/api/import-preview'&&request.method==='POST'){
+        const input=await body(request),preview=await prepareCsvImport(input,state);
+        return response({account:preview.name,revision:preview.revision,headers:preview.headers,rows:preview.rows.length,alreadyImported:!!preview.existingBatch,unknownCategories:preview.unknownCategories,overlapCount:preview.overlaps.length,overlaps:preview.overlaps.slice(0,20),sample:preview.rows.slice(0,10).map(({date,merchant,amount,category,unknownCategory})=>({date,merchant,amount,category,unknownCategory:unknownCategory||null}))});
+      }
+      if(path==='/api/import'&&request.method==='POST'){
+        const input=await body(request),preview=await prepareCsvImport(input,state);
+        if(!Number.isSafeInteger(input.revision))throw apiError('Reload the import preview before committing.',409);
+        checkRevision(state,input);
+        if(preview.existingBatch)return response({imported:0,skipped:preview.rows.length,batchId:preview.fileId,alreadyImported:true,revision:state.revision});
+        if(preview.unknownCategories.length)throw apiError('Map unknown categories to an existing bucket or create that bucket before importing.');
+        if(preview.overlaps.length&&input.confirmOverlaps!==true)throw apiError('Review matching transactions and explicitly confirm whether to keep these rows.',409);
+        let imported=0,skipped=0;
+        const saved=await mutate(env,s=>{
+          checkRevision(s,input);s.owner=user;s.importBatches||=[];
+          if(s.importBatches.some(batch=>batch.id===preview.fileId)){skipped=preview.rows.length;return;}
+          if(!s.accounts.some(a=>a.id===preview.accountId))s.accounts.push({id:preview.accountId,itemId:null,name:preview.name,mask:null,type:'manual',subtype:'CSV import',balance:null,currency:'USD',source:'csv'});
+          const ids=new Set(s.transactions.map(t=>t.id)),transactionIds=[];
+          preview.rows.forEach((row,index)=>{const id='csv:'+preview.fileId+':'+index;if(ids.has(id)){skipped++;return;}const {unknownCategory,sourceRow,...transaction}=row;s.transactions.push({...transaction,...(sourceRow?{sourceRow}:{}),id,accountId:preview.accountId,itemId:null,source:'csv',importBatchId:preview.fileId});transactionIds.push(id);imported++;});
+          s.importBatches.push({id:preview.fileId,accountId:preview.accountId,createdAt:new Date().toISOString(),transactionIds,imported,skipped});
         });
-        return response({ imported, skipped, month: transactions.map(t => t.date.slice(0,7)).sort().at(-1) });
+        return response({imported,skipped,batchId:preview.fileId,revision:saved.revision,month:preview.rows.map(t=>t.date.slice(0,7)).sort().at(-1)});
+      }
+      if(path==='/api/import-undo'&&request.method==='POST'){
+        const input=await body(request),batch=state.importBatches?.find(value=>value.id===input.batchId);
+        if(!batch)throw apiError('Import batch not found.',404);
+        const saved=await mutate(env,s=>{checkRevision(s,input);const index=s.importBatches.findIndex(value=>value.id===input.batchId);if(index<0)throw apiError('Import batch not found.',404);const [removed]=s.importBatches.splice(index,1),ids=new Set(removed.transactionIds);s.transactions=s.transactions.filter(t=>!ids.has(t.id));});
+        return response({ok:true,revision:saved.revision,undone:batch.transactionIds.length});
       }
       if (path === '/api/budget' && request.method === 'POST') {
         const input = await body(request);
