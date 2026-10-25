@@ -2,15 +2,22 @@
   "name": "ledger-personal-finance",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24 <25" },
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "start": "bash scripts/start-ledger.sh",
-    "setup:local": "node scripts/setup-local.mjs",
+    "setup:local": "bash scripts/run-node.sh scripts/setup-local.mjs",
     "dev": "bash scripts/start-ledger.sh",
-    "check:local-http": "npm run build && node scripts/check-dev.mjs --http",
+    "check:local-http": "npm run build && bash scripts/run-node.sh scripts/check-dev.mjs --http",
     "build": "bash scripts/build.sh",
-    "validate": "node scripts/validate-artifact.mjs",
-    "check:source": "node scripts/check-source.mjs",
-    "check": "npm run build && npm run validate && node scripts/check-finance.mjs && node scripts/check-dev.mjs"
+    "validate": "bash scripts/run-node.sh scripts/validate-artifact.mjs",
+    "check:source": "bash scripts/run-node.sh scripts/check-source.mjs",
+    "check:sqlite": "bash scripts/run-node.sh scripts/check-sqlite.mjs",
+    "check": "npm run build && npm run validate && bash scripts/run-node.sh scripts/check-finance.mjs && bash scripts/run-node.sh scripts/check-dev.mjs && npm run check:sqlite"
+  },
+  "dependencies": {
+    "better-sqlite3": "13.0.3",
+    "decimal.js": "10.6.0"
   }
 }

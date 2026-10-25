@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createLocalBucket } from './local-storage.mjs';
 import { createStateRepository } from '../dist/server/repository.mjs';
+import { createSqliteRepositoryAt } from '../dist/server/sqlite-repository.mjs';
 
 export const configPath = resolve(process.env.LEDGER_CONFIG_FILE || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'ledger/config.json'));
 export const dataDirectory = resolve(process.env.LEDGER_LOCAL_DATA_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'ledger'));
@@ -21,11 +22,13 @@ export async function localRuntime() {
     const url = new URL(config.publicOrigin);
     if (url.protocol !== 'https:' || !url.hostname.endsWith('.ts.net') || url.origin !== config.publicOrigin || !config.tailscaleLogin) throw new Error('Tailscale access needs an exact HTTPS ts.net origin and an owner login.');
   }
-  const store = await createLocalBucket(dataDirectory);
+  const repository = config.storageMode === 'sqlite'
+    ? await createSqliteRepositoryAt(join(dataDirectory, 'ledger.sqlite'))
+    : createStateRepository(await createLocalBucket(dataDirectory));
   return {
     publicOrigin: config.publicOrigin,
     tailscaleLogin: config.tailscaleLogin,
-    REPOSITORY: createStateRepository(store),
+    REPOSITORY: repository,
     LOCAL_ONLY: !enabled,
     PLAID_ENV: enabled ? config.plaidEnv : undefined,
     PLAID_CLIENT_ID: enabled ? config.plaidClientId : undefined,

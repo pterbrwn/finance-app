@@ -4,7 +4,7 @@ A personal finance dashboard hosted on a Jetson. Source code lives at https://gi
 
 ## Privacy and access
 
-- Financial records are stored on the Jetson in `~/.local/state/ledger/state.json`, outside the repository. Its directory has permissions `700` and the file has permissions `600`.
+- Financial records are stored on the Jetson under `~/.local/state/ledger/`, outside the repository. The current service still uses `state.json`; the SQLite adapter and explicit importer are available for the staged migration. Directories use permissions `700` and private files use `600`.
 - Credentials and the bank token encryption key live in `~/.config/ledger/config.json` with permissions `600`. Never paste them into chat, a GitHub issue, or source code.
 - The Jetson service listens only on `127.0.0.1:3001` (the development default is port 3000). Tailscale Serve provides a private HTTPS address for remote access. The configured Tailscale owner is required; other tailnet identities and anonymous requests are rejected.
 - Remote access requires Tailscale on the client. Do not enable Tailscale Funnel, public port forwarding, or public hosting. Tailscale HTTPS certificate names appear in public certificate transparency logs; financial content remains private.
@@ -14,7 +14,7 @@ A personal finance dashboard hosted on a Jetson. Source code lives at https://gi
 
 ## Run locally
 
-Requires the pinned Node.js 24.22.1 ARM64 runtime and Bash. There are no npm dependencies to install. Install the app-specific runtime once with `scripts/install-node-runtime.sh`; it does not replace the system Node installation.
+Requires the pinned Node.js 24.22.1 runtime and Bash. Install the app-specific runtime once with `scripts/install-node-runtime.sh`; it does not replace the system Node installation. The pinned SQLite and decimal dependencies are installed into each immutable release from the lockfile.
 
 ```sh
 npm run setup:local
@@ -49,6 +49,10 @@ systemctl --user restart ledger.service
 Use `systemctl --user status ledger.service` and `journalctl --user -u ledger.service` to inspect it. To keep user services running after SSH logout and at boot, enable lingering for your user with `loginctl enable-linger "$USER"` if permitted by the host.
 
 All server start paths use the same non-blocking `flock` under the private data directory, so a second process cannot write the JSON state concurrently. Financial state is written atomically and updates are serialized within the process as well. The user timer talks to the running service and never starts another writer. Check `/api/health` for the code/schema version and safe readiness status. Back up the private state and matching configuration/key locally before upgrades; backups must stay outside Git. To roll code back, activate a previously prepared release and restart the service; database/schema rollback also requires a compatible backup and migration plan.
+
+### Staged SQLite migration
+
+The initial SQLite schema and repository use WAL, foreign keys, bounded write transactions, and the SQLite online backup API. `scripts/import-legacy-json.mjs SOURCE_JSON [NEW_DATABASE] [PRIVATE_CONFIG]` performs an explicit import, checks encrypted tokens locally with the existing key, records a source checksum, and reports counts only. Items without saved environment metadata remain unspecified. A repeated import of the same source is idempotent. `scripts/sqlite-backup.mjs DATABASE [BACKUP_FILE]` and `scripts/sqlite-restore.mjs BACKUP_FILE NEW_DATABASE_PATH` verify integrity and use private permissions. The running service continues to use JSON until the migration's production verification and rollback gates are completed.
 
 ## Connect banks
 

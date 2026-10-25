@@ -11,9 +11,13 @@ if (!buildId) {
 if (!/^[A-Za-z0-9._-]{1,80}$/.test(buildId)) throw new Error('LEDGER_BUILD_ID must be a short safe identifier.');
 await rm(resolve(root,'dist'),{recursive:true,force:true});
 await mkdir(resolve(root,'dist/server'),{recursive:true});
+await mkdir(resolve(root,'dist/server/migrations'),{recursive:true});
 await mkdir(resolve(root,'dist/shared'),{recursive:true});
 await copyFile(resolve(root,'worker/index.js'),resolve(root,'dist/server/index.js'));
 await copyFile(resolve(root,'server/repository.mjs'),resolve(root,'dist/server/repository.mjs'));
+for (const file of ['sqlite-repository.mjs','migrations/001-initial.sql']) {
+  await copyFile(resolve(root,'server',file),resolve(root,'dist/server',file));
+}
 for (const file of ['categories.mjs','money.mjs','investments.mjs','reporting.mjs','reconciliation.mjs']) {
   await copyFile(resolve(root,'shared',file),resolve(root,'dist/shared',file));
 }

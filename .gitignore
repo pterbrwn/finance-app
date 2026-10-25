@@ -20,6 +20,7 @@ exports/
 *.db
 *.db-*
 *.sqlite*
+*.sqlite3*
 *.log
 *.pem
 *.key
