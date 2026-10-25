@@ -418,11 +418,11 @@ Code-only log. No production records, account names, credentials, private origin
 
 ## R03 — Filter transactions by their effective category
 
-**Status:** Implemented; repository and SQLite regressions passed in a disposable source copy. Browser regression added for the R05 full browser run.
+**Status:** Implemented; repository, SQLite, and browser regressions passed in disposable source copies.
 
 - A shared matcher now resolves the effective category name and ID: a nonempty override replaces both source fields, while an empty or absent override uses the source category. SQLite retains SQL filtering, counts, and pagination.
 - Synthetic fixtures cover unchanged source categories, ID-backed and legacy label-only overrides, empty overrides, renamed custom identity, composed search/account/date filters, and paginated totals. Finance checks also exercise JSON repository and worker fallback behavior.
-- Pinned Node 24.22.1 finance and SQLite checks passed after building in a disposable source copy. A browser regression verifies old/new category filtering and scoped downloaded CSV contents; it will run with the full browser suite in R05.
+- Pinned Node 24.22.1 finance and SQLite checks passed after building in a disposable source copy. The browser acceptance verifies old/new category filtering and checks scoped downloaded CSV contents against both an overridden row and an unchanged source-category row.
 - No schema, service, preview, owner data, timer, or root `dist` changed.
 
 **Next:** R04, start a new category's initial budget template in the current reporting month.
