@@ -104,7 +104,7 @@ Code-only log. No production records, account names, credentials, private origin
 
 ## T07 — Monthly budget semantics
 
-**Status:** Implementation complete. Commit recorded below after verification.
+**Status:** Complete. Commit: `ee414ce`.
 
 - Added shared month validation and budget resolution. A month override wins (including explicit `null` no-limit and `0`), otherwise the most recent recurring template effective on or before the selected month applies.
 - Legacy monthly limits become templates effective from the current `America/Chicago` month. Earlier history is marked unavailable; no snapshots are invented.
