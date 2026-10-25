@@ -277,3 +277,16 @@ Code-only log. No production records, account names, credentials, private origin
 - `npm run check` passed under pinned Node 24.22.1 in a disposable source copy. The first run exposed only an existing test assertion that counted an additional archived fixture; it now checks active scenarios. Finance/client, storage, preview HTTP, and SQLite backup/restore/import checks pass. The checkout `dist` and running service were not changed.
 
 **Next:** C03, require explicit scenario costs and preserve historical quote versions.
+
+
+## C03 — Explicit scenario costs and historical quote review
+
+**Status:** Implemented and verified in a disposable source copy.
+
+- Purchase calculations require an explicit nonnegative amount for monthly housing/acquisition costs; zero is allowed when entered. PMI requires an estimate or explicit no-PMI choice. If net income is supplied, current commitments, planned savings, safety margin, and retained current housing (unless replaced) are required; gross income requires explicit other debt payments. Unknown income keeps the corresponding fit/DTI output unavailable.
+- The scenario dialog marks required amounts and says “Enter 0 if none.” Conditional household fields become required when their related income is supplied. Blank down payment stays unknown through preview validation. Financed fees are no longer defaulted from blank to zero.
+- Results identify credits/earnest that exceed modeled cash costs. Excess offsets do not create negative cash-to-close or cash-back proceeds.
+- Old saved scenarios with missing costs remain readable with an input-review warning. They cannot be compared or used for goal/budget actions. Editing and saving a complete quote preserves its prior missing input in version history; it does not rewrite that history.
+- Tests cover missing monthly tax and conditional commitments/debts, explicit zeros, excess credits/earnest, endpoint preview/save rejection, synthetic legacy quote history, guarded goal/budget actions, and incomplete UI warning/action state. `npm run check` passed under pinned Node 24.22.1 in a disposable source copy, including artifact, finance/client, JSON storage, and SQLite checks. The checkout `dist` and running service were not changed.
+
+**Next:** C04, protect local planning/review artifacts from commits.
