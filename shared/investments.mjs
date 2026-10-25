@@ -14,6 +14,7 @@ export function accountRecord(account, itemId) {
     type: account.type,
     subtype: account.subtype,
     balance: cents(account.balances.current),
+    availableBalance: cents(account.balances.available),
     currency: account.balances.iso_currency_code || account.balances.unofficial_currency_code || 'UNKNOWN'
   };
 }

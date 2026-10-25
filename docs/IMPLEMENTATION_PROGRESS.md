@@ -165,4 +165,15 @@ Code-only log. No production records, account names, credentials, private origin
 - CSV export escapes formula-like merchant/category/text values after leading whitespace/control characters without altering stored values; amount fields remain numeric.
 - Tests cover parser mappings/sign/date, malformed rows, exact-file repeats, reordered overlap review, explicit preservation of duplicates, batch-scoped undo, paged filters/stable ordering, bulk edit/undo and later-edit protection, and local HTTP import persistence. Full finance, SQLite, and HTTP suites pass in isolated Node 24 copies. Checkout `dist` remains unchanged.
 
-**Next:** T12, goals and funding allocation.
+## T12 — Savings goals and funding allocation
+
+**Status:** Implemented, covered, and committed as `T12` milestone source changes.
+
+- Added persistent savings goals, cash allocations, and allocation undo history. The Goals page supports create/edit/archive, priority, target date, planned monthly contribution, explicit dated cash APY assumptions, allocation, and undo.
+- Eligible funding is limited to included, unarchived USD depository cash with a fresh successful sync or manual balance date. Available balances cap current balances. Investments, retirement, HSA, credit, restricted, unknown, and stale balances cannot back new allocations; stale cash is shown as provisional.
+- The calculation apportions verified backing by goal priority, creation time, and stable ID, caps each allocation, retains allocation records when balances fall, and reports shortages without rewriting history. Goal funds do not alter net worth or spending.
+- Required monthly funding uses month-end dates strictly after the as-of date and through the target date, rounded up in cents. The projection defaults to zero return; an optional annual cash APY is explicitly stored with its assumption date and contributions are applied at month end.
+- Goal creation, allocation changes, and undo require a matching optimistic revision. Allocation capacity is revalidated against current cash and reservations inside a revision-checked mutation.
+- Tests cover restricted/stale/available cash, deterministic priority apportionment, projection boundaries, revision conflicts, over-allocation, undo, CRUD/archive, and Goals page rendering. Full finance, SQLite, and isolated HTTP checks passed in a disposable source copy; checkout `dist` and running service were not changed.
+
+**Next:** T13, properties and mortgages.

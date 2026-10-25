@@ -4,7 +4,28 @@ import vm from 'node:vm';
 const { default: worker, totals, fromPlaid, categoryFor, applyChanges, applySyncPages, parseCSV } = await import('../dist/server/index.js');
 const { accountRecord, investmentHoldings } = await import('../dist/shared/investments.mjs');
 const { budgetMonthKey, resolveBudget } = await import('../dist/shared/budgets.mjs');
+const { eligibleCashAccounts, goalProjection, summarizeGoals } = await import('../dist/shared/goals.mjs');
 globalThis.crypto ||= webcrypto;
+
+const goalAccounts=[
+  {id:'cash',name:'Checking',type:'depository',balance:10000,availableBalance:8000,currency:'USD',itemId:'bank',includeInReporting:true},
+  {id:'retirement',type:'retirement',balance:50000,currency:'USD',itemId:'bank'},
+  {id:'brokerage',type:'investment',balance:50000,currency:'USD',itemId:'bank'},
+  {id:'credit',type:'credit',balance:2000,currency:'USD',itemId:'bank'},
+  {id:'stale',type:'depository',balance:3000,currency:'USD',itemId:'old'},
+  {id:'cad',type:'depository',balance:3000,currency:'CAD',itemId:'bank'}
+];
+const cashEligibility=eligibleCashAccounts(goalAccounts,[{id:'bank',lastSuccess:'2026-10-25T10:00:00.000Z'},{id:'old',lastSuccess:'2026-10-20T10:00:00.000Z'}],new Date('2026-10-25T12:00:00.000Z'));
+assert.deepEqual(cashEligibility.filter(account=>account.eligible).map(account=>[account.accountId,account.balance]),[['cash',8000]],'available USD depository cash is capped and restrictions are excluded');
+assert.equal(cashEligibility.find(account=>account.accountId==='stale').provisional,true);
+const goalRows=[{id:'g1',target:10000,targetDate:'2026-12-31',priority:1,createdAt:'2026-01-01'},{id:'g2',target:10000,targetDate:'2026-12-31',priority:2,createdAt:'2026-01-02'}];
+const allocations=[{id:'a1',goalId:'g1',accountId:'cash',amount:7000},{id:'a2',goalId:'g2',accountId:'cash',amount:7000}];
+const goalsSummary=summarizeGoals(goalRows,allocations,goalAccounts,[{id:'bank',lastSuccess:'2026-10-25T10:00:00.000Z'},{id:'old',lastSuccess:'2026-10-20T10:00:00.000Z'}],new Date('2026-10-25T12:00:00.000Z'));
+assert.equal(goalsSummary.goals[0].backed,7000);assert.equal(goalsSummary.goals[0].funded,7000);assert.equal(goalsSummary.goals[0].shortfall,3000);assert.equal(goalsSummary.goals[1].backed,1000);assert.equal(goalsSummary.goals[1].accountShortfall,6000);
+assert.equal(goalsSummary.unallocatedTotal,0);assert.equal(allocations[0].active,undefined,'summaries do not mutate allocation history');
+assert.equal(goalProjection({target:10000,funded:0,targetDate:'2026-10-25',asOf:'2026-10-25'}).requiredMonthly,null,'overdue goals have no invalid contribution division');
+assert.equal(goalProjection({target:10000,funded:5000,targetDate:'2027-01-31',asOf:'2026-10-25'}).contributionDates,3,'contributions are scheduled at future month ends');
+assert.equal(goalProjection({target:10000,funded:5000,targetDate:'2027-01-31',asOf:'2026-10-25'}).projectedAtTarget,5000,'zero return and zero contribution are the default');
 
 assert.deepEqual(resolveBudget([{categoryId:'food',amount:10000,effectiveFrom:'2026-01'}],{},'food','2026-03'),{amount:10000,source:'template',effectiveFrom:'2026-01',month:'2026-03',categoryId:'food'});
 assert.equal(resolveBudget([{categoryId:'food',amount:10000,effectiveFrom:'2026-01'},{categoryId:'food',amount:12000,effectiveFrom:'2026-07'}],{},'food','2026-06').amount,10000);
@@ -181,6 +202,20 @@ try {
   assert.equal(publicData.accounts.find(a=>a.id===manualOne.id).balance,null,'unknown manual balances remain unavailable');
   assert.equal((await call('manual-account',{id:manualTwo.id,action:'archive',revision:publicData.revision})).status,200);
   assert.ok((await (await call('state')).json()).accounts.find(a=>a.id===manualTwo.id).archivedAt);
+  publicData=await(await call('state')).json();
+  const freshCash=(await call('manual-account',{name:'Goal Cash',type:'depository',balance:123456,currency:'USD',asOf:new Date().toISOString().slice(0,10),revision:publicData.revision}));assert.equal(freshCash.status,200);
+  const cashAccount=(await freshCash.json()).account;publicData=await(await call('state')).json();
+  const missingGoalRevision=await call('goal',{name:'No revision',target:10000,targetDate:'2027-12-31'});assert.equal(missingGoalRevision.status,409,'goal writes require an optimistic revision');
+  const createdGoal=await call('goal',{name:'Emergency fund',target:200000,targetDate:'2027-12-31',priority:1,monthlyContribution:10000,revision:publicData.revision});assert.equal(createdGoal.status,200);
+  const goal=(await createdGoal.json()).goal;publicData=await(await call('state')).json();
+  const staleAllocation=await call('goal-allocations',{goalId:goal.id,allocations:[],revision:publicData.revision-1});assert.equal(staleAllocation.status,409,'stale allocation edits are rejected');
+  const allocated=await call('goal-allocations',{goalId:goal.id,allocations:[{accountId:cashAccount.id,amount:100000}],revision:publicData.revision});assert.equal(allocated.status,200);
+  const allocationResult=await allocated.json();assert.equal(allocationResult.summary.backed,100000);publicData=await(await call('state')).json();
+  const secondGoal=(await(await call('goal',{name:'Travel',target:50000,targetDate:'2027-12-31',priority:2,revision:publicData.revision})).json()).goal;publicData=await(await call('state')).json();
+  const overspend=await call('goal-allocations',{goalId:secondGoal.id,allocations:[{accountId:cashAccount.id,amount:30000}],revision:publicData.revision});assert.equal(overspend.status,409,'cash already reserved by another goal cannot be allocated twice');
+  const undone=await call('goal-allocation-undo',{batchId:allocationResult.batchId,revision:publicData.revision});assert.equal(undone.status,200);
+  publicData=await(await call('state')).json();const reallocated=await call('goal-allocations',{goalId:goal.id,allocations:[{accountId:cashAccount.id,amount:100000}],revision:publicData.revision});assert.equal(reallocated.status,200);
+  publicData=await(await call('state')).json();assert.equal((await call('goal',{action:'archive',id:goal.id,revision:publicData.revision})).status,200);
   const csv={account:'Manual account',csv:'Date,Merchant,Amount,Category\n2026-10-01,Meijer,22.35,Groceries'};
   const previewResponse=await call('import-preview',csv);assert.equal(previewResponse.status,200);const csvPreview=await previewResponse.json();assert.equal(csvPreview.rows,1);assert.deepEqual(csvPreview.headers,['Date','Merchant','Amount','Category']);
   const imported=await call('import',{...csv,revision:csvPreview.revision});assert.equal(imported.status,200);const importResult=await imported.json();assert.equal(importResult.imported,1);assert.ok(importResult.batchId);
@@ -284,6 +319,7 @@ const manualHtml=await clientPage('https://ledger.test/',{...pageBase,accounts:[
 assert.ok(manualHtml.includes('Your records are ready'));
 assert.ok(manualHtml.includes('Manual Savings'));
 assert.ok(manualHtml.includes('$1,234.56'));
+const goalsHtml=await clientPage('https://ledger.test/?page=goals',{...pageBase,goalSummary:{goals:[{id:'goal-1',name:'Emergency Fund',target:100000,targetDate:'2027-12-31',priority:1,funded:25000,backed:25000,provisional:0,reserved:25000,shortfall:75000,accountShortfall:0,monthlyContribution:5000,projection:{requiredMonthly:6250,overdue:false,projectedAtTarget:85000,projectedShortfall:15000}}],accounts:[],unallocatedTotal:50000,provisionalTotal:0},goalAllocations:[]});assert.ok(goalsHtml.includes('Emergency Fund'));assert.ok(goalsHtml.includes('Allocate cash'));
 const investmentsHtml=await clientPage('https://ledger.test/?page=investments',{...pageBase,items:[{id:'investment-item',name:'Fidelity',product:'investments',error:'Update unavailable'}],accounts:[{id:'plaid:investment-item:account-1',itemId:'investment-item',name:'Brokerage',type:'investment',balance:100000,currency:'USD'}],holdings:[{itemId:'investment-item',accountId:'plaid:investment-item:account-1',name:'Index fund',ticker:'IDX',quantity:2,value:100000,currency:'USD',asOf:'2026-10-01'}]});
 assert.ok(investmentsHtml.includes('Investment account balances'));
 assert.ok(investmentsHtml.includes('Balance unavailable')===false);

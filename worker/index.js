@@ -5,10 +5,11 @@ import { cents } from '../shared/money.mjs';
 import { accountRecord, investmentHoldings, providerAccountKey } from '../shared/investments.mjs';
 import { categoryFor, fromPlaid, totals } from '../shared/reporting.mjs';
 import { applyChanges, applySyncPages } from '../shared/reconciliation.mjs';
+import { eligibleCashAccounts, summarizeGoals } from '../shared/goals.mjs';
 import { BUILD_ID, UI_ASSETS } from './generated.mjs';
 import { repositoryFor } from '../server/repository.mjs';
 
-export { categoryFor, fromPlaid, totals, applyChanges, applySyncPages, investmentHoldings };
+export { categoryFor, fromPlaid, totals, applyChanges, applySyncPages, investmentHoldings, eligibleCashAccounts, summarizeGoals };
 
 const normalizeCategory = value => String(value || '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 const validDateOnly = value => typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value+'T12:00:00Z').toISOString().slice(0,10)===value;
@@ -227,7 +228,8 @@ async function publicState(state, env) {
   const currentBudgetMonth = monthInReportingZone();
   const templates = budgetTemplates(state), overrides = state.monthlyBudgets || {};
   const budgets = Object.fromEntries(categoryCatalog(state).filter(c=>c.kind==='expense'&&!c.archivedAt).map(c=>[c.name,resolveBudget(templates,overrides,c.id,currentBudgetMonth).amount]).filter(([,amount])=>amount!==null));
-  return { ...state, budgets, budgetTemplates: templates, monthlyBudgets: overrides, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null} } };
+  const goalSummary=summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,new Date());
+  return { ...state, budgets, budgetTemplates: templates, monthlyBudgets: overrides, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], goalSummary, owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null} } };
 }
 export default {
   async fetch(request, env) {
@@ -254,6 +256,43 @@ export default {
         if(!Number.isSafeInteger(page)||page<1||!Number.isSafeInteger(limit)||from&&!validDateOnly(from)||to&&!validDateOnly(to))throw apiError('Choose a valid transaction page and date range.');
         const matches=state.transactions.filter(t=>(!search||String(t.merchant||'').toLocaleLowerCase('en-US').includes(search))&&(!category||(t.overrideCategoryId===category||(!t.overrideCategoryId&&(t.override||t.category)===category)||t.override===category||t.category===category))&&(!accountId||t.accountId===accountId)&&(!from||t.date>=from)&&(!to||t.date<=to)&&(!review||t.review===true||t.confidence!==undefined&&t.confidence<0.5||(t.override||t.category)==='Other')).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
         return response({page,limit,total:matches.length,transactions:matches.slice((page-1)*limit,page*limit),revision:state.revision});
+      }
+      if(path==='/api/goal'&&request.method==='POST'){
+        const input=await body(request),name=typeof input.name==='string'?input.name.trim():'';
+        if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before saving a goal.',409);
+        if(input.action==='archive'){
+          const saved=await mutate(env,s=>{checkRevision(s,input);const goal=s.goals?.find(value=>value.id===input.id);if(!goal)throw apiError('Savings goal not found.',404);goal.archivedAt=goal.archivedAt||new Date().toISOString();goal.updatedAt=goal.archivedAt;for(const allocation of s.goalAllocations||[])if(allocation.goalId===goal.id&&allocation.active!==false)allocation.active=false;});
+          return response({ok:true,revision:saved.revision});
+        }
+        const target=input.target,priority=input.priority??100,monthlyContribution=input.monthlyContribution??0,apyBps=input.apyBps??0;
+        if(!name||name.length>100||Object.hasOwn(Object.prototype,name)||!Number.isSafeInteger(target)||target<0||target>100_000_000_000||!validDateOnly(input.targetDate)||!Number.isSafeInteger(priority)||priority<0||priority>1000||!Number.isSafeInteger(monthlyContribution)||monthlyContribution<0||monthlyContribution>100_000_000||!Number.isSafeInteger(apyBps)||apyBps<0||apyBps>3000||apyBps>0&&!validDateOnly(input.apyAsOf))throw apiError('Enter a goal name, target, target date, priority, and valid projection assumptions.');
+        let savedGoal;
+        const saved=await mutate(env,s=>{checkRevision(s,input);s.goals||=[];const existing=input.id?s.goals.find(goal=>goal.id===input.id):null;if(input.id&&!existing)throw apiError('Savings goal not found.',404);const now=new Date().toISOString();savedGoal={...(existing||{}),id:existing?.id||crypto.randomUUID(),name,target,targetDate:input.targetDate,priority,monthlyContribution,apyBps,apyAsOf:apyBps?input.apyAsOf:null,createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};if(existing)Object.assign(existing,savedGoal);else s.goals.push(savedGoal);s.owner=user;});
+        return response({ok:true,revision:saved.revision,goal:savedGoal,summary:summarizeGoals(saved.goals||[],saved.goalAllocations||[],saved.accounts,saved.items,new Date()).goals.find(goal=>goal.id===savedGoal.id)});
+      }
+      if(path==='/api/goal-projection'&&request.method==='POST'){
+        const input=await body(request),goal=(state.goals||[]).find(value=>value.id===input.id&&!value.archivedAt);if(!goal)throw apiError('Savings goal not found.',404);
+        return response(summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,new Date()).goals.find(value=>value.id===goal.id));
+      }
+      if(path==='/api/goal-allocations'&&request.method==='POST'){
+        const input=await body(request),goal=(state.goals||[]).find(value=>value.id===input.goalId&&!value.archivedAt),requested=Array.isArray(input.allocations)?input.allocations:[];
+        if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before changing goal allocations.',409);
+        if(!goal||requested.length>50||requested.some(row=>!row||typeof row.accountId!=='string'||!Number.isSafeInteger(row.amount)||row.amount<0||row.amount>100_000_000_000)||new Set(requested.map(row=>row.accountId)).size!==requested.length)throw apiError('Choose an active goal and valid account allocation amounts.');
+        const eligible=new Map(eligibleCashAccounts(state.accounts,state.items,new Date()).filter(account=>account.eligible).map(account=>[account.accountId,account.balance]));
+        const otherReservations=new Map();for(const allocation of state.goalAllocations||[]){if(allocation.active===false||allocation.goalId===goal.id)continue;const reserved=otherReservations.get(allocation.accountId)||0;otherReservations.set(allocation.accountId,reserved+allocation.amount);}
+        for(const row of requested){if(!eligible.has(row.accountId))throw apiError('Goals can use only fresh, included USD cash accounts. Investment, retirement, HSA, credit, archived, stale, and unknown-balance accounts are not eligible.');const available=eligible.get(row.accountId)-(otherReservations.get(row.accountId)||0);if(row.amount>available)throw apiError('This allocation exceeds the account’s fresh unallocated cash balance.',409);}
+        const batchId=crypto.randomUUID(),now=new Date().toISOString();let newIds=[];
+        const saved=await mutate(env,s=>{checkRevision(s,input);const live=s.goals.find(value=>value.id===goal.id&&!value.archivedAt);if(!live)throw apiError('Savings goal is no longer active.',409);s.goalAllocations||=[];s.goalAllocationLedger||=[];const before=s.goalAllocations.filter(value=>value.goalId===goal.id&&value.active!==false).map(value=>({...value}));for(const value of s.goalAllocations)if(value.goalId===goal.id&&value.active!==false)value.active=false;const after=requested.map(row=>({id:crypto.randomUUID(),goalId:goal.id,accountId:row.accountId,amount:row.amount,createdAt:now,active:true}));s.goalAllocations.push(...after);newIds=after.map(value=>value.id);s.goalAllocationLedger.push({id:batchId,goalId:goal.id,createdAt:now,before,afterIds:newIds,undoneAt:null});});
+        return response({ok:true,batchId,revision:saved.revision,summary:summarizeGoals(saved.goals||[],saved.goalAllocations||[],saved.accounts,saved.items,new Date()).goals.find(value=>value.id===goal.id)});
+      }
+      if(path==='/api/goal-allocation-undo'&&request.method==='POST'){
+        const input=await body(request),batch=state.goalAllocationLedger?.find(value=>value.id===input.batchId&&!value.undoneAt);
+        if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before undoing goal allocations.',409);if(!batch)throw apiError('Goal allocation undo record not found.',404);
+        const current=(state.goalAllocations||[]).filter(value=>value.goalId===batch.goalId&&value.active!==false).map(value=>value.id).sort(),expected=[...batch.afterIds].sort();if(JSON.stringify(current)!==JSON.stringify(expected))throw apiError('This goal’s allocations changed after that edit. Review the current allocations before changing them.',409);
+        const eligible=new Map(eligibleCashAccounts(state.accounts,state.items,new Date()).filter(account=>account.eligible).map(account=>[account.accountId,account.balance])),other=new Map();for(const allocation of state.goalAllocations||[])if(allocation.active!==false&&allocation.goalId!==batch.goalId)other.set(allocation.accountId,(other.get(allocation.accountId)||0)+allocation.amount);
+        for(const allocation of batch.before){if(!eligible.has(allocation.accountId)||allocation.amount>eligible.get(allocation.accountId)-(other.get(allocation.accountId)||0))throw apiError('The previous allocation no longer fits verified cash balances. Refresh the accounts before undoing.',409);}
+        const saved=await mutate(env,s=>{checkRevision(s,input);for(const allocation of s.goalAllocations)if(batch.afterIds.includes(allocation.id))allocation.active=false;for(const prior of batch.before){const live=s.goalAllocations.find(value=>value.id===prior.id);if(live)live.active=true;else s.goalAllocations.push({...prior,active:true});}const entry=s.goalAllocationLedger.find(value=>value.id===batch.id);entry.undoneAt=new Date().toISOString();});
+        return response({ok:true,revision:saved.revision,undone:batch.afterIds.length});
       }
       if (path === '/api/link-token' && request.method === 'POST') {
         const input = await body(request);
