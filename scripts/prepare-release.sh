@@ -17,19 +17,21 @@ if [[ -e "$release_root/$release_id" ]]; then
 fi
 work_dir="$(mktemp -d "${release_root}/.prepare-${release_id}.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
-mkdir -p "$work_dir/source" "$work_dir/release/scripts" "$work_dir/release/dist"
+mkdir -p "$work_dir/source" "$work_dir/release/scripts" "$work_dir/release/dist" "$work_dir/release/deploy"
 git -C "$repo_root" archive --format=tar "$release_id" | tar -xf - -C "$work_dir/source"
 (cd "$work_dir/source" && LEDGER_BUILD_ID="$release_id" "$node_bin" scripts/build.mjs)
 cp -R "$work_dir/source/dist/." "$work_dir/release/dist/"
 cp "$work_dir/source/package.json" "$work_dir/release/package.json"
 cp "$work_dir/source/package-lock.json" "$work_dir/release/package-lock.json"
-for file in dev-server.mjs runtime.mjs local-storage.mjs sync.mjs import-legacy-json.mjs sqlite-backup.mjs sqlite-restore.mjs start-ledger.sh start-sync.sh; do
+for file in dev-server.mjs runtime.mjs local-storage.mjs sync.mjs import-legacy-json.mjs sqlite-backup.mjs sqlite-restore.mjs backup-runner.mjs backup-retention.mjs start-ledger.sh start-sync.sh start-backup.sh; do
   cp "$work_dir/source/scripts/$file" "$work_dir/release/scripts/$file"
 done
+cp "$work_dir/source/deploy/ledger-backup.service" "$work_dir/release/deploy/ledger-backup.service"
+cp "$work_dir/source/deploy/ledger-backup.timer" "$work_dir/release/deploy/ledger-backup.timer"
 node_dir="$(dirname "$node_bin")"
 PATH="$node_dir:$PATH" "$node_bin" "$node_dir/../lib/node_modules/npm/bin/npm-cli.js" ci --omit=dev --prefix "$work_dir/release"
 printf '{"buildId":"%s","node":"24.22.1"}\n' "$release_id" > "$work_dir/release/release.json"
 chmod 644 "$work_dir/release/release.json"
-chmod 755 "$work_dir/release/scripts/start-ledger.sh" "$work_dir/release/scripts/start-sync.sh"
+chmod 755 "$work_dir/release/scripts/start-ledger.sh" "$work_dir/release/scripts/start-sync.sh" "$work_dir/release/scripts/start-backup.sh"
 mv "$work_dir/release" "$release_root/$release_id"
 echo "Prepared immutable release $release_id at $release_root/$release_id"

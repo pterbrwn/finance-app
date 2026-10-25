@@ -314,3 +314,15 @@ Code-only log. No production records, account names, credentials, private origin
 - Synthetic tests cover current schema use, v1-to-v2 migration with pre-migration backup, future-schema refusal without journal/content changes, inconsistent histories, unversioned tables, metadata-only import refusal, and atomic rollback after an injected migration interruption. Pinned Node 24.22.1 `scripts/check-sqlite.mjs` passed in a disposable source copy. The checkout `dist`, live service, and production data were not changed.
 
 **Next:** C06, scheduled verified backups, retention, and Settings status.
+
+
+## C06 — Scheduled verified backups and recovery status
+
+**Status:** Backup implementation and synthetic acceptance are complete. The new systemd timer remains uninstalled and disabled on the live service; install it with the accepted SQLite rollout.
+
+- Added a daily SQLite online-backup runner that validates the active storage mode, uses a dedicated exclusive lock, publishes verified mode-`600` snapshots, and only prunes after the new snapshot succeeds. Retention selects the seven newest daily snapshots plus the newest snapshot from each of the four latest ISO weeks, preserving overlap once and all `pre-migration-*.sqlite` files. Unrecognized filenames are not pruned.
+- Restore acquires the same lock as scheduled backup/pruning and refuses to race an active recovery-protection job. Private status records last attempt/success and bounded failure categories without paths or raw errors. Settings reports that status and the actual named systemd timer properties; non-SQLite configuration is shown as not configured. Added an operational recovery checklist that keeps the database paired with its private encryption-key configuration.
+- Added dedicated backup service/timer templates and included their scripts/units in release preparation. The backup timer is separate from bank sync. No service, timer, data, generated output, or configuration was changed in the live checkout.
+- A controlled synthetic test covered daily/weekly selection and overlap, protected migration copies, private modes, successful restore, failed verification preserving every prior good snapshot, and backup/restore lock contention. In a disposable copy under pinned Node 24.22.1, `npm run check` and `npm run check:local-http` passed, including the new backup test and Settings assertions. The root checkout `dist` remains unchanged.
+
+**Next:** C07, measure realistic 10,000 and 100,000 transaction workloads.

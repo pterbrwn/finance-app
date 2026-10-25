@@ -1,0 +1,12 @@
+[Unit]
+Description=Create and verify Ledger local recovery backup
+After=ledger.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/.local/share/ledger/current
+ExecStart=%h/.local/share/ledger/current/scripts/start-backup.sh
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=15min

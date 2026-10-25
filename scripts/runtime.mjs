@@ -17,6 +17,25 @@ async function getSyncTimerStatus(){
     return{state:'available',enabled:['enabled','enabled-runtime','linked'].includes(enabledState),active:activeState==='active',enabledState:enabledState||'unknown',activeState:activeState||'unknown',nextRun:nextRun&&nextRun!=='n/a'?nextRun:null,checkedAt:new Date().toISOString()};
   }catch(error){return{state:'unavailable',enabled:null,active:null,reason:error.code==='ENOENT'?'systemd user manager is unavailable':'systemd timer status could not be read',checkedAt:new Date().toISOString()};}
 }
+async function getBackupStatus(storageMode){
+  let timer;
+  try{
+    const {stdout}=await execFileAsync('systemctl',['--user','show','ledger-backup.timer','--property=UnitFileState,ActiveState,NextElapseUSecRealtime','--value'],{timeout:2000,encoding:'utf8'});
+    const [enabledState,activeState,nextRun]=stdout.trim().split('\n');
+    timer={state:'available',enabled:['enabled','enabled-runtime','linked'].includes(enabledState),active:activeState==='active',nextRun:nextRun&&nextRun!=='n/a'?nextRun:null};
+  }catch(error){timer={state:'unavailable',enabled:null,active:null,reason:error.code==='ENOENT'?'systemd user manager is unavailable':'backup timer status could not be read'};}
+  if(storageMode!=='sqlite')return{state:'not_configured',lastAttempt:null,lastSuccess:null,failureCategory:null,timer,checkedAt:new Date().toISOString()};
+  let result={state:'not_run',lastAttempt:null,lastSuccess:null,failureCategory:null};
+  try{
+    const statusPath=join(dataDirectory,'backups/backup-status.json');
+    const info=await stat(statusPath);
+    if((info.mode&0o077)!==0||info.uid!==process.getuid())throw new Error('private status unavailable');
+    const status=JSON.parse(await readFile(statusPath,'utf8'));
+    const categories=new Set(['source_unavailable','permission_denied','storage_unavailable','backup_failed','retention_failed']);
+    result={state:['success','failed','not_configured'].includes(status.state)?status.state:'unavailable',lastAttempt:typeof status.lastAttempt==='string'?status.lastAttempt:null,lastSuccess:typeof status.lastSuccess==='string'?status.lastSuccess:null,failureCategory:categories.has(status.failureCategory)?status.failureCategory:null};
+  }catch(error){if(error.code!=='ENOENT')result={state:'unavailable',lastAttempt:null,lastSuccess:null,failureCategory:null};}
+  return {...result,timer,checkedAt:new Date().toISOString()};
+}
 
 export async function localRuntime() {
   let config = {};
@@ -45,6 +64,7 @@ export async function localRuntime() {
     PLAID_SECRET: enabled ? config.plaidSecret : undefined,
     TOKEN_ENCRYPTION_KEY: enabled ? config.tokenEncryptionKey : undefined,
     PLAID_REDIRECT_URI: enabled ? config.plaidRedirectUri : undefined,
-    getSyncTimerStatus
+    getSyncTimerStatus,
+    getBackupStatus: () => getBackupStatus(config.storageMode)
   };
 }

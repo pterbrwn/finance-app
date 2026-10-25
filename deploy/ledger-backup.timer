@@ -1,0 +1,10 @@
+[Unit]
+Description=Create a verified Ledger backup daily at 3 AM Central
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 America/Chicago
+Persistent=true
+Unit=ledger-backup.service
+
+[Install]
+WantedBy=timers.target
