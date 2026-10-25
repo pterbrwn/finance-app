@@ -201,3 +201,16 @@ Code-only log. No production records, account names, credentials, private origin
 - Golden tests cover the $400,000 purchase and $88,000 cash-to-close example, $2,022.62 P&I and $3,047.62 ownership outflow, credits/earnest treatment, escrow counted once, reserve/shortfall, missing income, DTI, stress cases, quote version history, explicit goal/budget creation, and UI rendering. Finance, SQLite, and isolated HTTP suites pass from a disposable source copy; checkout `dist` and running service were not changed.
 
 **Next:** T15, balance sheet overview and reports.
+
+
+## T15 — Overview, net worth, and reports
+
+**Status:** Implemented in source; automated finance, SQLite, and isolated HTTP checks pass.
+
+- Added an Overview balance sheet for cash, investments, other assets, owner property value, debt, assets, and known net worth. Linked mortgage liabilities are counted once; property debt is included with ownership shares; holdings and goals do not add duplicate assets; hypothetical scenarios never enter actual totals.
+- Coverage labels call out unknown balances, non-USD exclusions, stale account/property/mortgage values, missing property valuations, incomplete shared-debt allocation, and excluded records. Included and excluded account/property rows are available for drilldown. Manual and stale sources remain identified.
+- Added separate goal progress and recorded housing payment components, clearly labeled as plans/commitments outside net worth, plus month-over-month posted spending and effective budget views with refund treatment explained.
+- Added an explicit idempotent daily snapshot action. Snapshots are stored locally with totals and coverage; history begins when the owner records a snapshot and does not infer earlier net worth.
+- Tests cover cash/investment/property/debt reconciliation, linked mortgage and holdings double-count protection, partial coverage, snapshot idempotency, and Overview rendering. Finance, SQLite, and isolated HTTP suites pass in a disposable source copy; checkout `dist` and running service were not changed.
+
+**Next:** T16, mobile and accessibility polish.

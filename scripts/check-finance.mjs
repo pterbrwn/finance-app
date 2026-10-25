@@ -7,6 +7,7 @@ const { budgetMonthKey, resolveBudget } = await import('../dist/shared/budgets.m
 const { eligibleCashAccounts, goalProjection, summarizeGoals } = await import('../dist/shared/goals.mjs');
 const { amortizeFixedRate, compareAmortization, summarizeProperties } = await import('../dist/shared/mortgages.mjs');
 const { calculateHomeScenario, validateScenarioInput } = await import('../dist/shared/scenarios.mjs');
+const { makeBalanceSheetSnapshot, summarizeBalanceSheet } = await import('../dist/shared/net-worth.mjs');
 globalThis.crypto ||= webcrypto;
 
 const goalAccounts=[
@@ -46,6 +47,16 @@ assert.equal(purchaseCalc.remainingCashToClose,8800000,'credits and earnest redu
 const escrowedScenario=calculateHomeScenario({...goldenScenario,taxEscrowed:true,insuranceEscrowed:true,retainedReserve:1000000,netMonthlyIncome:800000,grossMonthlyIncome:1000000,currentHousingCost:100000,replaceCurrentHousing:false},{eligibleCash:9000000,allocatedGoalFunds:1000000});assert.equal(escrowedScenario.ownershipOutflow,304762,'escrow does not double count tax and insurance');assert.equal(escrowedScenario.allInAcquisitionFunding,9800000);assert.equal(escrowedScenario.fundingShortfall,0);assert.equal(escrowedScenario.cashFlowSurplus,800000-100000-304762,'keeping current housing and safety commitments remain explicit');assert.ok(escrowedScenario.dtiPercent>0);assert.equal(escrowedScenario.rateSensitivity.length,5);assert.equal(escrowedScenario.taxInsuranceSensitivity.length,2);assert.equal(escrowedScenario.incomeSensitivity.length,2);
 assert.equal(validateScenarioInput({...goldenScenario,targetDate:'2026-02-30'}),'Enter a valid target date.');
 assert.equal(calculateHomeScenario({...goldenScenario,pmiExplicitNone:false,pmiMonthly:null}).available,false,'PMI must be estimated or explicitly marked none');
+const balanceSummary=summarizeBalanceSheet([
+  {id:'cash',name:'Checking',type:'depository',balance:10000,currency:'USD',itemId:'bank'},
+  {id:'invest',name:'Brokerage',type:'investment',balance:25000,currency:'USD',itemId:'bank'},
+  {id:'card',name:'Card',type:'credit',balance:-5000,currency:'USD',itemId:'bank'},
+  {id:'mortgage-liability',name:'Mortgage',type:'liability',balance:-30000000,currency:'USD',itemId:'bank'},
+  {id:'foreign',name:'Foreign',type:'depository',balance:400,currency:'CAD',itemId:'bank'},
+  {id:'unknown',name:'Unknown',type:'depository',balance:null,currency:'USD',itemId:'bank'},
+  {id:'other-asset',name:'Other asset',type:'asset',balance:2000,currency:'USD',manual:true,balanceAsOf:'2026-10-25'}
+],[{id:'bank',lastSuccess:'2026-10-25T10:00:00.000Z'}],{properties:[{id:'home',name:'Home',ownerValue:40000000,ownerDebt:32000000,ownerEquity:8000000,valuationAsOf:'2026-10-25',debtComplete:true,mortgages:[{id:'loan',linkedAccountId:'mortgage-liability',statementBalance:32000000,balanceAsOf:'2026-10-25'}]}]},new Date('2026-10-25T12:00:00.000Z'));
+assert.equal(balanceSummary.totals.cash,10000);assert.equal(balanceSummary.totals.investments,25000,'holdings are not added to their investment account');assert.equal(balanceSummary.totals.property,40000000);assert.equal(balanceSummary.totals.liabilities,32005000,'linked mortgage liability is counted once');assert.equal(balanceSummary.totals.netWorth,8032000);assert.equal(balanceSummary.incomplete,true);assert.equal(balanceSummary.coverage.nonUsdAccounts,1);assert.equal(balanceSummary.coverage.unknownBalanceAccounts,1);
 
 assert.deepEqual(resolveBudget([{categoryId:'food',amount:10000,effectiveFrom:'2026-01'}],{},'food','2026-03'),{amount:10000,source:'template',effectiveFrom:'2026-01',month:'2026-03',categoryId:'food'});
 assert.equal(resolveBudget([{categoryId:'food',amount:10000,effectiveFrom:'2026-01'},{categoryId:'food',amount:12000,effectiveFrom:'2026-07'}],{},'food','2026-06').amount,10000);
@@ -247,7 +258,8 @@ try {
   publicData=await(await call('state')).json();const homeSummary=publicData.propertySummary.properties.find(property=>property.id===home.id);assert.equal(homeSummary.wholePropertyEquity,-1400000,'API equity includes every linked and manual lien');
   const unsupportedProjection=await(await call('mortgage-projection',{id:(await secondLien.json()).mortgage.id})).json();assert.equal(unsupportedProjection.projection.available,false,'unsupported loan types do not receive fixed-rate schedules');
   publicData=await(await call('state')).json();assert.equal((await call('property',{id:home.id,action:'archive',revision:publicData.revision})).status,200);
-  publicData=await(await call('state')).json();const previewScenario=await call('scenario-calculate',{input:goldenScenario,linkedGoalId:secondGoal.id});assert.equal(previewScenario.status,200);assert.equal((await previewScenario.json()).result.principalAndInterest,202262);
+  publicData=await(await call('state')).json();publicData=await(await call('state')).json();const firstBalanceSnapshot=await call('balance-snapshot',{revision:publicData.revision});assert.equal(firstBalanceSnapshot.status,200);assert.equal((await firstBalanceSnapshot.json()).existing,false);publicData=await(await call('state')).json();assert.equal(publicData.balanceSheetSnapshots.length,1);const repeatedBalanceSnapshot=await call('balance-snapshot',{revision:publicData.revision});assert.equal((await repeatedBalanceSnapshot.json()).existing,true);assert.equal((await(await call('state')).json()).balanceSheetSnapshots.length,1,'daily snapshots are idempotent');
+  const previewScenario=await call('scenario-calculate',{input:goldenScenario,linkedGoalId:secondGoal.id});assert.equal(previewScenario.status,200);assert.equal((await previewScenario.json()).result.principalAndInterest,202262);
   publicData=await(await call('state')).json();const savedScenario=await call('scenario',{input:goldenScenario,revision:publicData.revision});assert.equal(savedScenario.status,200);const scenario=(await savedScenario.json()).scenario;assert.equal(scenario.calculationVersion,'purchase-v1');assert.equal(scenario.version,1);
   publicData=await(await call('state')).json();const scenarioGoal=await call('scenario-goal',{scenarioId:scenario.id,revision:publicData.revision});assert.equal(scenarioGoal.status,200);const scenarioGoalId=(await scenarioGoal.json()).goalId;
   publicData=await(await call('state')).json();const revisedInput={...goldenScenario,name:'Revised synthetic purchase',downPayment:9000000};const revisedScenario=await call('scenario',{id:scenario.id,input:revisedInput,linkedGoalId:scenarioGoalId,revision:publicData.revision});assert.equal(revisedScenario.status,200);assert.equal((await revisedScenario.json()).scenario.version,2);publicData=await(await call('state')).json();assert.equal(publicData.scenarios.find(row=>row.id===scenario.id).versions.length,1,'scenario edits preserve immutable prior quote assumptions');assert.equal(publicData.goals.find(goal=>goal.id===scenarioGoalId).target,8800000,'scenario edits propose but do not silently rewrite linked goal targets');
@@ -355,6 +367,7 @@ async function clientPage(href,stateOrError){
   return get('app').innerHTML;
 }
 const pageBase={items:[],accounts:[],transactions:[],budgets:{},setup:{configured:false,localOnly:true}};
+const balanceHtml=await clientPage('https://ledger.test/',{...pageBase,balanceSheet:{asOf:'2026-10-25T12:00:00.000Z',netWorthLabel:'Known net worth · partial coverage',totals:{cash:10000,investments:25000,property:40000000,liabilities:32005000,assets:40037000,netWorth:8032000},coverage:{includedAccounts:2,accountCount:4,staleAccounts:0,nonUsdAccounts:1,unknownBalanceAccounts:1,missingPropertyValuations:0,incompletePropertyDebt:0,excludedAccounts:2},includedAccounts:[],excludedAccounts:[],properties:[]},balanceSheetSnapshots:[]});assert.ok(balanceHtml.includes('Balance sheet'));assert.ok(balanceHtml.includes('Record today’s snapshot'));assert.ok(balanceHtml.includes('Month over month'));
 const manualHtml=await clientPage('https://ledger.test/',{...pageBase,accounts:[{id:'manual-1',name:'Manual Savings',balance:123456,currency:'USD'}]});
 assert.ok(manualHtml.includes('Your records are ready'));
 assert.ok(manualHtml.includes('Manual Savings'));

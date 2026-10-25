@@ -8,10 +8,11 @@ import { applyChanges, applySyncPages } from '../shared/reconciliation.mjs';
 import { eligibleCashAccounts, summarizeGoals } from '../shared/goals.mjs';
 import { amortizeFixedRate, compareAmortization, summarizeProperties } from '../shared/mortgages.mjs';
 import { calculateHomeScenario, SCENARIO_CALCULATION_VERSION, validateScenarioInput } from '../shared/scenarios.mjs';
+import { makeBalanceSheetSnapshot, summarizeBalanceSheet } from '../shared/net-worth.mjs';
 import { BUILD_ID, UI_ASSETS } from './generated.mjs';
 import { repositoryFor } from '../server/repository.mjs';
 
-export { categoryFor, fromPlaid, totals, applyChanges, applySyncPages, investmentHoldings, eligibleCashAccounts, summarizeGoals, amortizeFixedRate, compareAmortization, summarizeProperties, calculateHomeScenario, validateScenarioInput };
+export { categoryFor, fromPlaid, totals, applyChanges, applySyncPages, investmentHoldings, eligibleCashAccounts, summarizeGoals, amortizeFixedRate, compareAmortization, summarizeProperties, calculateHomeScenario, validateScenarioInput, summarizeBalanceSheet, makeBalanceSheetSnapshot };
 
 const normalizeCategory = value => String(value || '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 const validDateOnly = value => typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value+'T12:00:00Z').toISOString().slice(0,10)===value;
@@ -37,6 +38,7 @@ const apiError = (message, status = 400) => Object.assign(new Error(message), { 
 function response(data, status = 200) { return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }); }
 function ready(env) { return !env.LOCAL_ONLY && !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET && env.TOKEN_ENCRYPTION_KEY && ['sandbox', 'production'].includes(env.PLAID_ENV)); }
 function monthInReportingZone(date = new Date()) { const parts = new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit'}).formatToParts(date); return `${parts.find(p=>p.type==='year').value}-${parts.find(p=>p.type==='month').value}`; }
+function dateInReportingZone(date = new Date()) { const parts = new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(date); return `${parts.find(p=>p.type==='year').value}-${parts.find(p=>p.type==='month').value}-${parts.find(p=>p.type==='day').value}`; }
 function budgetTemplates(state) {
   const templates = [...(Array.isArray(state.budgetTemplates) ? state.budgetTemplates : [])];
   const effectiveFrom = state.budgetHistoryUnavailableBefore || monthInReportingZone();
@@ -232,7 +234,8 @@ async function publicState(state, env) {
   const budgets = Object.fromEntries(categoryCatalog(state).filter(c=>c.kind==='expense'&&!c.archivedAt).map(c=>[c.name,resolveBudget(templates,overrides,c.id,currentBudgetMonth).amount]).filter(([,amount])=>amount!==null));
   const goalSummary=summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,new Date());
   const propertySummary=summarizeProperties(state.properties||[],state.mortgages||[],state.accounts);
-  return { ...state, budgets, budgetTemplates: templates, monthlyBudgets: overrides, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], goalSummary, propertySummary, owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null} } };
+  const balanceSheet=summarizeBalanceSheet(state.accounts,state.items,propertySummary,new Date());
+  return { ...state, budgets, budgetTemplates: templates, monthlyBudgets: overrides, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], goalSummary, propertySummary, balanceSheet, owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null} } };
 }
 export default {
   async fetch(request, env) {
@@ -259,6 +262,12 @@ export default {
         if(!Number.isSafeInteger(page)||page<1||!Number.isSafeInteger(limit)||from&&!validDateOnly(from)||to&&!validDateOnly(to))throw apiError('Choose a valid transaction page and date range.');
         const matches=state.transactions.filter(t=>(!search||String(t.merchant||'').toLocaleLowerCase('en-US').includes(search))&&(!category||(t.overrideCategoryId===category||(!t.overrideCategoryId&&(t.override||t.category)===category)||t.override===category||t.category===category))&&(!accountId||t.accountId===accountId)&&(!from||t.date>=from)&&(!to||t.date<=to)&&(!review||t.review===true||t.confidence!==undefined&&t.confidence<0.5||(t.override||t.category)==='Other')).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
         return response({page,limit,total:matches.length,transactions:matches.slice((page-1)*limit,page*limit),revision:state.revision});
+      }
+      if(path==='/api/balance-snapshot'&&request.method==='POST'){
+        const input=await body(request),date=dateInReportingZone(new Date());if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before recording a balance snapshot.',409);
+        const existing=(state.balanceSheetSnapshots||[]).find(snapshot=>snapshot.date===date);if(existing)return response({ok:true,existing:true,snapshot:existing,revision:state.revision||0});
+        const summary=summarizeBalanceSheet(state.accounts,state.items,summarizeProperties(state.properties||[],state.mortgages||[],state.accounts),new Date()),snapshot=makeBalanceSheetSnapshot(summary,date);
+        const saved=await mutate(env,s=>{checkRevision(s,input);s.balanceSheetSnapshots||=[];if(!s.balanceSheetSnapshots.some(row=>row.date===date))s.balanceSheetSnapshots.push(snapshot);});return response({ok:true,existing:false,snapshot,revision:saved.revision});
       }
       if(path==='/api/scenario-calculate'&&request.method==='POST'){
         const input=await body(request),scenarioInput=input.input||{},goal=input.linkedGoalId?(state.goalSummary?.goals||summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,new Date()).goals).find(value=>value.id===input.linkedGoalId&&!value.archived):null;
