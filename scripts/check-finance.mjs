@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
 const { default: worker, totals, fromPlaid, categoryFor, applyChanges, applySyncPages, parseCSV } = await import('../dist/server/index.js');
+const { accountRecord, investmentHoldings } = await import('../dist/shared/investments.mjs');
 const { budgetMonthKey, resolveBudget } = await import('../dist/shared/budgets.mjs');
 globalThis.crypto ||= webcrypto;
 
@@ -24,6 +25,10 @@ assert.equal(categoryFor({personal_finance_category:{primary:'FOOD_AND_DRINK',de
 assert.equal(categoryFor({personal_finance_category:{primary:'RENT_AND_UTILITIES',detailed:'RENT_AND_UTILITIES_INTERNET_AND_CABLE'}}),'Utilities');
 assert.equal(categoryFor({personal_finance_category:{primary:'RENT_AND_UTILITIES',detailed:'RENT_AND_UTILITIES_RENT'}}),'Housing');
 assert.equal(fromPlaid({amount:19.99,transaction_id:'t'},'i').amount,1999);
+const providerAccount={account_id:'same-account',name:'Brokerage',type:'investment',balances:{current:1000,iso_currency_code:'USD'}};
+assert.notEqual(accountRecord(providerAccount,'item-a').id,accountRecord(providerAccount,'item-b').id,'provider account IDs are scoped to their connection');
+assert.equal(fromPlaid({amount:1,transaction_id:'scoped-tx',account_id:'same-account'},'item-a').accountId,accountRecord(providerAccount,'item-a').id);
+assert.equal(investmentHoldings({securities:[{security_id:'security-1',name:'Fund',ticker_symbol:'FND'}],holdings:[{account_id:'same-account',security_id:'security-1',quantity:2,institution_value:40,iso_currency_code:'CAD',institution_price_as_of:'2026-10-01'}]},'item-a')[0].accountId,accountRecord(providerAccount,'item-a').id);
 const pending = {id:'pending',override:'Travel',category:'Other',currency:'USD',amount:1000,pending:true};
 const state={transactions:[pending,{id:'gone',amount:1}]};
 const posted={transaction_id:'posted',pending_transaction_id:'pending',amount:12.34,date:'2026-10-01',name:'Hotel',iso_currency_code:'USD'};
@@ -59,11 +64,12 @@ const health=await (await call('health')).json();
 assert.equal(health.schemaVersion,1);
 assert.equal(typeof health.codeVersion,'string');
 assert.equal(health.configurationReady,true);
-let syncCalls=0;const seen=[];const realFetch=globalThis.fetch;
+let syncCalls=0,failInvestmentHoldings=false;const seen=[];const realFetch=globalThis.fetch;
 globalThis.fetch=async (url,options)=>{
   const input=JSON.parse(options.body);seen.push({url,input});
   if(url.endsWith('/link/token/create'))return Response.json({link_token:'temporary-link'});
-  if(url.endsWith('/item/public_token/exchange'))return Response.json({item_id:'item-1',access_token:'never-expose-bank-token'});
+  if(url.endsWith('/item/public_token/exchange'))return Response.json({item_id:input.public_token==='public-investment'?'item-2':'item-1',access_token:input.public_token==='public-investment'?'never-expose-investment-token':'never-expose-bank-token'});
+  if(url.endsWith('/investments/holdings/get')){if(failInvestmentHoldings)return new Response(JSON.stringify({error_code:'PRODUCT_NOT_READY'}),{status:400});return Response.json({accounts:[{account_id:'same-account',name:'Brokerage',mask:'8888',type:'investment',subtype:'brokerage',balances:{current:1000,iso_currency_code:'USD'}}],securities:[{security_id:'security-1',name:'Index Fund',ticker_symbol:'IDX'}],holdings:[{account_id:'same-account',security_id:'security-1',quantity:2,institution_value:500,iso_currency_code:'USD',institution_price_as_of:'2026-10-01'}]});}
   if(url.endsWith('/transactions/sync')){syncCalls++;return Response.json({added:syncCalls===1?[{...posted,pending_transaction_id:null}]:[],modified:[],removed:[],next_cursor:'cursor-'+syncCalls,has_more:false});}
   if(url.endsWith('/accounts/get'))return Response.json({accounts:[{account_id:'a',name:'Checking',mask:'1234',type:'depository',balances:{current:234.56,iso_currency_code:'USD'}}]});
   if(url.endsWith('/item/remove'))return Response.json({removed:true});
@@ -181,6 +187,22 @@ try {
   assert.equal((await call('delete-history',{itemId:'item-1'})).status,200);
   publicData=await (await call('state')).json();
   assert.equal(publicData.items.length,0);assert.equal(publicData.transactions.filter(t=>t.itemId==='item-1').length,0);assert.equal(publicData.transactions.length,1,'deleting a provider connection preserves unrelated CSV history');assert.equal(publicData.accounts.some(a=>a.itemId==='item-1'),false);
+  const transactionCallsBeforeInvestment=seen.filter(x=>x.url.endsWith('/transactions/sync')).length;
+  const investmentConnected=await call('exchange-token',{public_token:'public-investment',name:'Fidelity',product:'investments',environment:'sandbox'});
+  assert.equal(investmentConnected.status,200);
+  assert.equal(seen.filter(x=>x.url.endsWith('/transactions/sync')).length,transactionCallsBeforeInvestment,'investment connections do not use transaction spending sync');
+  publicData=await (await call('state')).json();
+  const investmentAccount=publicData.accounts.find(a=>a.itemId==='item-2');
+  assert.ok(investmentAccount);assert.equal(investmentAccount.id,accountRecord(providerAccount,'item-2').id);
+  assert.equal(publicData.holdings[0].accountId,investmentAccount.id);
+  assert.equal(publicData.holdings[0].value,50000);
+  failInvestmentHoldings=true;
+  const failedInvestmentSync=await (await call('sync',{})).json();
+  assert.equal(failedInvestmentSync.ok,false);
+  publicData=await (await call('state')).json();
+  assert.equal(publicData.holdings.length,1,'failed holdings refresh retains the prior snapshot');
+  assert.equal(publicData.items.find(i=>i.id==='item-2').lifecycle,'connected');
+  failInvestmentHoldings=false;
 } finally { globalThis.fetch=realFetch; }
 
 // Local-only mode overrides even present credentials and prevents network calls.
@@ -234,6 +256,11 @@ const manualHtml=await clientPage('https://ledger.test/',{...pageBase,accounts:[
 assert.ok(manualHtml.includes('Your records are ready'));
 assert.ok(manualHtml.includes('Manual Savings'));
 assert.ok(manualHtml.includes('$1,234.56'));
+const investmentsHtml=await clientPage('https://ledger.test/?page=investments',{...pageBase,items:[{id:'investment-item',name:'Fidelity',product:'investments',error:'Update unavailable'}],accounts:[{id:'plaid:investment-item:account-1',itemId:'investment-item',name:'Brokerage',type:'investment',balance:100000,currency:'USD'}],holdings:[{itemId:'investment-item',accountId:'plaid:investment-item:account-1',name:'Index fund',ticker:'IDX',quantity:2,value:100000,currency:'USD',asOf:'2026-10-01'}]});
+assert.ok(investmentsHtml.includes('Investment account balances'));
+assert.ok(investmentsHtml.includes('Balance unavailable')===false);
+assert.ok(investmentsHtml.includes('Saved value; update failed'));
+assert.ok(investmentsHtml.includes('Holdings'));
 const budgetOnlyHtml=await clientPage('https://ledger.test/',{...pageBase,budgets:{Housing:150000}});
 assert.ok(budgetOnlyHtml.includes('Saved monthly budgets'));
 assert.ok(budgetOnlyHtml.includes('Housing'));

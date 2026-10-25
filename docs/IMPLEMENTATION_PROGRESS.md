@@ -128,3 +128,15 @@ Code-only log. No production records, account names, credentials, private origin
 - Tests cover product selection, mismatched update product, unknown environment blocking before requests, account settings, manual ID behavior, unlink retention, history deletion scope, and connected-but-first-sync state. `npm run check` and `npm run check:local-http` passed in isolated copies under Node 24. The project checkout's generated `dist` was not changed.
 
 **Next:** T09, investment data and manual fallback integration.
+
+## T09 — Investments and manual fallback
+
+**Status:** Implementation complete for balances and holdings. Provider authorization and actual data availability remain owner/provider dependent.
+
+- Investment connections use the investments holdings endpoint and never enter transaction-spending sync. A holdings refresh replaces only that connection's snapshot inside the repository mutation; a provider failure keeps the previous snapshot and marks the connection as needing sync.
+- Provider account IDs are now scoped by connection for new records and transaction/holding references. Existing local account IDs are retained during refresh; legacy references are mapped to the existing ID to avoid silently changing local identity.
+- Added an Investments view with account balances, provider freshness/errors, holding name/ticker, quantity, value, currency, and valuation date. Holdings are shown as account details and never added again to account-level balances. Unknown and non-USD values are labeled.
+- The generic manual account form supports stable-ID investment, retirement, HSA, and other records with institution, observed balance/date, currency, notes, inclusion, edit, and archive controls. Removed the old name-hash investment route that could collide for same-named accounts.
+- Checks cover connection-scoped identity, transaction/holding account references, investment endpoint routing, failed snapshot replacement preservation, browser stale status, and available balances. Full finance, SQLite, and isolated HTTP suites pass under Node 24; checkout `dist` remains unchanged.
+
+**Next:** T10, reliable sync jobs, freshness, and local automation.

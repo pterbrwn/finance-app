@@ -2,7 +2,7 @@
 import { CATEGORIES } from '../shared/categories.mjs';
 import { budgetMonthKey, resolveBudget, validMonth } from '../shared/budgets.mjs';
 import { cents } from '../shared/money.mjs';
-import { accountRecord, investmentHoldings } from '../shared/investments.mjs';
+import { accountRecord, investmentHoldings, providerAccountKey } from '../shared/investments.mjs';
 import { categoryFor, fromPlaid, totals } from '../shared/reporting.mjs';
 import { applyChanges, applySyncPages } from '../shared/reconciliation.mjs';
 import { BUILD_ID, UI_ASSETS } from './generated.mjs';
@@ -21,8 +21,14 @@ function categoryCatalog(state) {
 }
 const categories = state => categoryCatalog(state).filter(category => !category.archivedAt).map(category => category.name);
 function replaceProviderAccounts(state,itemId,accounts){
-  const previous=new Map(state.accounts.filter(a=>a.itemId===itemId).map(a=>[a.id,a]));
-  state.accounts=state.accounts.filter(a=>a.itemId!==itemId).concat(accounts.map(raw=>{const next=accountRecord(raw,itemId),old=previous.get(next.id);return old?{...next,includeInReporting:old.includeInReporting,archivedAt:old.archivedAt}:next;}));
+  const existing=state.accounts.filter(a=>a.itemId===itemId),previous=new Map(existing.map(a=>[a.providerAccountId||a.id,a]));
+  const providerToLocal=new Map(),nextAccounts=accounts.map(raw=>{const next=accountRecord(raw,itemId),old=previous.get(raw.account_id);if(old){next.id=old.id;next.includeInReporting=old.includeInReporting;next.archivedAt=old.archivedAt;}providerToLocal.set(next.id===providerAccountKey(itemId,raw.account_id)?next.id:providerAccountKey(itemId,raw.account_id),next.id);return next;});
+  state.accounts=state.accounts.filter(a=>a.itemId!==itemId).concat(nextAccounts);
+  return providerToLocal;
+}
+function remapProviderAccountReferences(state,itemId,providerToLocal){
+  for(const transaction of state.transactions)if(transaction.itemId===itemId&&providerToLocal.has(transaction.accountId))transaction.accountId=providerToLocal.get(transaction.accountId);
+  for(const holding of state.holdings||[])if(holding.itemId===itemId&&providerToLocal.has(holding.accountId))holding.accountId=providerToLocal.get(holding.accountId);
 }
 const apiError = (message, status = 400) => Object.assign(new Error(message), { status });
 function response(data, status = 200) { return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }); }
@@ -131,7 +137,8 @@ async function syncBanks(env) {
             const liveItem = s.items.find(i => i.id === item.id);
             if (!liveItem) return;
             s.holdings = (s.holdings || []).filter(h => h.itemId !== item.id).concat(holdings);
-            replaceProviderAccounts(s,item.id,data.accounts);
+            const providerToLocal=replaceProviderAccounts(s,item.id,data.accounts);
+            remapProviderAccountReferences(s,item.id,providerToLocal);
             liveItem.lastSync = new Date().toISOString(); liveItem.error = null;
           });
           continue;
@@ -158,7 +165,8 @@ async function syncBanks(env) {
           if (!liveItem) return;
           applySyncPages(s, item.id, result.pages);
           liveItem.cursor = result.cursor; liveItem.lastSync = new Date().toISOString(); liveItem.error = null;
-          replaceProviderAccounts(s,item.id,accountData.accounts);
+          const providerToLocal=replaceProviderAccounts(s,item.id,accountData.accounts);
+          remapProviderAccountReferences(s,item.id,providerToLocal);
         });
       } catch (e) {
         failures.push({ bank: item.name, message: e.status ? e.message : 'Bank update failed. Try again later.' });
@@ -366,16 +374,6 @@ export default {
           else throw apiError('Choose archive, restore, or include.');
         });
         return response({ok:true,revision:saved.revision});
-      }
-      if (path === '/api/investment-account' && request.method === 'POST') {
-        const input = await body(request), name = typeof input.name === 'string' ? input.name.trim() : '';
-        if (!name || name.length > 100 || !Number.isSafeInteger(input.balance) || input.balance < 0 || input.balance > 1_000_000_000_000 || !['hsa', '401k', 'ira', 'brokerage', 'other'].includes(input.subtype)) throw apiError('Enter an account name, type, and a valid USD balance.');
-        const id = 'manual-investment:' + await hash(name.toLowerCase());
-        await mutate(env, s => {
-          s.owner = user;
-          s.accounts = s.accounts.filter(a => a.id !== id).concat({ id, itemId: null, name, type: 'investment', subtype: input.subtype, balance: input.balance, currency: 'USD', manual: true, updatedAt: new Date().toISOString() });
-        });
-        return response({ ok: true });
       }
       if (path === '/api/disconnect' && request.method === 'POST') {
         const input = await body(request), item = state.items.find(i => i.id === input.itemId);

@@ -1,3 +1,5 @@
+import { providerAccountKey } from './investments.mjs';
+
 export function categoryFor(transaction) {
   const primary = transaction.personal_finance_category?.primary || '';
   const detailed = transaction.personal_finance_category?.detailed || '';
@@ -22,7 +24,7 @@ export function fromPlaid(transaction, itemId) {
   return {
     id: transaction.transaction_id,
     itemId,
-    accountId: transaction.account_id,
+    accountId: providerAccountKey(itemId, transaction.account_id),
     date: transaction.date,
     merchant: transaction.merchant_name || transaction.name || 'Transaction',
     amount: Math.round(transaction.amount * 100),

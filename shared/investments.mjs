@@ -1,8 +1,13 @@
 import { cents } from './money.mjs';
 
+export function providerAccountKey(itemId, accountId) {
+  return `plaid:${encodeURIComponent(itemId)}:${encodeURIComponent(accountId)}`;
+}
+
 export function accountRecord(account, itemId) {
   return {
-    id: account.account_id,
+    id: providerAccountKey(itemId, account.account_id),
+    providerAccountId: account.account_id,
     itemId,
     name: account.name,
     mask: account.mask,
@@ -19,7 +24,7 @@ export function investmentHoldings(data, itemId) {
     const security = securities.get(holding.security_id);
     return {
       itemId,
-      accountId: holding.account_id,
+      accountId: providerAccountKey(itemId, holding.account_id),
       securityId: holding.security_id,
       name: security?.name || 'Unnamed holding',
       ticker: security?.ticker_symbol || null,
