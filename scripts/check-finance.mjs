@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
 const source = await readFile(new URL('../dist/server/index.js', import.meta.url),'utf8');
-const { default: worker, totals, fromPlaid, categoryFor, applyChanges, parseCSV } = await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+const { default: worker, totals, fromPlaid, categoryFor, applyChanges, applySyncPages, parseCSV } = await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
 globalThis.crypto ||= webcrypto;
 
 assert.deepEqual(totals([
@@ -24,6 +24,15 @@ const state={transactions:[pending,{id:'gone',amount:1}]};
 const posted={transaction_id:'posted',pending_transaction_id:'pending',amount:12.34,date:'2026-10-01',name:'Hotel',iso_currency_code:'USD'};
 applyChanges(state,'item',[posted],[],[{transaction_id:'pending'},{transaction_id:'gone'}]);
 assert.equal(state.transactions.length,1);assert.equal(state.transactions[0].override,'Travel');
+for (const pages of [
+  [{added:[],modified:[],removed:[{transaction_id:'pending'}]},{added:[posted],modified:[],removed:[]}],
+  [{added:[posted],modified:[],removed:[]},{added:[],modified:[],removed:[{transaction_id:'pending'}]}]
+]) {
+  const paged={transactions:[{...pending}]};
+  applySyncPages(paged,'item',pages);
+  assert.equal(paged.transactions.length,1);
+  assert.equal(paged.transactions[0].override,'Travel');
+}
 applyChanges(state,'item',[posted],[{...posted,amount:15}],[]);
 assert.equal(state.transactions.length,1);assert.equal(state.transactions[0].amount,1500);
 assert.equal(parseCSV('Date,Merchant,Amount,Category\r\n2026-10-01,"Store, \"\"Main\"\"",12.34,Shopping\r\n')[0].merchant,'Store, "Main"');

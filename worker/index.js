@@ -33,6 +33,12 @@ export function applyChanges(state, itemId, added, modified, removed) {
   }
   state.transactions = [...map.values()];
 }
+export function applySyncPages(state, itemId, pages) {
+  const added = pages.flatMap(page => page.added || []);
+  const modified = pages.flatMap(page => page.modified || []);
+  const removed = pages.flatMap(page => page.removed || []);
+  applyChanges(state, itemId, added, modified, removed);
+}
 const apiError = (message, status = 400) => Object.assign(new Error(message), { status });
 function response(data, status = 200) { return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }); }
 function ready(env) { return !env.LOCAL_ONLY && !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET && env.TOKEN_ENCRYPTION_KEY && ['sandbox', 'production'].includes(env.PLAID_ENV)); }
@@ -143,7 +149,7 @@ async function syncBanks(env) {
           if (s.lease?.id !== leaseId) throw apiError('Sync was superseded. Please try again.', 409);
           const liveItem = s.items.find(i => i.id === item.id);
           if (!liveItem) return;
-          for (const page of result.pages) applyChanges(s, item.id, page.added, page.modified, page.removed);
+          applySyncPages(s, item.id, result.pages);
           liveItem.cursor = result.cursor; liveItem.lastSync = new Date().toISOString(); liveItem.error = null;
           s.accounts = s.accounts.filter(a => a.itemId !== item.id).concat(accountData.accounts.map(a => ({ id: a.account_id, itemId: item.id, name: a.name, mask: a.mask, type: a.type, subtype: a.subtype, balance: a.balances.current === null ? null : Math.round(a.balances.current * 100), currency: a.balances.iso_currency_code || a.balances.unofficial_currency_code || 'UNKNOWN' })));
         });
