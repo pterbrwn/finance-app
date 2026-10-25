@@ -240,3 +240,15 @@ Code-only log. No production records, account names, credentials, private origin
 - Provider authorization and actual institution coverage remain owner/provider dependent. The daily sync timer stays off unless the owner separately authorizes and verifies live operation.
 
 **Next:** T17 owner-environment release checklist. T18 remains later expansion after the core is trusted.
+
+
+## C00 — Reconcile baseline and acceptance ledger
+
+**Status:** Baseline reconciled. Source feature work remains in the implementation checkout; no production release or storage migration was performed.
+
+- Current branch is `codex/finance-app-plan` at `08fb5d7` before this entry. The completion plan and the original plan/review documents are local untracked owner documents and remain untouched by staging.
+- Read-only service inspection confirms `ledger.service` is active from the checkout through `scripts/dev-server.mjs`, the application listener is loopback-bound, and `ledger-sync.timer` is disabled. The source has `/api/health`; the current checkout's generated `dist` does not. `/health` is not a route defined by source and a 404 there is expected. The live `/api/health` 404 is consistent with its old generated artifact and remains a release verification item; do not rebuild the service checkout in place.
+- Implementation acceptance remains open for the C01–C14 tasks in `FINANCE_APP_COMPLETION_PLAN.md`. Earlier T00–T16 notes describe shipped source features, not final production acceptance. The 5,000-row CSV parser assertion does not establish larger database/API/browser performance.
+- No private config values, service origin, financial records, or production aggregates were read into the source log. No runtime, timer, data, or generated artifact was changed.
+
+**Next:** C01, correct the savings contribution calendar and deadline labels.
