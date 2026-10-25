@@ -57,8 +57,14 @@ try{
   await writeFile(mockSystemctl,'#!/bin/sh\nexit 0\n',{mode:0o700});await chmod(mockSystemctl,0o700);
   const activation=spawnSync(join(import.meta.dirname,'activate-release.sh'),[release.buildId],{cwd:directory,encoding:'utf8',env:{...process.env,LEDGER_NODE_BIN:runtime,LEDGER_RELEASE_ROOT:releaseHub,LEDGER_CURRENT_LINK:currentLink,LEDGER_LOCAL_DATA_DIR:dataDirectory,LEDGER_HEALTH_URL:'http://127.0.0.1:1',LEDGER_HEALTH_ATTEMPTS:'1',LEDGER_HEALTH_INTERVAL_SECONDS:'0',LEDGER_SYSTEMCTL_BIN:mockSystemctl}});
   assert.equal(activation.status,1,activation.stdout);assert.equal(await readlink(currentLink),oldRelease,'failed health validation restores compatible prior code');
+  const incompatibleRelease=join(releaseHub,'prior-incompatible');await mkdir(incompatibleRelease,{mode:0o700});
+  await writeFile(join(incompatibleRelease,'release.json'),JSON.stringify({...release,buildId:'prior-incompatible',maximumSchemaVersion:Math.max(0,release.schemaVersion-1)}),{mode:0o600});
+  await symlink(join(releaseRoot,'node_modules'),join(incompatibleRelease,'node_modules'),'dir');
+  await (await import('node:fs/promises')).unlink(currentLink);await symlink(incompatibleRelease,currentLink,'dir');
+  const refusedDowngrade=spawnSync(join(import.meta.dirname,'activate-release.sh'),[release.buildId],{cwd:directory,encoding:'utf8',env:{...process.env,LEDGER_NODE_BIN:runtime,LEDGER_RELEASE_ROOT:releaseHub,LEDGER_CURRENT_LINK:currentLink,LEDGER_LOCAL_DATA_DIR:dataDirectory,LEDGER_HEALTH_URL:'http://127.0.0.1:1',LEDGER_HEALTH_ATTEMPTS:'1',LEDGER_HEALTH_INTERVAL_SECONDS:'0',LEDGER_SYSTEMCTL_BIN:mockSystemctl}});
+  assert.equal(refusedDowngrade.status,1);assert.match(refusedDowngrade.stderr,/current schema/);assert.equal(await readlink(currentLink),join(releaseHub,release.buildId),'an incompatible downgrade is not selected');await stat(databasePath);
   server.kill('SIGTERM');await new Promise(resolve=>server.once('exit',resolve));server=null;
-  console.log(`Immutable package ${release.buildId}: checksums, importer, backup, restore, server health, schema identity, static asset, and compatible activation rollback passed.`);
+  console.log(`Immutable package ${release.buildId}: checksums, importer, backup, restore, server health, schema identity, static asset, compatible rollback, and incompatible-downgrade refusal passed.`);
 }finally{
   if(server){server.kill('SIGTERM');await new Promise(resolve=>server.once('exit',resolve)).catch(()=>{});}
   await rm(directory,{recursive:true,force:true});
