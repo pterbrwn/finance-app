@@ -61,14 +61,18 @@ async function body(request) {
 }
 async function plaid(env, path, params) {
   if (!ready(env)) throw apiError('Bank connections need setup. See the Banks page.', 503);
-  const result = await fetch(`https://${env.PLAID_ENV}.plaid.com${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Plaid-Version': '2020-09-14' }, body: JSON.stringify({ client_id: env.PLAID_CLIENT_ID, secret: env.PLAID_SECRET, ...params }), signal: AbortSignal.timeout(25000) });
-  const data = await result.json();
-  if (!result.ok) {
-    const messages = { ITEM_LOGIN_REQUIRED: 'Reconnect this account to resume updates.', PRODUCT_NOT_ENABLED: 'Enable the requested product in your Plaid dashboard before connecting this account.', INSTITUTION_NOT_SUPPORTED: 'This provider does not support the selected connection type.', NO_INVESTMENT_ACCOUNTS: 'No supported investment accounts were found at this provider.', PRODUCT_NOT_READY: 'Account data is still being prepared. Try syncing again shortly.', ADDITIONAL_CONSENT_REQUIRED: 'Reconnect this account to authorize the required data access.' };
-    const error = apiError(messages[data.error_code] || 'The account connection could not be updated. Please try again later.', 502);
-    error.plaidCode = data.error_code; throw error;
+  const retryable=['/transactions/sync','/accounts/get','/investments/holdings/get'].includes(path),maxAttempts=retryable?3:1;
+  for(let attempt=0;attempt<maxAttempts;attempt++){
+    try{
+      const result=await fetch(`https://${env.PLAID_ENV}.plaid.com${path}`,{method:'POST',headers:{'Content-Type':'application/json','Plaid-Version':'2020-09-14'},body:JSON.stringify({client_id:env.PLAID_CLIENT_ID,secret:env.PLAID_SECRET,...params}),signal:AbortSignal.timeout(25000)});
+      let data;try{data=await result.json();}catch{data={};}
+      if(result.ok)return data;
+      if(retryable&&(result.status===429||result.status>=500)&&attempt+1<maxAttempts){await new Promise(resolve=>setTimeout(resolve,300*(2**attempt)));continue;}
+      const messages={ITEM_LOGIN_REQUIRED:'Reconnect this account to resume updates.',PRODUCT_NOT_ENABLED:'Enable the requested product in your Plaid dashboard before connecting this account.',INSTITUTION_NOT_SUPPORTED:'This provider does not support the selected connection type.',NO_INVESTMENT_ACCOUNTS:'No supported investment accounts were found at this provider.',PRODUCT_NOT_READY:'Account data is still being prepared. Try syncing again shortly.',ADDITIONAL_CONSENT_REQUIRED:'Reconnect this account to authorize the required data access.',RATE_LIMIT_EXCEEDED:'The provider is rate-limiting updates. Try syncing again later.'};
+      const error=apiError(messages[data.error_code]||'The account connection could not be updated. Please try again later.',502);error.plaidCode=data.error_code;throw error;
+    }catch(error){if(error.status)throw error;if(!retryable||attempt+1>=maxAttempts)throw error;await new Promise(resolve=>setTimeout(resolve,300*(2**attempt)));}
   }
-  return data;
+  throw apiError('The provider did not respond after retrying.',502);
 }
 async function tokenKey(env) {
   let bytes;
@@ -116,72 +120,81 @@ async function decryptToken(env, value) {
   const decode = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
   return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: decode(value.iv) }, await tokenKey(env), decode(value.data)));
 }
-async function syncBanks(env) {
-  const leaseId = crypto.randomUUID();
-  const acquired = await mutate(env, s => {
-    if (!s.items.some(item=>item.lifecycle!=='unlinked')) throw apiError('Connect an account before syncing.');
-    if (s.lease && s.lease.expiresAt > Date.now()) throw apiError('A bank sync is already running.', 409);
-    s.lease = { id: leaseId, expiresAt: Date.now() + 5 * 60_000 };
-  });
-  const failures = [];
-  try {
-    for (const item of acquired.items.filter(item=>item.lifecycle!=='unlinked')) {
-      try {
-        if (!item.environment || item.environment !== env.PLAID_ENV) throw apiError('Connection environment must be verified before syncing. Reconnect only after the saved environment is confirmed.');
-        const access_token = await decryptToken(env, item.token);
-        if (item.product === 'investments') {
-          const data = await plaid(env, '/investments/holdings/get', { access_token });
-          const holdings = investmentHoldings(data, item.id);
-          await mutate(env, s => {
-            if (s.lease?.id !== leaseId) throw apiError('Sync was superseded. Please try again.', 409);
-            const liveItem = s.items.find(i => i.id === item.id);
-            if (!liveItem) return;
-            s.holdings = (s.holdings || []).filter(h => h.itemId !== item.id).concat(holdings);
-            const providerToLocal=replaceProviderAccounts(s,item.id,data.accounts);
-            remapProviderAccountReferences(s,item.id,providerToLocal);
-            liveItem.lastSync = new Date().toISOString(); liveItem.error = null;
+const syncRunners=new WeakMap();
+function assertSyncOwner(state,jobId){if(state.syncJob?.id!==jobId||state.syncJob.status!=='running')throw apiError('Sync job was superseded. Please try again.',409);if(Date.now()-Date.parse(state.syncJob.startedAt)>15*60_000)throw apiError('Sync exceeded its 15-minute run limit.',504);}
+async function syncOwned(env,jobId){const {state}=await readState(env);if(state.syncJob?.id!==jobId||state.syncJob.status!=='running')throw apiError('Sync job is no longer active.',409);if(Date.now()-Date.parse(state.syncJob.startedAt)>15*60_000)throw apiError('Sync exceeded its 15-minute run limit.',504);return state;}
+async function runSyncJob(env,jobId){
+  const failures=[];
+  try{
+    const initial=await syncOwned(env,jobId),items=initial.items.filter(item=>item.lifecycle!=='unlinked');
+    for(const item of items){
+      await syncOwned(env,jobId);
+      try{
+        if(!item.environment||item.environment!==env.PLAID_ENV)throw apiError('Connection environment must be verified before syncing. Reconnect only after the saved environment is confirmed.');
+        const access_token=await decryptToken(env,item.token);
+        if(item.product==='investments'){
+          const data=await plaid(env,'/investments/holdings/get',{access_token});
+          const holdings=investmentHoldings(data,item.id);
+          await mutate(env,s=>{
+            assertSyncOwner(s,jobId);
+            const liveItem=s.items.find(i=>i.id===item.id);if(!liveItem||liveItem.lifecycle==='unlinked')return;
+            s.holdings=(s.holdings||[]).filter(h=>h.itemId!==item.id).concat(holdings);
+            const providerToLocal=replaceProviderAccounts(s,item.id,data.accounts);remapProviderAccountReferences(s,item.id,providerToLocal);
+            liveItem.lastAttempt=liveItem.lastAttempt||new Date().toISOString();liveItem.lastSync=new Date().toISOString();liveItem.lastSuccess=liveItem.lastSync;liveItem.error=null;
+            s.syncJob.completed+=1;s.syncJob.lastHeartbeatAt=new Date().toISOString();
           });
           continue;
         }
         let result;
-        for (let attempt = 0; attempt < 3; attempt++) {
-          let cursor = item.cursor || undefined;
-          const pages = [];
-          try {
-            for (let page = 0; ; page++) {
-              if (page >= 100) throw apiError('This bank has more history than one sync can process.', 502);
-              const data = await plaid(env, '/transactions/sync', { access_token, ...(cursor ? { cursor } : {}), count: 500 });
-              pages.push({ added: data.added, modified: data.modified, removed: data.removed });
-              cursor = data.next_cursor;
-              if (!data.has_more) break;
+        for(let attempt=0;attempt<3;attempt++){
+          let cursor=item.cursor||undefined;const pages=[];
+          try{
+            for(let page=0;;page++){
+              if(page>=100)throw apiError('This bank has more history than one sync can process.',502);
+              await syncOwned(env,jobId);
+              const data=await plaid(env,'/transactions/sync',{access_token,...(cursor?{cursor}:{}),count:500});
+              pages.push({added:data.added,modified:data.modified,removed:data.removed});cursor=data.next_cursor;if(!data.has_more)break;
             }
-            result = { pages, cursor }; break;
-          } catch (e) { if (e.plaidCode !== 'TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION' || attempt === 2) throw e; }
+            result={pages,cursor};break;
+          }catch(e){if(e.plaidCode!=='TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION'||attempt===2)throw e;}
         }
-        const accountData = await plaid(env, '/accounts/get', { access_token });
-        await mutate(env, s => {
-          if (s.lease?.id !== leaseId) throw apiError('Sync was superseded. Please try again.', 409);
-          const liveItem = s.items.find(i => i.id === item.id);
-          if (!liveItem) return;
-          applySyncPages(s, item.id, result.pages);
-          liveItem.cursor = result.cursor; liveItem.lastSync = new Date().toISOString(); liveItem.error = null;
-          const providerToLocal=replaceProviderAccounts(s,item.id,accountData.accounts);
-          remapProviderAccountReferences(s,item.id,providerToLocal);
+        const accountData=await plaid(env,'/accounts/get',{access_token});
+        await mutate(env,s=>{
+          assertSyncOwner(s,jobId);
+          const liveItem=s.items.find(i=>i.id===item.id);if(!liveItem||liveItem.lifecycle==='unlinked')return;
+          applySyncPages(s,item.id,result.pages);liveItem.cursor=result.cursor;liveItem.lastSync=new Date().toISOString();liveItem.lastSuccess=liveItem.lastSync;liveItem.error=null;
+          const providerToLocal=replaceProviderAccounts(s,item.id,accountData.accounts);remapProviderAccountReferences(s,item.id,providerToLocal);
+          s.syncJob.completed+=1;s.syncJob.lastHeartbeatAt=new Date().toISOString();
         });
-      } catch (e) {
-        failures.push({ bank: item.name, message: e.status ? e.message : 'Bank update failed. Try again later.' });
-        await mutate(env, s => { const i = s.items.find(i => i.id === item.id); if (i) i.error = failures[failures.length - 1].message; });
+      }catch(error){
+        if(error.status===409&&error.message==='Sync job is no longer active.')throw error;
+        const failure={bank:item.name,message:error.status?error.message:'Bank update failed. Try again later.'};failures.push(failure);
+        await mutate(env,s=>{assertSyncOwner(s,jobId);const liveItem=s.items.find(i=>i.id===item.id);if(liveItem){liveItem.lastAttempt=new Date().toISOString();liveItem.error=failure.message;}s.syncJob.completed+=1;s.syncJob.failures.push(failure);s.syncJob.lastHeartbeatAt=new Date().toISOString();});
       }
     }
-    await mutate(env, s => { if (!failures.length && s.lease?.id === leaseId) s.lastSync = new Date().toISOString(); });
-    return { ok: failures.length === 0, failures };
-  } finally { await mutate(env, s => { if (s.lease?.id === leaseId) s.lease = null; }); }
+    await mutate(env,s=>{assertSyncOwner(s,jobId);const now=new Date().toISOString();s.syncJob.status=failures.length===0?'succeeded':failures.length===items.length?'failed':'partial';s.syncJob.finishedAt=now;s.syncJob.lastHeartbeatAt=now;if(!failures.length)s.lastSync=now;});
+  }catch(error){
+    await mutate(env,s=>{if(s.syncJob?.id===jobId&&s.syncJob.status==='running'){s.syncJob.status='failed';s.syncJob.finishedAt=new Date().toISOString();s.syncJob.failures.push({bank:'Sync',message:error.status?error.message:'Sync stopped unexpectedly.'});}}).catch(()=>{});
+  }finally{if(syncRunners.get(env)?.id===jobId)syncRunners.delete(env);}
 }
-function publicState(state, env) {
+async function startSync(env,source='manual'){
+  const {state:current}=await readState(env),active=current.items.filter(item=>item.lifecycle!=='unlinked');
+  if(!active.length)return{job:{id:null,status:'skipped',failures:[],completed:0,total:0}};
+  const running=current.syncJob?.status==='running';
+  if(running&&syncRunners.get(env)?.id===current.syncJob.id)return{job:current.syncJob,joined:true};
+  if(running)await mutate(env,s=>{if(s.syncJob?.id===current.syncJob.id&&s.syncJob.status==='running'){s.syncJob.status='interrupted';s.syncJob.finishedAt=new Date().toISOString();s.syncJob.failures=[...(s.syncJob.failures||[]),{bank:'Sync',message:'The previous sync stopped before it completed. Start another sync to continue.'}];}});
+  const id=crypto.randomUUID(),startedAt=new Date().toISOString();
+  let saved;try{saved=await mutate(env,s=>{if(s.syncJob?.status==='running')throw apiError('A bank sync is already running.',409);const items=s.items.filter(item=>item.lifecycle!=='unlinked');s.syncJob={id,status:'running',source,startedAt,lastHeartbeatAt:startedAt,finishedAt:null,total:items.length,completed:0,failures:[]};for(const item of items)item.lastAttempt=startedAt;});}catch(error){if(error.status===409){const {state:latest}=await readState(env);if(latest.syncJob?.status==='running'&&syncRunners.get(env)?.id===latest.syncJob.id)return{job:latest.syncJob,joined:true};}throw error;}
+  const runner=Promise.resolve().then(()=>runSyncJob(env,id));syncRunners.set(env,{id,promise:runner});
+  return{job:saved.syncJob,joined:false};
+}
+async function syncStatus(env){let {state}=await readState(env);if(state.syncJob?.status==='running'&&!syncRunners.has(env)){const id=state.syncJob.id;state=await mutate(env,s=>{if(s.syncJob?.id===id&&s.syncJob.status==='running'){s.syncJob.status='interrupted';s.syncJob.finishedAt=new Date().toISOString();s.syncJob.failures=[...(s.syncJob.failures||[]),{bank:'Sync',message:'The previous sync stopped before it completed.'}];}});}return state.syncJob||null;}
+
+async function publicState(state, env) {
   const currentBudgetMonth = monthInReportingZone();
   const templates = budgetTemplates(state), overrides = state.monthlyBudgets || {};
   const budgets = Object.fromEntries(categoryCatalog(state).filter(c=>c.kind==='expense'&&!c.archivedAt).map(c=>[c.name,resolveBudget(templates,overrides,c.id,currentBudgetMonth).amount]).filter(([,amount])=>amount!==null));
-  return { ...state, budgets, budgetTemplates: templates, monthlyBudgets: overrides, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured' } };
+  return { ...state, budgets, budgetTemplates: templates, monthlyBudgets: overrides, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null} } };
 }
 export default {
   async fetch(request, env) {
@@ -200,8 +213,9 @@ export default {
       const { state, storageSchemaVersion } = await readState(env);
       if (state.owner && state.owner !== user) return response({ error: 'This dashboard belongs to another account.' }, 403);
       if (path === '/api/health' && request.method === 'GET') return response({ codeVersion: typeof BUILD_ID === 'string' ? BUILD_ID : 'unversioned', schemaVersion: Number.isInteger(storageSchemaVersion) ? storageSchemaVersion : Number.isInteger(state.version) ? state.version : null, configurationReady: ready(env), localOnly: !!env.LOCAL_ONLY, lastSync: state.lastSync || null });
-      if (['/api/link-token', '/api/exchange-token', '/api/sync', '/api/scheduled-sync', '/api/disconnect', '/api/delete-history'].includes(path) && !ready(env)) return response({ error: 'Bank connections are disabled. Import CSV files for local-only operation.' }, 503);
-      if (path === '/api/state' && request.method === 'GET') return response(publicState(state, env));
+      if (['/api/link-token', '/api/exchange-token', '/api/sync', '/api/scheduled-sync', '/api/sync-status', '/api/disconnect', '/api/delete-history'].includes(path) && !ready(env)) return response({ error: 'Bank connections are disabled. Import CSV files for local-only operation.' }, 503);
+      if (path === '/api/state' && request.method === 'GET') return response(await publicState(state, env));
+      if(path==='/api/sync-status'&&request.method==='GET')return response({job:await syncStatus(env)});
       if (path === '/api/link-token' && request.method === 'POST') {
         const input = await body(request);
         const params = { user: { client_user_id: user }, client_name: 'Ledger Personal Finance', language: 'en', country_codes: ['US'], ...(env.PLAID_REDIRECT_URI ? { redirect_uri: env.PLAID_REDIRECT_URI } : {}) };
@@ -237,9 +251,9 @@ export default {
           if(existing){existing.name=String(input.name||existing.name||'Connected account').slice(0,100);existing.product=product;existing.environment=env.PLAID_ENV;existing.token=token;existing.lifecycle='connected';existing.error=null;}
           else s.items.push({ id: data.item_id, name: String(input.name || 'Connected account').slice(0,100), product, environment:env.PLAID_ENV, token, cursor: null, lastSync: null, error: null, lifecycle:'connected' });
         });
-        return response({ connected: true, ...await syncBanks(env) });
+        return response({ connected: true, ...await startSync(env,'new-connection') });
       }
-      if (['/api/sync', '/api/scheduled-sync'].includes(path) && request.method === 'POST') return response(await syncBanks(env));
+      if (['/api/sync', '/api/scheduled-sync'].includes(path) && request.method === 'POST') return response(await startSync(env,path==='/api/scheduled-sync'?'scheduled':'manual'));
       if (path === '/api/category' && request.method === 'POST') {
         const input = await body(request);
         const category = categoryCatalog(state).find(c => c.id === input.categoryId && !c.archivedAt) || categoryCatalog(state).find(c => c.name === input.category && !c.archivedAt);
@@ -378,7 +392,7 @@ export default {
       if (path === '/api/disconnect' && request.method === 'POST') {
         const input = await body(request), item = state.items.find(i => i.id === input.itemId);
         if (!item) throw apiError('Bank connection not found.', 404);
-        if (state.lease && state.lease.expiresAt > Date.now()) throw apiError('Wait for the current sync to finish before disconnecting.', 409);
+        if (state.syncJob?.status === 'running') throw apiError('Wait for the current sync to finish before disconnecting.', 409);
         if(item.lifecycle!=='unlinked'&&item.token){if(!item.environment||item.environment!==env.PLAID_ENV)throw apiError('Saved connection environment must be verified before unlinking; no token was sent.');await plaid(env, '/item/remove', { access_token: await decryptToken(env, item.token) });}
         const saved=await mutate(env, s => { const link=s.items.find(i=>i.id===item.id); if(!link)return; link.token=null;link.lifecycle='unlinked';link.error=null;link.unlinkedAt=new Date().toISOString(); });
         return response({ ok: true, historyRetained:true, revision:saved.revision });
@@ -386,7 +400,7 @@ export default {
       if (path === '/api/delete-history' && request.method === 'POST') {
         const input=await body(request),item=state.items.find(i=>i.id===input.itemId);
         if(!item)throw apiError('Connection history not found.',404);
-        if(state.lease&&state.lease.expiresAt>Date.now())throw apiError('Wait for the current sync to finish before deleting history.',409);
+        if(state.syncJob?.status==='running')throw apiError('Wait for the current sync to finish before deleting history.',409);
         if(item.lifecycle!=='unlinked'&&item.token){if(!item.environment||item.environment!==env.PLAID_ENV)throw apiError('Saved connection environment must be verified before deleting history; no token was sent.');await plaid(env,'/item/remove',{access_token:await decryptToken(env,item.token)});}
         await mutate(env,s=>{s.items=s.items.filter(i=>i.id!==item.id);s.accounts=s.accounts.filter(a=>a.itemId!==item.id);s.transactions=s.transactions.filter(t=>t.itemId!==item.id);s.holdings=(s.holdings||[]).filter(h=>h.itemId!==item.id);});
         return response({ok:true,historyDeleted:true});

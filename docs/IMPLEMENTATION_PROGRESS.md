@@ -140,3 +140,16 @@ Code-only log. No production records, account names, credentials, private origin
 - Checks cover connection-scoped identity, transaction/holding account references, investment endpoint routing, failed snapshot replacement preservation, browser stale status, and available balances. Full finance, SQLite, and isolated HTTP suites pass under Node 24; checkout `dist` remains unchanged.
 
 **Next:** T10, reliable sync jobs, freshness, and local automation.
+
+## T10 — Reliable sync jobs and local automation
+
+**Status:** Implementation complete; the daily timer remains owner managed and is not activated.
+
+- Sync and new-connection requests now return a persisted job record quickly. A second trigger joins the active in-process job; `/api/sync-status` reports progress, completion, partial failure, and safe error messages.
+- Every sync result, cursor, account/holding snapshot, and connection error update checks the persisted job ID and running generation. Jobs have a 15-minute bound, each provider request has a 25-second timeout, pagination has a 100-page bound, and safe read endpoints retry network errors, HTTP 429, and 5xx responses with short backoff.
+- Completed accounts record last attempt and last successful update. Failed investment refreshes retain the previous snapshot; a failed connection remains connected with an explicit needs-sync state. A persisted running job with no live runner is marked interrupted after process restart.
+- The browser polls job status for manual sync, including first sync and reconnect. Settings shows job progress/errors and queries the actual user systemd timer enabled/active/next-run properties. The timer does not get enabled by the app.
+- `scripts/sync.mjs` checks for active connections, triggers or joins a scheduled job, polls completion, and exits nonzero on failure/timeout without printing financial data or secrets.
+- Tests cover rate-limit retry, concurrent trigger joining, job status and restart recovery, investment endpoint routing, failed snapshot preservation, and timer/job status rendering. Full finance, SQLite, and local HTTP suites passed in isolated copies under Node 24. The project checkout `dist` and live service were not changed.
+
+**Next:** T11, transaction maintenance and safer CSV import/export workflows.

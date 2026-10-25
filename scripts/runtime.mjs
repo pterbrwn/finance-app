@@ -1,12 +1,22 @@
 import { readFile, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { createLocalBucket } from './local-storage.mjs';
 import { createStateRepository } from '../dist/server/repository.mjs';
 import { createSqliteRepositoryAt } from '../dist/server/sqlite-repository.mjs';
 
 export const configPath = resolve(process.env.LEDGER_CONFIG_FILE || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'ledger/config.json'));
 export const dataDirectory = resolve(process.env.LEDGER_LOCAL_DATA_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'ledger'));
+const execFileAsync=promisify(execFile);
+async function getSyncTimerStatus(){
+  try{
+    const {stdout}=await execFileAsync('systemctl',['--user','show','ledger-sync.timer','--property=UnitFileState,ActiveState,NextElapseUSecRealtime','--value'],{timeout:2000,encoding:'utf8'});
+    const [enabledState,activeState,nextRun]=stdout.trim().split('\n');
+    return{state:'available',enabled:['enabled','enabled-runtime','linked'].includes(enabledState),active:activeState==='active',enabledState:enabledState||'unknown',activeState:activeState||'unknown',nextRun:nextRun&&nextRun!=='n/a'?nextRun:null,checkedAt:new Date().toISOString()};
+  }catch(error){return{state:'unavailable',enabled:null,active:null,reason:error.code==='ENOENT'?'systemd user manager is unavailable':'systemd timer status could not be read',checkedAt:new Date().toISOString()};}
+}
 
 export async function localRuntime() {
   let config = {};
@@ -34,6 +44,7 @@ export async function localRuntime() {
     PLAID_CLIENT_ID: enabled ? config.plaidClientId : undefined,
     PLAID_SECRET: enabled ? config.plaidSecret : undefined,
     TOKEN_ENCRYPTION_KEY: enabled ? config.tokenEncryptionKey : undefined,
-    PLAID_REDIRECT_URI: enabled ? config.plaidRedirectUri : undefined
+    PLAID_REDIRECT_URI: enabled ? config.plaidRedirectUri : undefined,
+    getSyncTimerStatus
   };
 }

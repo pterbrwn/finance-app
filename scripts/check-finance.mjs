@@ -55,8 +55,9 @@ class Bucket {
   async get(){return this.value===null?null:{etag:String(this.version),json:async()=>JSON.parse(this.value)};}
   async put(key,value,options){const condition=options.onlyIf;if(condition.etagMatches && condition.etagMatches!==String(this.version))return null;if(condition.etagDoesNotMatch==='*'&&this.value!==null)return null;this.value=value;this.version++;return {etag:String(this.version)};}
 }
-const env={BUCKET:new Bucket(),PLAID_ENV:'sandbox',PLAID_CLIENT_ID:'test-client',PLAID_SECRET:'test-secret',TOKEN_ENCRYPTION_KEY:Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')};
+const env={BUCKET:new Bucket(),getSyncTimerStatus:async()=>({state:'available',enabled:false,active:false,enabledState:'disabled',activeState:'inactive'}),PLAID_ENV:'sandbox',PLAID_CLIENT_ID:'test-client',PLAID_SECRET:'test-secret',TOKEN_ENCRYPTION_KEY:Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64')};
 const call=(path,input,user='owner',origin)=>worker.fetch(new Request('https://ledger.test/api/'+path,{method:input===undefined?'GET':'POST',headers:{...(user?{'oai-authenticated-user-id':user}:{}),...(origin?{Origin:origin}:{}),...(input!==undefined?{'Content-Type':'application/json'}:{})},body:input===undefined?undefined:JSON.stringify(input)}),env);
+const waitJob=async initial=>{let job=initial.job;for(let i=0;i<2000&&job?.status==='running';i++){await new Promise(resolve=>setTimeout(resolve,2));job=(await(await call('sync-status')).json()).job;}return job;};
 assert.equal((await call('state',undefined,null)).status,401);
 assert.equal((await call('sync',{},'owner','https://other.test')).status,403);
 assert.equal((await call('scheduled-sync',{},null)).status,401);
@@ -64,14 +65,14 @@ const health=await (await call('health')).json();
 assert.equal(health.schemaVersion,1);
 assert.equal(typeof health.codeVersion,'string');
 assert.equal(health.configurationReady,true);
-let syncCalls=0,failInvestmentHoldings=false;const seen=[];const realFetch=globalThis.fetch;
+let syncCalls=0,failInvestmentHoldings=false,rateLimitAccountsOnce=true,holdTransactionSync=false,releaseTransactionSync;const seen=[];const realFetch=globalThis.fetch;
 globalThis.fetch=async (url,options)=>{
   const input=JSON.parse(options.body);seen.push({url,input});
   if(url.endsWith('/link/token/create'))return Response.json({link_token:'temporary-link'});
   if(url.endsWith('/item/public_token/exchange'))return Response.json({item_id:input.public_token==='public-investment'?'item-2':'item-1',access_token:input.public_token==='public-investment'?'never-expose-investment-token':'never-expose-bank-token'});
   if(url.endsWith('/investments/holdings/get')){if(failInvestmentHoldings)return new Response(JSON.stringify({error_code:'PRODUCT_NOT_READY'}),{status:400});return Response.json({accounts:[{account_id:'same-account',name:'Brokerage',mask:'8888',type:'investment',subtype:'brokerage',balances:{current:1000,iso_currency_code:'USD'}}],securities:[{security_id:'security-1',name:'Index Fund',ticker_symbol:'IDX'}],holdings:[{account_id:'same-account',security_id:'security-1',quantity:2,institution_value:500,iso_currency_code:'USD',institution_price_as_of:'2026-10-01'}]});}
-  if(url.endsWith('/transactions/sync')){syncCalls++;return Response.json({added:syncCalls===1?[{...posted,pending_transaction_id:null}]:[],modified:[],removed:[],next_cursor:'cursor-'+syncCalls,has_more:false});}
-  if(url.endsWith('/accounts/get'))return Response.json({accounts:[{account_id:'a',name:'Checking',mask:'1234',type:'depository',balances:{current:234.56,iso_currency_code:'USD'}}]});
+  if(url.endsWith('/transactions/sync')){if(holdTransactionSync)await new Promise(resolve=>{releaseTransactionSync=resolve;});syncCalls++;return Response.json({added:syncCalls===1?[{...posted,pending_transaction_id:null}]:[],modified:[],removed:[],next_cursor:'cursor-'+syncCalls,has_more:false});}
+  if(url.endsWith('/accounts/get')){if(rateLimitAccountsOnce){rateLimitAccountsOnce=false;return new Response(JSON.stringify({error_code:'RATE_LIMIT_EXCEEDED'}),{status:429});}return Response.json({accounts:[{account_id:'a',name:'Checking',mask:'1234',type:'depository',balances:{current:234.56,iso_currency_code:'USD'}}]});}
   if(url.endsWith('/item/remove'))return Response.json({removed:true});
   throw new Error('Unexpected mocked endpoint');
 };
@@ -84,14 +85,14 @@ try {
   assert.equal((await call('link-token',{product:'investments'})).status,200);
   assert.deepEqual(seen.at(-1).input.products,['investments'],'investment intent is preserved when creating Link');
   const connected=await call('exchange-token',{public_token:'public-test',name:'Chase',product:'transactions'});
-  assert.equal(connected.status,200);assert.equal((await connected.json()).ok,true);
+  const connectedResult=await connected.json();assert.equal(connected.status,200,JSON.stringify(connectedResult));assert.equal((await waitJob(connectedResult)).status,'succeeded');
   let publicData=await (await call('state')).json();
-  assert.equal(publicData.transactions.length,1);assert.equal(publicData.items[0].name,'Chase');
+  assert.equal(publicData.transactions.length,1);assert.equal(publicData.items[0].name,'Chase');assert.equal(publicData.setup.syncTimer.enabled,false);
   assert.ok(!JSON.stringify(publicData).includes('never-expose'));
   assert.ok(!env.BUCKET.value.includes('never-expose'));
   assert.equal(publicData.items[0].token,undefined);assert.equal(publicData.items[0].cursor,undefined);
   const savedAccount=publicData.accounts.find(a=>a.itemId==='item-1');
-  assert.ok(savedAccount);
+  assert.ok(savedAccount);assert.equal(rateLimitAccountsOnce,false,'a transient provider rate limit is retried with backoff');
   const includeResult=await call('account-update',{id:savedAccount.id,action:'include',value:false,revision:publicData.revision});
   assert.equal(includeResult.status,200);
   publicData=await (await call('state')).json();
@@ -101,10 +102,11 @@ try {
   assert.ok((await (await call('state')).json()).accounts.find(a=>a.id===savedAccount.id).archivedAt);
   assert.equal((await call('state',undefined,'other-owner')).status,403);
   assert.equal((await call('category',{id:'posted',category:'Travel'})).status,200);
-  assert.equal((await call('sync',{})).status,200);
+  const firstManualSync=await call('sync',{});assert.equal(firstManualSync.status,200);assert.equal((await waitJob(await firstManualSync.json())).status,'succeeded');
   publicData=await (await call('state')).json();
   assert.equal(publicData.transactions.length,1);assert.equal(publicData.transactions[0].override,'Travel');
   assert.equal(seen.filter(x=>x.url.endsWith('/transactions/sync')).at(-1).input.cursor,'cursor-1');
+  holdTransactionSync=true;releaseTransactionSync=null;const overlapStart=await(await call('sync',{})).json();for(let i=0;i<100&&!releaseTransactionSync;i++)await new Promise(resolve=>setTimeout(resolve,1));assert.ok(releaseTransactionSync,'sync runner reaches the held provider request');const overlapping=await(await call('scheduled-sync',{})).json();assert.equal(overlapping.joined,true,'a second trigger joins the active job');assert.equal(overlapping.job.id,overlapStart.job.id);holdTransactionSync=false;releaseTransactionSync();releaseTransactionSync=null;assert.equal((await waitJob(overlapStart)).status,'succeeded');
   assert.equal((await call('budget',{category:'Travel',amount:-100})).status,400);
   assert.equal((await call('budget',{category:'Travel',amount:50000})).status,200);
   publicData=await (await call('state')).json();
@@ -129,8 +131,9 @@ try {
   const privateConnection=JSON.parse(env.BUCKET.value),connection=privateConnection.items.find(i=>i.id==='item-1');
   delete connection.environment;env.BUCKET.value=JSON.stringify(privateConnection);
   const syncRequestCount=seen.filter(x=>x.url.endsWith('/transactions/sync')).length;
-  const unknownEnvironment=await (await call('sync',{})).json();
-  assert.equal(unknownEnvironment.ok,false);
+  const unknownEnvironmentStart=await (await call('sync',{})).json();
+  const unknownEnvironment=await waitJob(unknownEnvironmentStart);
+  assert.equal(unknownEnvironment.status,'failed');
   assert.match(unknownEnvironment.failures[0].message,/environment must be verified/i);
   assert.equal(seen.filter(x=>x.url.endsWith('/transactions/sync')).length,syncRequestCount,'unknown environments never receive a decrypted token request');
   connection.environment='sandbox';env.BUCKET.value=JSON.stringify(privateConnection);
@@ -179,7 +182,7 @@ try {
   assert.equal((await (await call('import',csv)).json()).skipped,1);
   assert.equal((await call('scheduled-sync',{},null)).status,401);
   assert.equal((await call('scheduled-sync',{},'other-owner')).status,403);
-  assert.equal((await call('scheduled-sync',{})).status,200);
+  const scheduled=await call('scheduled-sync',{});assert.equal(scheduled.status,200);assert.equal((await waitJob(await scheduled.json())).status,'succeeded');
   assert.equal((await call('disconnect',{itemId:'item-1'})).status,200);
   publicData=await (await call('state')).json();
   assert.equal(publicData.items.length,1);assert.equal(publicData.items[0].lifecycle,'unlinked');assert.equal(publicData.transactions.filter(t=>t.itemId==='item-1').length,1);
@@ -189,7 +192,7 @@ try {
   assert.equal(publicData.items.length,0);assert.equal(publicData.transactions.filter(t=>t.itemId==='item-1').length,0);assert.equal(publicData.transactions.length,1,'deleting a provider connection preserves unrelated CSV history');assert.equal(publicData.accounts.some(a=>a.itemId==='item-1'),false);
   const transactionCallsBeforeInvestment=seen.filter(x=>x.url.endsWith('/transactions/sync')).length;
   const investmentConnected=await call('exchange-token',{public_token:'public-investment',name:'Fidelity',product:'investments',environment:'sandbox'});
-  assert.equal(investmentConnected.status,200);
+  assert.equal(investmentConnected.status,200);assert.equal((await waitJob(await investmentConnected.json())).status,'succeeded');
   assert.equal(seen.filter(x=>x.url.endsWith('/transactions/sync')).length,transactionCallsBeforeInvestment,'investment connections do not use transaction spending sync');
   publicData=await (await call('state')).json();
   const investmentAccount=publicData.accounts.find(a=>a.itemId==='item-2');
@@ -197,19 +200,22 @@ try {
   assert.equal(publicData.holdings[0].accountId,investmentAccount.id);
   assert.equal(publicData.holdings[0].value,50000);
   failInvestmentHoldings=true;
-  const failedInvestmentSync=await (await call('sync',{})).json();
-  assert.equal(failedInvestmentSync.ok,false);
+  const failedInvestmentStart=await (await call('sync',{})).json();const failedInvestmentSync=await waitJob(failedInvestmentStart);
+  assert.equal(failedInvestmentSync.status,'failed');
   publicData=await (await call('state')).json();
   assert.equal(publicData.holdings.length,1,'failed holdings refresh retains the prior snapshot');
   assert.equal(publicData.items.find(i=>i.id==='item-2').lifecycle,'connected');
   failInvestmentHoldings=false;
+  const interruptedState=JSON.parse(env.BUCKET.value);interruptedState.syncJob={id:'crashed-job',status:'running',startedAt:new Date().toISOString(),lastHeartbeatAt:new Date().toISOString(),total:1,completed:0,failures:[]};env.BUCKET.value=JSON.stringify(interruptedState);
+  const restartedEnv={...env},recoveredStatus=await worker.fetch(new Request('https://ledger.test/api/sync-status',{headers:{'oai-authenticated-user-id':'owner'}}),restartedEnv);
+  assert.equal((await recoveredStatus.json()).job.status,'interrupted','a persisted in-progress job is marked interrupted after process restart');
 } finally { globalThis.fetch=realFetch; }
 
 // Local-only mode overrides even present credentials and prevents network calls.
 env.LOCAL_ONLY=true;
 globalThis.fetch=()=>{throw new Error('Unexpected external request in local-only mode');};
 try {
-  for(const path of ['link-token','exchange-token','sync','scheduled-sync','disconnect','delete-history'])assert.equal((await call(path,{})).status,503);
+  for(const path of ['link-token','exchange-token','sync','scheduled-sync','sync-status','disconnect','delete-history'])assert.equal((await call(path,{})).status,503);
   const localState=await (await call('state')).json();
   assert.equal(localState.setup.localOnly,true);
   assert.equal(localState.setup.configured,false);
@@ -267,6 +273,10 @@ assert.ok(budgetOnlyHtml.includes('Housing'));
 const importingHtml=await clientPage('https://ledger.test/?page=accounts',{...pageBase,items:[{id:'chase-item',name:'Chase'}],setup:{configured:true,localOnly:false,environment:'production'}});
 assert.ok(importingHtml.includes('Waiting for the first successful sync'));
 assert.ok(importingHtml.includes('<h1>Accounts</h1>'));
+const settingsHtml=await clientPage('https://ledger.test/?page=settings',{...pageBase,setup:{configured:false,localOnly:true,syncTimer:{state:'available',enabled:false,active:false}},syncJob:{status:'succeeded',startedAt:'2026-10-25T12:00:00.000Z',completed:2,total:2,failures:[]}});
+assert.ok(settingsHtml.includes('Disabled · inactive'));
+assert.ok(settingsHtml.includes('Latest sync job'));
+assert.ok(settingsHtml.includes('succeeded'));
 const linkedEmptyHtml=await clientPage('https://ledger.test/',{...pageBase,items:[{id:'chase-item',name:'Chase'}],setup:{configured:true,localOnly:false,environment:'production'}});
 assert.ok(linkedEmptyHtml.includes('Your bank is connected'));
 assert.ok(linkedEmptyHtml.includes('first account and transaction data is still arriving'));

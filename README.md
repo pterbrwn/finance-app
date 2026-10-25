@@ -76,7 +76,7 @@ systemctl --user enable --now ledger-sync.timer
 systemctl --user list-timers ledger-sync.timer
 ```
 
-The updater skips unconfigured or unconnected banks. A sync failure exits unsuccessfully without printing financial records or credentials. Persistent timers catch up after downtime. The Jetson must be powered on and online to fetch bank data. This polls existing Plaid data and does not call the potentially billable Transactions Refresh endpoint.
+The updater skips unconfigured or unconnected providers. Sync requests create or join a persisted job, and the updater polls that job until it finishes. A sync failure exits unsuccessfully without printing financial records or credentials. Persistent timers catch up after downtime. The Jetson must be powered on and online to fetch bank data. This polls existing Plaid data and does not call the potentially billable Transactions Refresh endpoint. Settings reports the actual user systemd timer state and the latest job status.
 
 ## CSV import
 
@@ -102,7 +102,7 @@ Budgets supports custom expense buckets with optional monthly limits. A custom b
 
 Amounts use integer cents. Pending transactions and non-USD currencies are excluded from totals. Transfers and credit card payments are excluded from spending; refunds reduce category spending. Income less spending is net cash flow, not change in account balance. Budget templates take effect from a selected month; a month override is separate, and resetting it returns to the effective template. Blank means no limit; zero is a deliberate zero-dollar limit. Legacy budgets have no invented history before the migration month.
 
-Plaid sync collects pagination before committing, restarts after pagination mutations, handles added/modified/removed transactions, and preserves category overrides when pending transactions post. Access tokens use AES-256-GCM with random nonces and are never returned to the browser. Disconnect revokes the Plaid Item and removes that bank's records; manual CSV accounts remain separate.
+Plaid sync collects pagination before committing, restarts after pagination mutations, handles added/modified/removed transactions, and preserves category overrides when pending transactions post. Access tokens use AES-256-GCM with random nonces and are never returned to the browser. Unlink revokes the Plaid Item and retains its local accounts, transactions, and holdings; deleting that connection's history is a separate explicit action. Manual CSV accounts remain separate.
 
 ## Checks and source control
 
