@@ -17,16 +17,40 @@ export function eligibleCashAccounts(accounts=[],items=[],asOf=new Date()){
   });
 }
 
+function reportingDate(value){
+  if(typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value))return value;
+  const instant=value instanceof Date&&Number.isFinite(value.getTime())?value:new Date();
+  const parts=new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(instant);
+  return `${parts.find(part=>part.type==='year').value}-${parts.find(part=>part.type==='month').value}-${parts.find(part=>part.type==='day').value}`;
+}
+
+function validDateOnly(value){
+  return typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value+'T12:00:00Z').toISOString().slice(0,10)===value;
+}
+
 export function goalProjection({target=0,funded=0,targetDate,asOf,monthlyContribution=0,apyBps=0}){
-  const current=asOf||new Date().toISOString().slice(0,10),date=typeof targetDate==='string'?targetDate:'';
-  let contributionDates=0,month=new Date(current+'T12:00:00Z');month.setUTCDate(1);month.setUTCMonth(month.getUTCMonth()+1);
-  while(Number.isFinite(month.getTime())&&month.toISOString().slice(0,10)<=date){const end=new Date(month);end.setUTCMonth(end.getUTCMonth()+1);end.setUTCDate(0);if(end.toISOString().slice(0,10)>current&&end.toISOString().slice(0,10)<=date)contributionDates++;month.setUTCMonth(month.getUTCMonth()+1);if(contributionDates>1200)break;}
-  const shortfall=Math.max(0,target-funded),requiredMonthly=shortfall===0?0:contributionDates?Math.ceil(shortfall/contributionDates):null;
-  const monthlyRate=apyBps>0?Math.pow(1+apyBps/10000,1/12)-1:0;let projected=Math.max(0,funded);
-  let projectionMonth=new Date(current+'T12:00:00Z');projectionMonth.setUTCDate(1);projectionMonth.setUTCMonth(projectionMonth.getUTCMonth()+1);
-  for(let i=0;i<contributionDates;i++){projected=Math.round(projected*(1+monthlyRate))+Math.max(0,monthlyContribution||0);projectionMonth.setUTCMonth(projectionMonth.getUTCMonth()+1);}
+  const current=reportingDate(asOf),date=validDateOnly(targetDate)?targetDate:'';
+  const month=new Date(current+'T12:00:00Z');month.setUTCDate(1);
+  const scheduledDates=[];
+  for(let index=0;index<1200;index++){
+    const end=new Date(month);end.setUTCMonth(month.getUTCMonth()+1);end.setUTCDate(0);
+    const endDate=end.toISOString().slice(0,10);
+    if(endDate>current&&endDate<=date)scheduledDates.push(endDate);
+    if(endDate>=date)break;
+    month.setUTCMonth(month.getUTCMonth()+1);
+  }
+  const contributionDates=scheduledDates.length,shortfall=Math.max(0,target-funded);
+  const requiredMonthly=shortfall===0?0:contributionDates?Math.ceil(shortfall/contributionDates):null;
+  let projected=Math.max(0,funded),previous=new Date(current+'T12:00:00Z');
+  for(const scheduledDate of scheduledDates){
+    const end=new Date(scheduledDate+'T12:00:00Z'),daysInMonth=new Date(Date.UTC(end.getUTCFullYear(),end.getUTCMonth()+1,0,12)).getUTCDate();
+    const elapsedDays=(end.getTime()-previous.getTime())/86_400_000;
+    if(apyBps>0)projected=Math.round(projected*Math.pow(1+apyBps/10000,elapsedDays/(daysInMonth*12)));
+    projected+=Math.max(0,monthlyContribution||0);
+    previous=end;
+  }
   const projectedAtTarget=Math.round(projected),projectedShortfall=Math.max(0,target-projectedAtTarget);
-  return{target,funded,shortfall,contributionDates,requiredMonthly,monthlyContribution:monthlyContribution||0,apyBps,projectedAtTarget,projectedShortfall,overdue:shortfall>0&&contributionDates===0};
+  return{target,funded,shortfall,contributionDates,scheduledDates,requiredMonthly,monthlyContribution:monthlyContribution||0,apyBps,projectedAtTarget,projectedShortfall,overdue:shortfall>0&&date!==''&&date<=current};
 }
 
 export function summarizeGoals(goals=[],allocations=[],accounts=[],items=[],asOf=new Date()){
@@ -50,7 +74,7 @@ export function summarizeGoals(goals=[],allocations=[],accounts=[],items=[],asOf
   const goalSummaries=goals.map(goal=>{
     const detail=byGoal.get(goal.id)||{reserved:0,backed:0,provisional:0,backedAllocations:[]};
     const funded=detail.backed,shortfall=Math.max(0,(goal.target||0)-funded);
-    const projection=goalProjection({target:goal.target,funded,targetDate:goal.targetDate,asOf:asOf instanceof Date?asOf.toISOString().slice(0,10):asOf,monthlyContribution:goal.monthlyContribution,apyBps:goal.apyBps});
+    const projection=goalProjection({target:goal.target,funded,targetDate:goal.targetDate,asOf,monthlyContribution:goal.monthlyContribution,apyBps:goal.apyBps});
     return{...goal,...detail,funded,shortfall,projection,archived:!!goal.archivedAt,accountShortfall:Math.max(0,detail.reserved-detail.backed-detail.provisional)};
   });
   const eligibleTotal=cash.reduce((sum,account)=>sum+(account.eligible?account.balance:0),0),unallocatedTotal=accountSummaries.reduce((sum,account)=>sum+(account.eligible?account.unallocated:0),0);

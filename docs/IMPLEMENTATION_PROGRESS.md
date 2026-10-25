@@ -252,3 +252,16 @@ Code-only log. No production records, account names, credentials, private origin
 - No private config values, service origin, financial records, or production aggregates were read into the source log. No runtime, timer, data, or generated artifact was changed.
 
 **Next:** C01, correct the savings contribution calendar and deadline labels.
+
+
+## C01 — Savings contribution calendar
+
+**Status:** Implemented and verified in a disposable source copy.
+
+- Goal projections now include every month-end strictly after the as-of reporting date and on or before the target, including the current month's remaining end. Date-only values remain date-only; instant timestamps are converted to `America/Chicago` before deriving the reporting date.
+- Projections return the exact scheduled dates. The Goals page shows the dates and distinguishes a past-due shortfall from a future target that has no month-end contribution before its deadline.
+- Optional APY uses the documented annual-to-monthly equivalent with a proportional first-month period, rounds each month-end credit to cents, then applies that date's contribution. Required monthly funding remains the zero-return shortfall divided by the exact schedule, rounded upward.
+- Added deterministic cases for October-to-January (four dates), month-end start, early deadline, no remaining contribution date, past-due deadline, leap February, Chicago UTC boundary, APY rounding, and visible schedule rendering. The prior three-date expectation was corrected.
+- `npm run check` passed under pinned Node 24.22.1 in a disposable source copy: artifact validation, finance/client checks, JSON storage, HTTP preview checks, and SQLite backup/restore/import checks. The live checkout `dist` and service were not changed.
+
+**Next:** C02, correct cash backing and saved/preview scenario funding parity.
