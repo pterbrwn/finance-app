@@ -176,4 +176,14 @@ Code-only log. No production records, account names, credentials, private origin
 - Goal creation, allocation changes, and undo require a matching optimistic revision. Allocation capacity is revalidated against current cash and reservations inside a revision-checked mutation.
 - Tests cover restricted/stale/available cash, deterministic priority apportionment, projection boundaries, revision conflicts, over-allocation, undo, CRUD/archive, and Goals page rendering. Full finance, SQLite, and isolated HTTP checks passed in a disposable source copy; checkout `dist` and running service were not changed.
 
-**Next:** T13, properties and mortgages.
+## T13 — Properties and mortgages
+
+**Status:** Implemented in source; automated finance, SQLite, and isolated HTTP checks pass.
+
+- Added manual property and mortgage CRUD with stable IDs, local-only nicknames/optional addresses, ownership shares, valuation source/date, statement balance/date, original principal, origination date, note rate/type, payment components, escrow marker, optional linked liability, and archive controls.
+- Observed mortgage balance changes append dated snapshots. Amortization is computed separately and never replaces the statement balance. Duplicate liability links are rejected; equity includes every lien. Partial ownership applies to property value and requires an explicit owner debt share for each mortgage.
+- Added a Decimal-based fixed-rate monthly calculator with round-half-up cent payment/interest rounding, capped final payments, zero-rate handling, extra-principal comparison, and non-amortizing payment rejection. Unsupported loan types and incomplete terms are visibly unavailable.
+- Home planner shows whole-property and owner equity, statement vs modeled balance as of the statement date, P&I and other payment components, and an accessible yearly principal/interest chart. Property addresses are stored locally and never looked up.
+- Tests cover the $320,000 / 6.5% / 360 month payment example, zero-rate and final payment, extra principal, non-amortizing input, multiple liens, negative equity, missing valuation, partial ownership, duplicate linked-liability detection, observed snapshot history, unsupported projections, and page rendering. Full finance, SQLite, and isolated HTTP checks passed in a disposable source copy; checkout `dist` and running service were not changed.
+
+**Next:** T14, saved home-purchase scenarios.

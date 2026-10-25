@@ -5,6 +5,7 @@ const { default: worker, totals, fromPlaid, categoryFor, applyChanges, applySync
 const { accountRecord, investmentHoldings } = await import('../dist/shared/investments.mjs');
 const { budgetMonthKey, resolveBudget } = await import('../dist/shared/budgets.mjs');
 const { eligibleCashAccounts, goalProjection, summarizeGoals } = await import('../dist/shared/goals.mjs');
+const { amortizeFixedRate, compareAmortization, summarizeProperties } = await import('../dist/shared/mortgages.mjs');
 globalThis.crypto ||= webcrypto;
 
 const goalAccounts=[
@@ -26,6 +27,17 @@ assert.equal(goalsSummary.unallocatedTotal,0);assert.equal(allocations[0].active
 assert.equal(goalProjection({target:10000,funded:0,targetDate:'2026-10-25',asOf:'2026-10-25'}).requiredMonthly,null,'overdue goals have no invalid contribution division');
 assert.equal(goalProjection({target:10000,funded:5000,targetDate:'2027-01-31',asOf:'2026-10-25'}).contributionDates,3,'contributions are scheduled at future month ends');
 assert.equal(goalProjection({target:10000,funded:5000,targetDate:'2027-01-31',asOf:'2026-10-25'}).projectedAtTarget,5000,'zero return and zero contribution are the default');
+const fixedLoan=amortizeFixedRate({principal:32000000,annualRatePercent:'6.5',termMonths:360});
+assert.equal(fixedLoan.payment,202262,'fixed-rate payment follows half-up cent convention');assert.equal(fixedLoan.schedule.at(-1).closingBalance,0,'final payment is capped at the remaining principal');
+assert.equal(amortizeFixedRate({principal:12000000,annualRatePercent:'0',termMonths:120}).payment,100000,'zero-rate terms divide principal evenly');
+const extraLoan=compareAmortization({principal:32000000,annualRatePercent:'6.5',termMonths:360,extraPrincipal:50000});assert.equal(extraLoan.available,true);assert.ok(extraLoan.interestSaved>0&&extraLoan.monthsSaved>0);
+assert.equal(amortizeFixedRate({principal:100000,annualRatePercent:'12',termMonths:120,scheduledPayment:1}).available,false,'non-amortizing inputs are rejected');
+const propertySummaryFixture=summarizeProperties([{id:'home',name:'Home',ownershipBps:10000,valuation:40000000}], [{id:'first',propertyId:'home',statementBalance:30000000},{id:'heloc',propertyId:'home',statementBalance:2000000}],[]);
+assert.equal(propertySummaryFixture.properties[0].wholePropertyEquity,8000000,'equity includes all liens');
+const negativeEquity=summarizeProperties([{id:'underwater',ownershipBps:10000,valuation:10000000}],[{id:'loan',propertyId:'underwater',statementBalance:12000000}],[]);assert.equal(negativeEquity.properties[0].ownerEquity,-2000000);
+const missingValue=summarizeProperties([{id:'missing',ownershipBps:10000,valuation:null}],[],[]);assert.equal(missingValue.properties[0].ownerEquity,null,'missing valuation is unavailable, not zero');
+const partialOwnership=summarizeProperties([{id:'shared',ownershipBps:5000,valuation:10000000}],[{id:'shared-loan',propertyId:'shared',statementBalance:6000000,ownerDebtShareBps:2500}],[]);assert.equal(partialOwnership.properties[0].ownerEquity,3500000);
+const duplicateLink=summarizeProperties([{id:'linked',ownershipBps:10000,valuation:10000000}],[{id:'m1',propertyId:'linked',linkedAccountId:'debt',statementBalance:500000},{id:'m2',propertyId:'linked',linkedAccountId:'debt',statementBalance:500000}],[]);assert.equal(duplicateLink.properties[0].debtComplete,false,'duplicate liability references make equity incomplete');
 
 assert.deepEqual(resolveBudget([{categoryId:'food',amount:10000,effectiveFrom:'2026-01'}],{},'food','2026-03'),{amount:10000,source:'template',effectiveFrom:'2026-01',month:'2026-03',categoryId:'food'});
 assert.equal(resolveBudget([{categoryId:'food',amount:10000,effectiveFrom:'2026-01'},{categoryId:'food',amount:12000,effectiveFrom:'2026-07'}],{},'food','2026-06').amount,10000);
@@ -216,6 +228,17 @@ try {
   const undone=await call('goal-allocation-undo',{batchId:allocationResult.batchId,revision:publicData.revision});assert.equal(undone.status,200);
   publicData=await(await call('state')).json();const reallocated=await call('goal-allocations',{goalId:goal.id,allocations:[{accountId:cashAccount.id,amount:100000}],revision:publicData.revision});assert.equal(reallocated.status,200);
   publicData=await(await call('state')).json();assert.equal((await call('goal',{action:'archive',id:goal.id,revision:publicData.revision})).status,200);
+  publicData=await(await call('state')).json();
+  const homeResponse=await call('property',{name:'Test Duplex',address:'Synthetic address',ownershipBps:10000,valuation:10000000,valuationAsOf:new Date().toISOString().slice(0,10),valuationSource:'owner_estimate',revision:publicData.revision});assert.equal(homeResponse.status,200);const home=(await homeResponse.json()).property;
+  publicData=await(await call('state')).json();const liabilityResponse=await call('manual-account',{name:'Mortgage Liability',type:'liability',balance:-8000000,currency:'USD',asOf:new Date().toISOString().slice(0,10),revision:publicData.revision});assert.equal(liabilityResponse.status,200);const liability=(await liabilityResponse.json()).account;
+  publicData=await(await call('state')).json();const loanResponse=await call('mortgage',{propertyId:home.id,lender:'Local Servicer',loanType:'fixed',linkedAccountId:liability.id,statementBalance:11000000,balanceAsOf:new Date().toISOString().slice(0,10),originalPrincipal:12000000,originationDate:'2020-10-25',annualRatePercent:'0',termMonths:120,ownerDebtShareBps:10000,components:{principalInterest:100000,extraPrincipal:0},revision:publicData.revision});assert.equal(loanResponse.status,200);const loan=(await loanResponse.json()).mortgage;
+  publicData=await(await call('state')).json();const duplicateLien=await call('mortgage',{propertyId:home.id,lender:'Duplicate',loanType:'heloc',linkedAccountId:liability.id,statementBalance:500000,balanceAsOf:new Date().toISOString().slice(0,10),ownerDebtShareBps:10000,revision:publicData.revision});assert.equal(duplicateLien.status,400,'one provider liability cannot be linked to multiple mortgage records');
+  publicData=await(await call('state')).json();const statementUpdate=await call('mortgage',{...loan,statementBalance:10900000,balanceAsOf:new Date().toISOString().slice(0,10),revision:publicData.revision});assert.equal(statementUpdate.status,200);publicData=await(await call('state')).json();assert.equal(publicData.mortgageSnapshots.filter(snapshot=>snapshot.mortgageId===loan.id).length,2,'observed statement changes append a historical snapshot');
+  const projection=await(await call('mortgage-projection',{id:loan.id})).json();assert.equal(projection.projection.base.payment,100000);assert.equal(projection.statementBalance,10900000,'projection does not replace the observed statement balance');assert.equal(projection.projectedBalanceAtStatement,4800000,'statement comparison uses modeled elapsed monthly payments');
+  publicData=await(await call('state')).json();const secondLien=await call('mortgage',{propertyId:home.id,lender:'Second Lien',loanType:'heloc',statementBalance:500000,balanceAsOf:new Date().toISOString().slice(0,10),ownerDebtShareBps:10000,revision:publicData.revision});assert.equal(secondLien.status,200);
+  publicData=await(await call('state')).json();const homeSummary=publicData.propertySummary.properties.find(property=>property.id===home.id);assert.equal(homeSummary.wholePropertyEquity,-1400000,'API equity includes every linked and manual lien');
+  const unsupportedProjection=await(await call('mortgage-projection',{id:(await secondLien.json()).mortgage.id})).json();assert.equal(unsupportedProjection.projection.available,false,'unsupported loan types do not receive fixed-rate schedules');
+  publicData=await(await call('state')).json();assert.equal((await call('property',{id:home.id,action:'archive',revision:publicData.revision})).status,200);
   const csv={account:'Manual account',csv:'Date,Merchant,Amount,Category\n2026-10-01,Meijer,22.35,Groceries'};
   const previewResponse=await call('import-preview',csv);assert.equal(previewResponse.status,200);const csvPreview=await previewResponse.json();assert.equal(csvPreview.rows,1);assert.deepEqual(csvPreview.headers,['Date','Merchant','Amount','Category']);
   const imported=await call('import',{...csv,revision:csvPreview.revision});assert.equal(imported.status,200);const importResult=await imported.json();assert.equal(importResult.imported,1);assert.ok(importResult.batchId);
@@ -319,6 +342,7 @@ const manualHtml=await clientPage('https://ledger.test/',{...pageBase,accounts:[
 assert.ok(manualHtml.includes('Your records are ready'));
 assert.ok(manualHtml.includes('Manual Savings'));
 assert.ok(manualHtml.includes('$1,234.56'));
+const homeHtml=await clientPage('https://ledger.test/?page=home',{...pageBase,properties:[{id:'house',name:'Test Home',ownershipBps:10000}],mortgages:[],propertySummary:{properties:[{id:'house',name:'Test Home',ownershipBps:10000,valuation:30000000,valuationAsOf:'2026-10-25',valuationSource:'appraisal',wholePropertyEquity:30000000,ownerValue:30000000,ownerEquity:30000000,debtComplete:true,mortgages:[]}],propertyCount:1}});assert.ok(homeHtml.includes('Test Home'));assert.ok(homeHtml.includes('Add mortgage / lien'));
 const goalsHtml=await clientPage('https://ledger.test/?page=goals',{...pageBase,goalSummary:{goals:[{id:'goal-1',name:'Emergency Fund',target:100000,targetDate:'2027-12-31',priority:1,funded:25000,backed:25000,provisional:0,reserved:25000,shortfall:75000,accountShortfall:0,monthlyContribution:5000,projection:{requiredMonthly:6250,overdue:false,projectedAtTarget:85000,projectedShortfall:15000}}],accounts:[],unallocatedTotal:50000,provisionalTotal:0},goalAllocations:[]});assert.ok(goalsHtml.includes('Emergency Fund'));assert.ok(goalsHtml.includes('Allocate cash'));
 const investmentsHtml=await clientPage('https://ledger.test/?page=investments',{...pageBase,items:[{id:'investment-item',name:'Fidelity',product:'investments',error:'Update unavailable'}],accounts:[{id:'plaid:investment-item:account-1',itemId:'investment-item',name:'Brokerage',type:'investment',balance:100000,currency:'USD'}],holdings:[{itemId:'investment-item',accountId:'plaid:investment-item:account-1',name:'Index fund',ticker:'IDX',quantity:2,value:100000,currency:'USD',asOf:'2026-10-01'}]});
 assert.ok(investmentsHtml.includes('Investment account balances'));
