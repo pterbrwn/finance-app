@@ -77,7 +77,7 @@ Code-only log. No production records, account names, credentials, private origin
 
 ## T05 — Explicit app states and usable navigation
 
-**Status:** Complete. Commit recorded below after verification.
+**Status:** Complete. Commit: `cc273d1`.
 
 - Removed automatic demo selection based on the absence of linked items or transactions. New users see an honest empty state with saved account/budget information; synthetic data requires an explicit preview action and has a persistent exit control.
 - Added loading, initial error, failed-refresh/stale, and linked-but-importing messages. Errors do not replace real balances with sample data.
@@ -87,6 +87,19 @@ Code-only log. No production records, account names, credentials, private origin
 - Finance/browser checks cover empty, budget-only, manual-only, linked-but-importing, initial-error, explicit demo, and hostile month-query states. Full finance, SQLite, and isolated HTTP suites passed in a disposable source copy under Node 24.
 
 **Next:** T06, custom categories and budget buckets.
+
+## T06 — Saved custom categories and budget buckets
+
+**Status:** Complete. Commit recorded below after verification.
+
+- Added stable IDs and expense kinds for custom buckets, plus stable generated IDs and protected kinds for built-in Income and Transfers.
+- Added create, rename, move, and archive APIs. Renaming retains the category ID, updates budget labels and existing assignments, and preserves the previous source category where needed. Archived categories remain selectable on historical transactions but are excluded from new assignments.
+- Added creation from Budgets and Transactions, an optional monthly limit, custom category filtering/editing, and a custom-category manager with rename, order, and archive controls. Labels are HTML escaped.
+- Legacy string categories receive deterministic IDs when first read and are materialized on mutation. Demo edits remain confined to the explicit synthetic preview.
+- State revisions now increment atomically for writes. Category assignment, bucket create/rename/archive/order, and budget saves can require the observed revision; stale edits return 409.
+- Finance tests cover ampersand names, normalization conflicts, stable IDs, assignment/budget rename, archive history, and stale category/budget edits. Full finance, SQLite, and HTTP suites passed in an isolated Node 24 copy.
+
+**Next:** T07, monthly template/override semantics and budget UI.
 
 ## T05 — Explicit app states and usable navigation
 

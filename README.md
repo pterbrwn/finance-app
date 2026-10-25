@@ -96,6 +96,8 @@ The same file imported into the same account is idempotent. Overlapping or modif
 
 The dashboard starts with your actual saved state, including an honest empty view for new accounts. Sample data appears only after you choose **Explore sample data** or **Open sample preview**, and the preview has an always-visible exit action. Loading failures show an error without substituting example balances. A failed refresh keeps the last loaded records visible with a stale/error notice. The Overview, Transactions, Budgets, Accounts, Investments, Goals, Home planner, and Settings pages are addressable with `?page=...`; month, search, category, and account filters are kept in the URL for links and browser history. On narrow screens the navigation scrolls horizontally while keeping every destination reachable.
 
+Budgets supports custom expense buckets with optional monthly limits. A custom bucket has a stable ID, can be renamed/reordered/archived, and remains attached to historical assignments when its display name changes. Income and Transfers remain protected system categories. Edits send an expected revision so a stale tab receives a conflict and can reload instead of silently replacing a newer change.
+
 ## Financial behavior
 
 Amounts use integer cents. Pending transactions and non-USD currencies are excluded from totals. Transfers and credit card payments are excluded from spending; refunds reduce category spending. Income less spending is net cash flow, not change in account balance. Budget limits recur monthly without rollover.

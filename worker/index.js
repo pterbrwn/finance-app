@@ -9,7 +9,15 @@ import { repositoryFor } from '../server/repository.mjs';
 
 export { categoryFor, fromPlaid, totals, applyChanges, applySyncPages, investmentHoldings };
 
-const categories = state => [...CATEGORIES, ...(state.customCategories || [])];
+const normalizeCategory = value => String(value || '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+const systemCategories = CATEGORIES.map((name,index) => ({ id: 'system:'+name.toLowerCase().replace(/[^a-z0-9]+/g,'-'), name, normalizedName: normalizeCategory(name), kind: name === 'Income' ? 'income' : name === 'Transfers' ? 'transfer' : 'expense', system: true, order: index, archivedAt: null }));
+function categoryCatalog(state) {
+  const legacy = (state.customCategories || []).map((value,index) => typeof value === 'string' ? { id:'legacy:'+encodeURIComponent(normalizeCategory(value)), name:value, normalizedName:normalizeCategory(value), kind:'expense', system:false, order:CATEGORIES.length+index, archivedAt:null } : value);
+  const known = new Set((state.categoryRecords || []).map(category => category.id));
+  const customs = [...(state.categoryRecords || []), ...legacy.filter(category => !known.has(category.id) && !(state.categoryRecords || []).some(existing => existing.normalizedName === category.normalizedName))];
+  return [...systemCategories, ...customs].sort((a,b) => a.order-b.order || a.name.localeCompare(b.name));
+}
+const categories = state => categoryCatalog(state).filter(category => !category.archivedAt).map(category => category.name);
 const apiError = (message, status = 400) => Object.assign(new Error(message), { status });
 function response(data, status = 200) { return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }); }
 function ready(env) { return !env.LOCAL_ONLY && !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET && env.TOKEN_ENCRYPTION_KEY && ['sandbox', 'production'].includes(env.PLAID_ENV)); }
@@ -17,8 +25,12 @@ async function readState(env) {
   return repositoryFor(env).read();
 }
 async function mutate(env, update) {
-  return repositoryFor(env).mutate(update);
+  return repositoryFor(env).mutate(async state => {
+    await update(state);
+    state.revision = (Number.isSafeInteger(state.revision) ? state.revision : 0) + 1;
+  });
 }
+function checkRevision(state,input) { if (input.revision !== undefined && input.revision !== state.revision) throw apiError('This data changed in another tab. Reload it and try again.', 409); }
 async function body(request) {
   const text = await request.text();
   if (text.length > 2_000_000) throw apiError('This upload is too large.', 413);
@@ -140,7 +152,7 @@ async function syncBanks(env) {
   } finally { await mutate(env, s => { if (s.lease?.id === leaseId) s.lease = null; }); }
 }
 function publicState(state, env) {
-  return { ...state, categories: categories(state), holdings: state.holdings || [], owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured' } };
+  return { ...state, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured' } };
 }
 export default {
   async fetch(request, env) {
@@ -196,9 +208,10 @@ export default {
       if (['/api/sync', '/api/scheduled-sync'].includes(path) && request.method === 'POST') return response(await syncBanks(env));
       if (path === '/api/category' && request.method === 'POST') {
         const input = await body(request);
-        if (!categories(state).includes(input.category)) throw apiError('Choose a valid category.');
-        await mutate(env, s => { const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); t.override = input.category; });
-        return response({ ok: true });
+        const category = categoryCatalog(state).find(c => c.id === input.categoryId && !c.archivedAt) || categoryCatalog(state).find(c => c.name === input.category && !c.archivedAt);
+        if (!category) throw apiError('Choose a valid category.');
+        const saved = await mutate(env, s => { checkRevision(s,input); const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); const live = categoryCatalog(s).find(c => c.id === category.id && !c.archivedAt); if (!live) throw apiError('That category is no longer available.', 409); t.override = live.name; t.overrideCategoryId = live.id; });
+        return response({ ok: true, revision: saved.revision });
       }
       if (path === '/api/import' && request.method === 'POST') {
         const input = await body(request);
@@ -216,20 +229,61 @@ export default {
       }
       if (path === '/api/budget' && request.method === 'POST') {
         const input = await body(request);
-        if (!categories(state).includes(input.category) || ['Income','Transfers'].includes(input.category) || !Number.isSafeInteger(input.amount) || input.amount < 0 || input.amount > 100_000_000) throw apiError('Enter a valid monthly budget.');
-        await mutate(env, s => { s.owner = user; s.budgets[input.category] = input.amount; });
-        return response({ ok: true });
+        const category = categoryCatalog(state).find(c => c.id === input.categoryId && !c.archivedAt) || categoryCatalog(state).find(c => c.name === input.category && !c.archivedAt);
+        if (!category || category.kind !== 'expense' || !Number.isSafeInteger(input.amount) || input.amount < 0 || input.amount > 100_000_000) throw apiError('Enter a valid monthly budget.');
+        const saved=await mutate(env, s => { checkRevision(s,input); const live=categoryCatalog(s).find(c=>c.id===category.id&&!c.archivedAt); if(!live) throw apiError('That category is no longer available.',409); s.owner = user; s.budgets[live.name] = input.amount; s.budgetCategoryIds = { ...(s.budgetCategoryIds || {}), [live.id]: live.name }; });
+        return response({ ok: true, revision:saved.revision });
       }
       if (path === '/api/category-create' && request.method === 'POST') {
         const input = await body(request), name = typeof input.name === 'string' ? input.name.trim().replace(/\s+/g, ' ') : '';
-        if (!name || name.length > 40 || !/^[\p{L}\p{N}][\p{L}\p{N} .&'()/_-]*$/u.test(name) || Object.hasOwn(Object.prototype, name)) throw apiError('Use a bucket name up to 40 characters, starting with a letter or number.');
-        if (!Number.isSafeInteger(input.amount) || input.amount < 0 || input.amount > 100_000_000) throw apiError('Enter a valid monthly budget.');
-        await mutate(env, s => {
-          if (categories(s).some(c => c.toLowerCase() === name.toLowerCase())) throw apiError('A bucket with this name already exists.', 409);
+        if (!name || name.length > 80 || !/^[\p{L}\p{N}][\p{L}\p{N} .&'’()/_-]*$/u.test(name) || Object.hasOwn(Object.prototype, name)) throw apiError('Use a bucket name up to 80 characters, starting with a letter or number.');
+        if (input.amount !== undefined && input.amount !== null && (!Number.isSafeInteger(input.amount) || input.amount < 0 || input.amount > 100_000_000)) throw apiError('Enter a valid monthly budget.');
+        const saved=await mutate(env, s => {
+          checkRevision(s,input);
+          if (categoryCatalog(s).some(c => c.normalizedName === normalizeCategory(name))) throw apiError('A bucket with this name already exists.', 409);
           if ((s.customCategories || []).length >= 50) throw apiError('Use up to 50 custom budget buckets.');
-          s.owner = user; s.customCategories = [...(s.customCategories || []), name]; s.budgets[name] = input.amount;
+          const catalog = categoryCatalog(s), records = s.categoryRecords || catalog.filter(c => !c.system);
+          const category = { id: crypto.randomUUID(), name, normalizedName: normalizeCategory(name), kind: 'expense', system: false, order: Math.max(CATEGORIES.length-1,...catalog.map(c=>c.order))+1, archivedAt: null };
+          s.owner = user; s.categoryRecords = [...records, category]; s.customCategories = [...(s.customCategories || []), name];
+          if (input.amount !== undefined && input.amount !== null) s.budgets[name] = input.amount;
+          s.budgetCategoryIds = { ...(s.budgetCategoryIds || {}), [category.id]: name };
         });
-        return response({ ok: true, category: name });
+        return response({ ok: true, revision:saved.revision, category: categoryCatalog(saved).find(c => c.name === name && !c.system) });
+      }
+      if (path === '/api/category-update' && request.method === 'POST') {
+        const input = await body(request);
+        let result;
+        const saved=await mutate(env, s => {
+          checkRevision(s,input);
+          const records = s.categoryRecords || categoryCatalog(s).filter(c => !c.system), index = records.findIndex(c => c.id === input.id);
+          if (index < 0) throw apiError('Custom category not found.', 404);
+          const category = records[index];
+          if (category.system || category.kind !== 'expense') throw apiError('System categories cannot be changed here.', 400);
+          if (input.action === 'rename') {
+            const name = typeof input.name === 'string' ? input.name.trim().replace(/\s+/g, ' ') : '';
+            if (!name || name.length > 80 || !/^[\p{L}\p{N}][\p{L}\p{N} .&'’()/_-]*$/u.test(name)) throw apiError('Use a bucket name up to 80 characters, starting with a letter or number.');
+            const normalizedName = normalizeCategory(name);
+            if (categoryCatalog(s).some(c => c.id !== category.id && c.normalizedName === normalizedName)) throw apiError('A bucket with this name already exists.', 409);
+            const oldName = category.name;
+            records[index] = { ...category, name, normalizedName };
+            if (Object.hasOwn(s.budgets || {}, oldName)) { s.budgets[name] = s.budgets[oldName]; delete s.budgets[oldName]; s.budgetCategoryIds = { ...(s.budgetCategoryIds || {}), [category.id]: name }; }
+            s.transactions.forEach(t => { if (t.overrideCategoryId === category.id || (!t.overrideCategoryId && t.override === oldName)) { t.overrideCategoryId = category.id; t.override = name; } if (t.category === oldName) { t.sourceCategory ??= oldName; t.categoryId = category.id; t.category = name; } });
+            s.customCategories = (s.customCategories || []).map(value => value === oldName ? name : value);
+            if (s.budgetCategoryIds?.[category.id]) s.budgetCategoryIds[category.id] = name;
+          } else if (input.action === 'archive') {
+            records[index] = { ...category, archivedAt: new Date().toISOString() };
+          } else if (input.action === 'move') {
+            if (!['up','down'].includes(input.direction)) throw apiError('Choose a valid category order.');
+            const ordered = records.map((c,i)=>({c,i})).sort((a,b)=>a.c.order-b.c.order);
+            const position = ordered.findIndex(entry=>entry.c.id===category.id), otherPosition = position + (input.direction === 'up' ? -1 : 1);
+            if (otherPosition >= 0 && otherPosition < ordered.length) {
+              const first=ordered[position], second=ordered[otherPosition], order=first.c.order;
+              records[first.i]={...first.c,order:second.c.order}; records[second.i]={...second.c,order};
+            }
+          } else throw apiError('Choose rename, archive, or move.');
+          s.owner = user; s.categoryRecords = records; result = records[index];
+        });
+        return response({ ok: true, revision:saved.revision, category: result });
       }
       if (path === '/api/investment-account' && request.method === 'POST') {
         const input = await body(request), name = typeof input.name === 'string' ? input.name.trim() : '';
