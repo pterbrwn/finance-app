@@ -28,6 +28,11 @@ try {
   assert.equal(read.items[0].token.data, 'synthetic-ciphertext');
   assert.equal(read.accounts[0].balance, 12345);
   assert.equal(read.budgets.Travel, 40000);
+  await Promise.all([
+    repository.mutate(state => { state.budgets.Dining = 10000; }),
+    repository.mutate(state => { state.budgets.Housing = 150000; })
+  ]);
+  assert.deepEqual({ ...(await repository.read()).state.budgets }, { Travel: 40000, Dining: 10000, Housing: 150000 });
   await assert.rejects(repository.mutate(state => {
     state.accounts.push({ id: 'orphan-account', itemId: 'missing-item' });
   }));

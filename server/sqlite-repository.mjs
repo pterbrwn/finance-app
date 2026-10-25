@@ -42,6 +42,7 @@ export async function openLedgerDatabase(path) {
 }
 
 export function createSqliteRepository(db) {
+  let writes = Promise.resolve();
   const statements = {
     meta: db.prepare('SELECT payload_json FROM state_meta WHERE singleton=1'),
     rows: Object.fromEntries(TABLES.map(name => [name, db.prepare(`SELECT payload_json FROM ${name} ORDER BY rowid`)])),
@@ -94,10 +95,14 @@ export function createSqliteRepository(db) {
   return Object.freeze({
     async read() { return { state: load() }; },
     async mutate(update) {
-      const state = load();
-      await update(state);
-      persist(state);
-      return state;
+      const operation = writes.then(async () => {
+        const state = load();
+        await update(state);
+        persist(state);
+        return state;
+      });
+      writes = operation.catch(() => {});
+      return operation;
     },
     async importLegacyState(state, checksum) {
       validateState(state);
