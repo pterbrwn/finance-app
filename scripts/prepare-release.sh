@@ -20,6 +20,8 @@ work_dir="$(mktemp -d "${release_root}/.prepare-${release_id}.XXXXXX")"
 trap 'chmod -R u+w "$work_dir" 2>/dev/null || true; rm -rf "$work_dir"' EXIT
 mkdir -p "$work_dir/source" "$work_dir/release/scripts" "$work_dir/release/dist" "$work_dir/release/deploy"
 git -C "$repo_root" archive --format=tar "$release_id" | tar -xf - -C "$work_dir/source"
+node_dir="$(dirname "$node_bin")"
+PATH="$node_dir:$PATH" "$node_bin" "$node_dir/../lib/node_modules/npm/bin/npm-cli.js" ci --omit=dev --prefix "$work_dir/source"
 (cd "$work_dir/source" && LEDGER_BUILD_ID="$release_id" "$node_bin" scripts/build.mjs)
 cp -R "$work_dir/source/dist/." "$work_dir/release/dist/"
 cp "$work_dir/source/package.json" "$work_dir/release/package.json"
@@ -30,7 +32,6 @@ done
 for file in ledger.service ledger-sync.service ledger-sync.timer ledger-backup.service ledger-backup.timer; do
   cp "$work_dir/source/deploy/$file" "$work_dir/release/deploy/$file"
 done
-node_dir="$(dirname "$node_bin")"
 PATH="$node_dir:$PATH" "$node_bin" "$node_dir/../lib/node_modules/npm/bin/npm-cli.js" ci --omit=dev --prefix "$work_dir/release"
 "$node_bin" --input-type=module - "$work_dir/release" "$release_id" "$commit_hash" <<'NODE'
 import { createHash } from 'node:crypto';

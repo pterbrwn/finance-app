@@ -353,3 +353,29 @@ Code-only log. No production records, account names, credentials, private origin
 - The working checkout `dist`, live service, production state, and timers were not changed. The browser performance/accessibility acceptance remains unverified and is tracked under C10.
 
 **Next:** C09, repair the packaged importer and verify immutable release preparation/activation/rollback with synthetic release state. Keep C10 browser acceptance independent if tooling is available.
+
+
+## C09 — Immutable release packaging and rollback controls
+
+**Status:** Synthetic package, importer, runtime, backup/restore, health, and rollback checks passed. No release was activated in the live service.
+
+- The legacy importer now resolves its repository module from either the source checkout or packaged `dist/server` tree. Release preparation archives an exact commit, installs locked production dependencies under Node 24.22.1, ships app/sync/backup units, records commit/runtime/schema compatibility, hashes all package files, and publishes a read-only release directory. Existing release IDs are refused before replacement.
+- Activation verifies release hashes and identity before switching the current symlink. It restarts the service, checks `/api/health` against the release/schema bounds and verifies the app asset. Failed startup restores prior code only when the current database schema is within that release's compatibility range; otherwise the service is stopped and the database remains in place for explicit recovery.
+- `scripts/check-release.mjs` runs from outside the packaged checkout. A candidate prepared from commit `1b7f438` passed import of a synthetic legacy ledger, backup, restore, direct packaged startup, health/build/schema identity, static asset delivery, compatible rollback, and incompatible-downgrade refusal. A duplicate preparation attempt correctly failed without replacing the existing candidate. Release files were mode `444` and the top directory mode `555` after publication.
+- `npm run check` passed on a disposable copy after the importer change. Packaging checks reported zero npm audit vulnerabilities; npm emitted a native install-script policy warning, while the packaged ARM64 SQLite binding loaded and passed the migration/import/server checks.
+- The temporary candidate was not selected by the production `current` link; no live unit/config/data/timer changed. This is synthetic release evidence, not C11's final gate or C12–C13 production readiness.
+
+**Next:** C10, browser and accessibility acceptance. A pinned ARM64 browser and Playwright/Axe tooling are now installed locally; the automated browser suite is passing. Manual screen-reader and uncovered interaction flows still require owner desktop review.
+
+
+## C10 — Browser and accessibility acceptance
+
+**Status:** Automated browser acceptance passes in an isolated synthetic environment; required manual checks remain open.
+
+- Added pinned development-only Playwright and Axe dependencies plus `scripts/check-browser.mjs`. The test starts a loopback-only server with a fresh temporary data/config directory, uses synthetic entries only, and removes that state at completion. Chromium 156.0.8078.4 runs locally on ARM64 under the pinned Node 24.22.1 runtime.
+- Real DOM coverage exercises empty/manual-only state, all primary views, CSV cancel/preview/commit/undo, filtered search, category bulk edit/undo, CSV export, category create/keyboard rename, zero budget, manual depository account, goal save/allocation and month-end schedule, and explicit-cost scenario save. Automated Axe scans report no serious or critical WCAG 2.0/2.1 A/AA violations in the exercised views/dialogs.
+- Layout checks passed at 1440, 390, and 320 CSS px, with a 720 CSS px check representing 200% zoom from a 1440 px viewport. Mobile navigation controls meet 44 px minimum height. The browser suite also verifies keyboard submission for category rename and Escape handling for dialogs.
+- `npm run check`, `npm run check:local-http`, and `scripts/check-browser.mjs` passed under Node 24.22.1 in disposable source copies. No root `dist`, live service, production state/configuration, or timer was changed.
+- The plan's full manual suite is still pending: screen-reader flows, focus return/visibility and error announcements, category archive and recurring/month overrides, manual investments, mortgage and unsupported projection, scenario preview/compare/actions, backup/sync stale/error recovery, slow/offline/conflict preservation, long-name and chart alternatives, and owner-device private-access review. Orca could not be exercised because this session has no graphical desktop session. Do not treat C10 as fully accepted until these checks have recorded evidence.
+
+**Next:** C11 automated synthetic release/security gate can proceed independently, but final acceptance and C12/C13 remain pending outstanding manual evidence and private migration prerequisites.
