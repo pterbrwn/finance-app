@@ -111,7 +111,7 @@ for (const size of sizes) {
   }, 1));
   results.push(await measure('bulk_category_edit_100', async () => {
     const current = (await jsonCall(env, 'state')).value;
-    const ids = current.transactions.slice(0, 100).map(row => row.id);
+    const ids = rows.slice(0, 100).map(row => row.id);
     const response = await jsonCall(env, 'category-bulk', { ids, categoryId: groceries.id, revision: current.revision });
     return response;
   }, 1));

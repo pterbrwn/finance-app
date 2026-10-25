@@ -337,3 +337,16 @@ Code-only log. No production records, account names, credentials, private origin
 - `docs/PERFORMANCE_BASELINE.md` records fixture shape, method, full timings, caveats, targets, and C08 scope. The benchmark used only synthetic data and removed its temporary databases. No app source runtime, production data, live service, timer, or checkout `dist` was changed.
 
 **Next:** C08, bound bootstrap/page/summary reads and replace measured full-state mutation bottlenecks.
+
+
+## C08 — Bounded data reads and measured bottlenecks
+
+**Status:** Read-path slice is implemented and verified. Scoped writes remain open.
+
+- SQLite dashboard responses now omit transaction history, complete scenario/version data, import/category-edit and goal-allocation ledgers, mortgage snapshot history, tokens, and provider cursors. They retain the account/category/budget/goal/property summaries the current views need, cap balance snapshots to the latest 12, and return transaction counts/month choices. Scenario details are fetched when the Home planner opens; Sync status and health read metadata without loading transactions.
+- Added bounded month-summary and stable filtered transaction-page APIs. SQLite page queries return at most 100 rows, retain Unicode case-insensitive merchant matching and existing filter semantics, and use date/account/item indexes from schema migration 003. Month summaries preserve complete posted USD totals, refund treatment, purchase counts, weekly chart data, budgets, and six recent transactions. Export walks the same page API only after explicit user action; JSON storage keeps the response contract with its transitional full-state implementation.
+- The browser now renders overview charts, budget totals, comparisons, recent rows, month choices, and paged transaction views from the bounded DTOs. It loads scenario history only in the Home planner and exports matching transactions through paginated reads.
+- After the read slice, the 100k `/api/state` payload fell from 21.24 MB to 11.3 KB; warm state p95 was 181.98 ms and filtered page p95 was 201.31 ms / 10.7 KB. The same-host interim results and method caveats are recorded in `docs/PERFORMANCE_BASELINE.md`. Read performance targets pass. Whole-state writes remain around 2.6–3.4 seconds on these synthetic workloads, so the task is not complete.
+- Pinned Node 24.22.1 `npm run check` and `npm run check:local-http` passed in disposable copies, including API summary parity, Unicode/page/order/schema tests, bounded response assertions, and existing import/restart flows. The working checkout `dist`, live service, production state, and timers were not changed.
+
+**Next:** C08 write-path slice, scoped transactional category/bulk/import/sync mutations and regression measurements.

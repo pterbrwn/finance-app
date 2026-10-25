@@ -226,7 +226,7 @@ async function startSync(env,source='manual'){
   const runner=Promise.resolve().then(()=>runSyncJob(env,id));syncRunners.set(env,{id,promise:runner});
   return{job:saved.syncJob,joined:false};
 }
-async function syncStatus(env){let {state}=await readState(env);if(state.syncJob?.status==='running'&&!syncRunners.has(env)){const id=state.syncJob.id;state=await mutate(env,s=>{if(s.syncJob?.id===id&&s.syncJob.status==='running'){s.syncJob.status='interrupted';s.syncJob.finishedAt=new Date().toISOString();s.syncJob.failures=[...(s.syncJob.failures||[]),{bank:'Sync',message:'The previous sync stopped before it completed.'}];}});}return state.syncJob||null;}
+async function syncStatus(env){const repository=repositoryFor(env);let state=typeof repository.readSyncJob==='function'?{syncJob:await repository.readSyncJob()}:(await readState(env)).state;if(state.syncJob?.status==='running'&&!syncRunners.has(env)){const id=state.syncJob.id;state=await mutate(env,s=>{if(s.syncJob?.id===id&&s.syncJob.status==='running'){s.syncJob.status='interrupted';s.syncJob.finishedAt=new Date().toISOString();s.syncJob.failures=[...(s.syncJob.failures||[]),{bank:'Sync',message:'The previous sync stopped before it completed.'}];}});}return state.syncJob||null;}
 
 async function publicState(state, env) {
   const currentBudgetMonth = monthInReportingZone();
@@ -261,6 +261,25 @@ export default {
       if (request.method === 'POST' && request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) return response({ error: 'Request origin is not allowed.' }, 403);
       const user = request.headers.get('oai-authenticated-user-id');
       if (!user) return response({ error: 'Local owner access is required.' }, 401);
+      if(['link-token','exchange-token','sync','scheduled-sync','sync-status','disconnect','delete-history'].some(action=>path===`/api/${action}`)&&!ready(env))return response({error:'Bank connections are disabled. Import CSV files for local-only operation.'},503);
+      const repository=repositoryFor(env);
+      if(request.method==='GET'&&typeof repository.readDashboard==='function'&&['/api/health','/api/state','/api/transactions','/api/month-summary','/api/scenarios','/api/sync-status'].includes(path)){
+        const state=path==='/api/state'?(await repository.readDashboard()).state:await repository.readIdentity();
+        if(state.owner&&state.owner!==user)return response({error:'This dashboard belongs to another account.'},403);
+        if(path==='/api/health')return response({codeVersion:typeof BUILD_ID==='string'?BUILD_ID:'unversioned',schemaVersion:Number.isInteger(repository.schemaVersion)?repository.schemaVersion:Number.isInteger(state.version)?state.version:null,configurationReady:ready(env),localOnly:!!env.LOCAL_ONLY,lastSync:state.lastSync||null});
+        if(path==='/api/state')return response(await publicState(state,env));
+        if(path==='/api/transactions'){
+          const query=url.searchParams,page=Number(query.get('page')||1),limit=Math.min(100,Math.max(1,Number(query.get('limit')||50))),search=(query.get('search')||'').slice(0,120),category=query.get('category')||'',accountId=query.get('account')||'',from=query.get('from')||'',to=query.get('to')||'',review=query.get('review')==='true';
+          if(!Number.isSafeInteger(page)||page<1||!Number.isSafeInteger(limit)||from&&!validDateOnly(from)||to&&!validDateOnly(to))throw apiError('Choose a valid transaction page and date range.');
+          return response(await repository.queryTransactions({page,limit,search,category,accountId,from,to,review}));
+        }
+        if(path==='/api/month-summary'){
+          const month=url.searchParams.get('month')||monthInReportingZone();if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(month))throw apiError('Choose a valid reporting month.');
+          return response(await repository.queryMonthSummary(month));
+        }
+        if(path==='/api/sync-status')return response({job:await syncStatus(env)});
+        return response({scenarios:await repository.readScenarios()});
+      }
       const { state, storageSchemaVersion } = await readState(env);
       if (state.owner && state.owner !== user) return response({ error: 'This dashboard belongs to another account.' }, 403);
       if (path === '/api/health' && request.method === 'GET') return response({ codeVersion: typeof BUILD_ID === 'string' ? BUILD_ID : 'unversioned', schemaVersion: Number.isInteger(storageSchemaVersion) ? storageSchemaVersion : Number.isInteger(state.version) ? state.version : null, configurationReady: ready(env), localOnly: !!env.LOCAL_ONLY, lastSync: state.lastSync || null });

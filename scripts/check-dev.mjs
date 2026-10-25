@@ -66,8 +66,11 @@ try {
   saved.forEach(response => assert.equal(response.status, 200));
   bucket = await createLocalBucket(directory);
   const persisted = await (await local('state')).json();
-  assert.equal(persisted.transactions.length, 1);
-  assert.equal(persisted.transactions[0].amount, 4250);
+  assert.equal(persisted.transactionCount, 1);
+  assert.equal(persisted.transactions, undefined, 'routine state response omits transaction history');
+  const persistedPage=await(await local('transactions?limit=10&page=1')).json();
+  assert.equal(persistedPage.transactions.length,1);
+  assert.equal(persistedPage.transactions[0].amount,4250);
   assert.deepEqual(persisted.budgets, { Groceries: 50000, Dining: 20000 });
   assert.equal(persisted.setup.configured, false);
   console.log('Local storage checks passed: CSV imports, duplicate detection, concurrent updates, and persistence across storage instances.');
@@ -99,7 +102,8 @@ try {
     const state = await (await call('/api/state')).json();
     assert.equal(state.setup.configured, false);
     assert.equal(state.setup.localOnly, true);
-    assert.deepEqual(state.transactions, []);
+    assert.equal(state.transactionCount, 0);
+    assert.equal(state.transactions, undefined);
     assert.equal(await rawGetStatus('/api/state', { Host: 'untrusted.test' }), 403);
     assert.equal((await call('/api/budget', { category: 'Groceries', amount: 50000 }, { Origin: 'https://other.test' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
@@ -124,8 +128,11 @@ try {
     await stop();
     origin = await start();
     const restored = await (await call('/api/state')).json();
-    assert.equal(restored.transactions.length, 1);
-    assert.equal(restored.transactions[0].amount, 4250);
+    assert.equal(restored.transactionCount, 1);
+    assert.equal(restored.transactions, undefined);
+    const restoredPage=await(await call('/api/transactions?limit=10&page=1')).json();
+    assert.equal(restoredPage.transactions.length,1);
+    assert.equal(restoredPage.transactions[0].amount,4250);
     assert.equal(restored.budgets.Groceries, 50000);
     assert.equal(restored.budgets.Dining, 20000);
     assert.equal(JSON.parse(await readFile(join(directory, 'state.json'), 'utf8')).owner, 'local-owner');

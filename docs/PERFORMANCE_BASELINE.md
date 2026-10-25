@@ -36,3 +36,9 @@ Each dataset has eight manual accounts, evenly distributed transactions from 201
 - The 100k workload reached about 1.03 GB peak RSS and 722 MB heap. C08 must avoid building repeated full-state copies for reads and writes.
 
 The filtered-page planning targets were met at both sizes: response below 256 KiB and warm p95 below one second at 10k / two seconds at 100k. This does not satisfy the separate full-state transfer, query-scaling, write-path, or browser-render requirements. Browser input/render delay remains unmeasured pending C10.
+
+## C08 read-path interim measurement
+
+After the first C08 read-path implementation, rerun on the same host and fixture (2026-10-25 UTC). `/api/state` dropped to 11,310 bytes at 10k and 11,311 bytes at 100k. Warm bootstrap p95 was 14.12 ms / 181.98 ms; filtered search page p95 was 26.29 ms / 201.31 ms with 10,625 / 10,735 byte responses. The page is now queried from SQLite using date/account/item indexes and bounded row materialization. Monthly summaries query matching month rows and return aggregates, weekly buckets, recent six records, and total count. The UI requests complete history only through explicit paginated export.
+
+At 100k, sampled peak RSS fell to 753 MB and heap to 390 MB. The read change leaves full-state mutations in place: one category edit and a 100-row bulk edit were about 3.07–3.11 seconds, a sync-page commit 2.60 seconds, 5k import commit 3.41 seconds, and undo 3.18 seconds. These single-sample values are noisy, but confirm that C08's separate scoped-write slice is still required. The JSON repository preserves the same bounded API contract but currently filters its full in-memory state as a transitional path.

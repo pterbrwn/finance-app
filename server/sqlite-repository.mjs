@@ -4,11 +4,12 @@ import { dirname, join, resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 
-const MIGRATION_VERSION = 2;
+const MIGRATION_VERSION = 3;
 const TABLES = ['items', 'accounts', 'transactions', 'holdings'];
 const MIGRATIONS = [
   { version: 1, file: '001-initial.sql' },
-  { version: 2, file: '002-monthly-budgets.sql' }
+  { version: 2, file: '002-monthly-budgets.sql' },
+  { version: 3, file: '003-transaction-query-indexes.sql' }
 ];
 const CORE_TABLES = ['schema_migrations','state_meta','items','accounts','transactions','holdings','custom_categories','budgets','import_batches'];
 const json = value => JSON.stringify(value);
@@ -70,6 +71,7 @@ export async function openLedgerDatabase(path) {
     db.pragma('busy_timeout = 5000');
     db.pragma('journal_mode = WAL');
     db.pragma('synchronous = FULL');
+    db.function('ledger_casefold',{deterministic:true},value=>String(value??'').toLocaleLowerCase('en-US'));
     if(existed&&currentVersion<MIGRATION_VERSION){
       const backupDirectory=join(dirname(filename),'backups');
       await mkdir(backupDirectory,{recursive:true,mode:0o700});await chmod(backupDirectory,0o700);
@@ -124,6 +126,75 @@ export function createSqliteRepository(db) {
     state.monthlyBudgets = Object.fromEntries(db.prepare('SELECT month,category_id AS categoryId,amount FROM monthly_budgets ORDER BY month,category_id').all().map(row => [`${row.month}:${row.categoryId}`,row.amount]));
     return state;
   }
+  function dashboardState() {
+    const metaRow=statements.meta.get();
+    const source=metaRow?parse(metaRow.payload_json):{version:1,owner:null,lastSync:null,lease:null};
+    const {scenarios,goalAllocationLedger,categoryEditBatches,importBatches,mortgageSnapshots,...meta}=source;
+    const state={...meta,lastGoalAllocationUndo:[...(goalAllocationLedger||[])].reverse().find(entry=>!entry.undoneAt)||null,accounts:statements.rows.accounts.all().map(row=>parse(row.payload_json)),items:statements.rows.items.all().map(row=>{const {token,cursor,...item}=parse(row.payload_json);return item;}),holdings:statements.rows.holdings.all().map(row=>parse(row.payload_json))};
+    state.goalAllocations=(state.goalAllocations||[]).filter(allocation=>allocation.active!==false);
+    state.balanceSheetSnapshots=(state.balanceSheetSnapshots||[]).slice(-12);
+    state.customCategories=db.prepare('SELECT name FROM custom_categories ORDER BY rowid').all().map(row=>row.name);
+    state.budgets=Object.fromEntries(db.prepare('SELECT category,amount FROM budgets ORDER BY category').all().map(row=>[row.category,row.amount]));
+    state.budgetTemplates=db.prepare('SELECT category_id AS categoryId,effective_from AS effectiveFrom,amount FROM budget_templates ORDER BY effective_from,category_id').all();
+    state.monthlyBudgets=Object.fromEntries(db.prepare('SELECT month,category_id AS categoryId,amount FROM monthly_budgets ORDER BY month,category_id').all().map(row=>[`${row.month}:${row.categoryId}`,row.amount]));
+    state.transactionCount=db.prepare('SELECT COUNT(*) AS count FROM transactions').get().count;
+    state.transactionMonths=db.prepare("SELECT DISTINCT substr(json_extract(payload_json,'$.date'),1,7) AS month FROM transactions WHERE json_extract(payload_json,'$.date') IS NOT NULL ORDER BY month DESC").all().map(row=>row.month);
+    return state;
+  }
+  function queryTransactionPage({page=1,limit=50,search='',category='',accountId='',from='',to='',review=false}={}) {
+    const clauses=[],values=[];
+    if(search){clauses.push("instr(ledger_casefold(json_extract(payload_json,'$.merchant')) ,?)>0");values.push(search.toLocaleLowerCase('en-US'));}
+    if(category){clauses.push("(json_extract(payload_json,'$.overrideCategoryId')=? OR json_extract(payload_json,'$.override')=? OR json_extract(payload_json,'$.category')=?)");values.push(category,category,category);}
+    if(accountId){clauses.push('account_id=?');values.push(accountId);}
+    if(from){clauses.push("json_extract(payload_json,'$.date')>=?");values.push(from);}
+    if(to){clauses.push("json_extract(payload_json,'$.date')<=?");values.push(to);}
+    if(review)clauses.push("(json_extract(payload_json,'$.review')=1 OR (json_type(payload_json,'$.confidence') IS NOT NULL AND CAST(json_extract(payload_json,'$.confidence') AS REAL)<0.5) OR coalesce(json_extract(payload_json,'$.override'),json_extract(payload_json,'$.category'))='Other')");
+    const where=clauses.length?`WHERE ${clauses.join(' AND ')}`:'';
+    const total=db.prepare(`SELECT COUNT(*) AS count FROM transactions ${where}`).get(...values).count;
+    const transactions=db.prepare(`SELECT payload_json FROM transactions ${where} ORDER BY json_extract(payload_json,'$.date') DESC,id ASC LIMIT ? OFFSET ?`).all(...values,limit,(page-1)*limit).map(row=>parse(row.payload_json));
+    const revision=db.prepare("SELECT coalesce(json_extract(payload_json,'$.revision'),0) AS revision FROM state_meta WHERE singleton=1").get()?.revision||0;
+    return {page,limit,total,transactions,revision};
+  }
+  function monthSummary(month) {
+    const start=`${month}-01`,monthDate=new Date(`${start}T12:00:00Z`),previousDate=new Date(Date.UTC(monthDate.getUTCFullYear(),monthDate.getUTCMonth()-1,1));
+    const previous=`${previousDate.getUTCFullYear()}-${String(previousDate.getUTCMonth()+1).padStart(2,'0')}`;
+    const nextDate=new Date(Date.UTC(monthDate.getUTCFullYear(),monthDate.getUTCMonth()+1,1));
+    const end=new Date(nextDate.getTime()-86400000).toISOString().slice(0,10);
+    const previousEnd=new Date(monthDate.getTime()-86400000).toISOString().slice(0,10);
+    const from=`${previous}-01`;
+    const category="coalesce(json_extract(payload_json,'$.override'),json_extract(payload_json,'$.category'))";
+    const eligible="json_extract(payload_json,'$.pending') IS NOT 1 AND json_extract(payload_json,'$.currency')='USD'";
+    const rows=db.prepare(`SELECT ${category} AS category,
+      SUM(CASE WHEN ${eligible} AND ${category} NOT IN ('Income','Transfers') THEN json_extract(payload_json,'$.amount') ELSE 0 END) AS spend,
+      SUM(CASE WHEN ${eligible} AND ${category}='Income' THEN -json_extract(payload_json,'$.amount') ELSE 0 END) AS income,
+      SUM(CASE WHEN ${eligible} AND ${category} NOT IN ('Income','Transfers') AND json_extract(payload_json,'$.amount')>0 THEN 1 ELSE 0 END) AS purchases,
+      substr(json_extract(payload_json,'$.date'),1,7) AS month
+      FROM transactions WHERE json_extract(payload_json,'$.date') BETWEEN ? AND ? GROUP BY month,category`).all(from,end);
+    const summarize=key=>{
+      const categories={};let spend=0,income=0,purchases=0;
+      for(const row of rows){if(row.month!==key)continue;if(row.category==='Income')income+=row.income||0;else if(row.category!=='Transfers'){const amount=row.spend||0;spend+=amount;purchases+=row.purchases||0;if(amount)categories[row.category||'Other']=(categories[row.category||'Other']||0)+amount;}}
+      const weekly=db.prepare(`SELECT min(4,CAST((CAST(substr(json_extract(payload_json,'$.date'),9,2) AS INTEGER)-1)/7 AS INTEGER)) AS week,
+        SUM(CASE WHEN ${eligible} AND ${category} NOT IN ('Income','Transfers') THEN json_extract(payload_json,'$.amount') ELSE 0 END) AS amount
+        FROM transactions WHERE json_extract(payload_json,'$.date') BETWEEN ? AND ? GROUP BY week`).all(`${key}-01`,key===month?end:previousEnd);
+      const weeklySpend=[0,0,0,0,0];for(const row of weekly)weeklySpend[row.week]=row.amount||0;
+      return{spend,income,purchases,categories,weeklySpend};
+    };
+    const recent=db.prepare("SELECT payload_json FROM transactions WHERE json_extract(payload_json,'$.date') BETWEEN ? AND ? ORDER BY json_extract(payload_json,'$.date') DESC,json_extract(payload_json,'$.merchant') ASC,id ASC LIMIT 6").all(start,end).map(row=>parse(row.payload_json));
+    const transactionCount=db.prepare("SELECT COUNT(*) AS count FROM transactions WHERE json_extract(payload_json,'$.date') BETWEEN ? AND ?").get(start,end).count;
+    return{month,previousMonth:previous,current:summarize(month),previous:summarize(previous),recent,transactionCount};
+  }
+  function scenarioDetails() {
+    const row=statements.meta.get();
+    return row?(parse(row.payload_json).scenarios||[]):[];
+  }
+  function ownerIdentity() {
+    const row=db.prepare("SELECT json_extract(payload_json,'$.owner') AS owner,json_extract(payload_json,'$.lastSync') AS lastSync FROM state_meta WHERE singleton=1").get();
+    return {owner:row?.owner||null,lastSync:row?.lastSync||null};
+  }
+  function syncJobState() {
+    const row=db.prepare("SELECT json_extract(payload_json,'$.syncJob') AS sync_job FROM state_meta WHERE singleton=1").get();
+    return row?.sync_job?JSON.parse(row.sync_job):null;
+  }
   const persist = db.transaction(state => {
     validateState(state);
     for (const name of [...TABLES, 'custom_categories', 'budgets', 'budget_templates', 'monthly_budgets']) statements.clear[name].run();
@@ -156,6 +227,12 @@ export function createSqliteRepository(db) {
   return Object.freeze({
     schemaVersion: MIGRATION_VERSION,
     async read() { return { state: load() }; },
+    async readDashboard() { return {state:dashboardState()}; },
+    async readIdentity() { return ownerIdentity(); },
+    async readSyncJob() { return syncJobState(); },
+    async queryTransactions(query) { return queryTransactionPage(query); },
+    async queryMonthSummary(month) { return monthSummary(month); },
+    async readScenarios() { return scenarioDetails(); },
     async mutate(update) {
       const operation = writes.then(async () => {
         const state = load();

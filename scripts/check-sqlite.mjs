@@ -9,7 +9,7 @@ import Database from 'better-sqlite3';
 import { createSqliteRepository, createSqliteRepositoryAt, openLedgerDatabase, SQLITE_SCHEMA_VERSION } from '../server/sqlite-repository.mjs';
 
 assert.match(process.version, /^v24\./);
-assert.equal(SQLITE_SCHEMA_VERSION, 2);
+assert.equal(SQLITE_SCHEMA_VERSION, 3);
 const directory = await mkdtemp(join(tmpdir(), 'ledger-sqlite-check-'));
 try {
   const databasePath = join(directory, 'ledger.sqlite');
@@ -18,7 +18,7 @@ try {
     state.owner = 'synthetic-owner';
     state.items.push({ id: 'item-1', token: { data: 'synthetic-ciphertext', iv: 'synthetic-iv' }, cursor: 'cursor-x' });
     state.accounts.push({ id: 'account-1', itemId: 'item-1', source: 'provider', balance: 12345 });
-    state.transactions.push({ id: 'txn-1', accountId: 'account-1', itemId: 'item-1', date: '2026-01-03', amount: 2500, currency: 'USD', override: 'Travel' });
+    state.transactions.push({ id: 'txn-1', accountId: 'account-1', itemId: 'item-1', date: '2026-01-03', merchant:'Café Étoile', amount: 2500, currency: 'USD', override: 'Travel' });
     state.holdings.push({ id: 'holding-1', itemId: 'item-1', quantity: '1.250' });
     state.customCategories.push('Travel');
     state.budgets.Travel = 40000;
@@ -44,6 +44,19 @@ try {
   assert.deepEqual(read.balanceSnapshots,[{date:'2026-10-25',assets:51000000}]);
   assert.deepEqual(read.importHistory,[{id:'undo-1',transactionIds:['txn-1']}]);
   assert.deepEqual(read.syncJobs,[{id:'job-1',status:'interrupted'}]);
+  const dashboardRead=await repository.readDashboard();
+  assert.equal(dashboardRead.state.transactionCount,1);
+  assert.equal('transactions' in dashboardRead.state,false,'bounded dashboard state omits transaction history');
+  assert.equal('scenarios' in dashboardRead.state,false,'bounded dashboard state omits versioned scenario history');
+  assert.equal(dashboardRead.state.items[0].token,undefined);
+  assert.equal(dashboardRead.state.items[0].cursor,undefined);
+  assert.deepEqual((await repository.queryTransactions({page:1,limit:50,category:'Travel',from:'2026-01-01',to:'2026-01-31'})).transactions.map(row=>row.id),['txn-1']);
+  assert.deepEqual((await repository.queryTransactions({page:1,limit:50,search:'CAFÉ',from:'2026-01-01',to:'2026-01-31'})).transactions.map(row=>row.id),['txn-1'],'SQLite merchant filtering retains Unicode case-insensitive search');
+  const januarySummary=await repository.queryMonthSummary('2026-01');
+  assert.equal(januarySummary.current.spend,2500);
+  assert.equal(januarySummary.current.categories.Travel,2500);
+  assert.equal(januarySummary.current.purchases,1);
+  assert.deepEqual(januarySummary.current.weeklySpend,[2500,0,0,0,0]);
   await Promise.all([
     repository.mutate(state => { state.budgets.Dining = 10000; }),
     repository.mutate(state => { state.budgets.Housing = 150000; })
@@ -60,13 +73,14 @@ try {
   assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
   assert.deepEqual(db.pragma('foreign_key_check'), []);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name IN ('transactions_date_id_idx','transactions_account_date_id_idx','transactions_item_date_id_idx')").get().count,3,'schema migration creates the date/account/item page indexes');
   db.close();
 
   const backupPath = join(directory, 'verified.sqlite');
   const backupResult = spawnSync(process.execPath, ['scripts/sqlite-backup.mjs', databasePath, backupPath], { cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8' });
   assert.equal(backupResult.status, 0, backupResult.stderr);
   assert.equal(JSON.parse(backupResult.stdout).ok, true);
-  assert.equal(JSON.parse(backupResult.stdout).schemaVersion, 2, 'backup manifest reports the database schema it contains');
+  assert.equal(JSON.parse(backupResult.stdout).schemaVersion, 3, 'backup manifest reports the database schema it contains');
   assert.equal((await stat(backupPath)).mode & 0o777, 0o600);
   const restoredPath = join(directory, 'restored.sqlite');
   const restoreResult = spawnSync(process.execPath, ['scripts/sqlite-restore.mjs', backupPath, restoredPath], { cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8' });
@@ -117,13 +131,22 @@ try {
   assert.deepEqual((await metadataOnlyRepository.read()).state.goals, [{id:'preserve-me'}], 'metadata-only entities prevent an import from overwriting them');
   await metadataOnlyRepository.close();
 
+  const orderingRepository=await createSqliteRepositoryAt(join(directory,'ordering.sqlite'));
+  await orderingRepository.mutate(state=>{state.transactions=[{id:'z-last',date:'2026-10-25',merchant:'Same day Z',amount:200,currency:'USD',category:'Dining'},{id:'a-first',date:'2026-10-25',merchant:'Same day A',amount:300,currency:'USD',category:'Dining'},{id:'refund',date:'2026-10-24',merchant:'Refund',amount:-50,currency:'USD',category:'Dining'},{id:'pending',date:'2026-10-24',merchant:'Pending',amount:500,currency:'USD',category:'Dining',pending:true}];});
+  const orderedPage=await orderingRepository.queryTransactions({page:1,limit:3,from:'2026-10-01',to:'2026-10-31'});
+  assert.deepEqual(orderedPage.transactions.map(row=>row.id),['a-first','z-last','pending'],'same-day transaction pages have stable ID ordering');
+  const completeSummary=await orderingRepository.queryMonthSummary('2026-10');
+  assert.equal(completeSummary.current.spend,450,'monthly summaries include every matching posted record including refunds and exclude pending rows');
+  assert.equal(completeSummary.transactionCount,4);
+  await orderingRepository.close();
+
   const legacyDatabase=join(directory,'schema-v1.sqlite');
   const oldDb=new Database(legacyDatabase);
   oldDb.exec(await readFile(new URL('../server/migrations/001-initial.sql',import.meta.url),'utf8'));
   oldDb.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(1,?)').run(new Date().toISOString());
   oldDb.close();
   const migrated=await openLedgerDatabase(legacyDatabase);
-  assert.equal(migrated.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,2);
+  assert.equal(migrated.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,3);
   assert.equal(migrated.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='monthly_budgets'").get().count,1);
   migrated.close();
   const migrationBackupDirectory=join(directory,'backups');
@@ -139,7 +162,7 @@ try {
 
   const futureSchemaPath=join(directory,'future-schema.sqlite'),futureSchema=new Database(futureSchemaPath);
   futureSchema.pragma('journal_mode = DELETE');futureSchema.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL); CREATE TABLE future_data(value TEXT);');
-  futureSchema.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(3,?)').run(new Date().toISOString());futureSchema.prepare('INSERT INTO future_data(value) VALUES(?)').run('preserved');futureSchema.close();
+  futureSchema.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(4,?)').run(new Date().toISOString());futureSchema.prepare('INSERT INTO future_data(value) VALUES(?)').run('preserved');futureSchema.close();
   await assert.rejects(openLedgerDatabase(futureSchemaPath),/newer than this application supports/);
   const afterFutureRefusal=new Database(futureSchemaPath,{readonly:true,fileMustExist:true});assert.equal(afterFutureRefusal.pragma('journal_mode',{simple:true}),'delete','future-schema refusal does not change the database journal mode');assert.equal(afterFutureRefusal.prepare('SELECT value FROM future_data').get().value,'preserved');afterFutureRefusal.close();
 
