@@ -185,5 +185,6 @@ Code-only log. No production records, account names, credentials, private origin
 - Added a Decimal-based fixed-rate monthly calculator with round-half-up cent payment/interest rounding, capped final payments, zero-rate handling, extra-principal comparison, and non-amortizing payment rejection. Unsupported loan types and incomplete terms are visibly unavailable.
 - Home planner shows whole-property and owner equity, statement vs modeled balance as of the statement date, P&I and other payment components, and an accessible yearly principal/interest chart. Property addresses are stored locally and never looked up.
 - Tests cover the $320,000 / 6.5% / 360 month payment example, zero-rate and final payment, extra principal, non-amortizing input, multiple liens, negative equity, missing valuation, partial ownership, duplicate linked-liability detection, observed snapshot history, unsupported projections, and page rendering. Full finance, SQLite, and isolated HTTP checks passed in a disposable source copy; checkout `dist` and running service were not changed.
+- A later scenario fixture exposed a one-cent rounding residue for some fixed-rate terms. The final modeled period now pays the remaining principal plus interest, preserving the documented final-payment cap.
 
 **Next:** T14, saved home-purchase scenarios.

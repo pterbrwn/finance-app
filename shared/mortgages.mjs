@@ -14,7 +14,7 @@ export function amortizeFixedRate({principal,annualRatePercent,termMonths,extraP
   let balance=principal,totalInterest=0;const schedule=[];
   for(let period=1;period<=termMonths&&balance>0;period++){
     const interest=roundCents(new Decimal(balance).mul(monthlyRate));
-    const principalPaid=Math.min(balance,Math.max(0,payment-interest)+extraPrincipal);
+    const scheduledPrincipal=Math.max(0,payment-interest),principalPaid=period===termMonths?balance:Math.min(balance,scheduledPrincipal+extraPrincipal);
     if(principalPaid<=0)return{available:false,reason:'The modeled payment does not reduce principal.'};
     const closing=balance-principalPaid,paid=interest+principalPaid;
     schedule.push({period,openingBalance:balance,scheduledPayment:Math.min(payment,paid),extraPrincipal:Math.min(extraPrincipal,Math.max(0,principalPaid-Math.max(0,payment-interest))),interest,principal:principalPaid,closingBalance:closing,totalPayment:paid});
