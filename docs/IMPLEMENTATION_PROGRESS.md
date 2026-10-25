@@ -59,15 +59,18 @@ Code-only log. No production records, account names, credentials, private origin
 - Added SQLite online backup and verified restore commands. Release preparation installs production dependencies from the committed lockfile into each immutable release.
 - Tested constraint failure rollback, integrity and foreign-key checks, backup API output and permissions, and restore in a disposable synthetic directory.
 - Full finance, storage, artifact, SQLite, and isolated HTTP checks passed in a disposable source-only copy under Node 24.
+- Prepared the committed release and loaded its ARM64 native binding. No production symlink, service, or storage setting was changed.
 
 ## T04b — Explicit legacy importer
 
-**Status:** Complete. Commit recorded below after verification.
+**Status:** Implementation complete. Importer commit: `65aa7f4`; serialized-write follow-up: `8c217a8`. Production acceptance gates remain pending.
 
 - Added an explicit JSON-to-SQLite import command. It validates JSON shape and relational constraints before commit, computes and records the exact source checksum, and refuses to merge into a populated database.
 - It verifies encrypted token/IV pairs locally using the existing AES-256-GCM key, then preserves their original ciphertext, IV, provider cursors, record IDs, category overrides, balances, and budget limits. It never prints token/config values.
 - Missing product/environment fields remain missing. The importer reports how many items have unspecified environment and does not infer production or sandbox from the private config.
 - Same-source reruns are idempotent. Synthetic checks verify key preservation, unknown environment handling, counts, idempotency, integrity, foreign keys, backup/restore, and transaction rollback.
+- SQLite writes are serialized in-process; a concurrent-update regression check proves independent budget changes are retained.
 - No production database was created or activated. The live service continues to use the original JSON state.
+- The required private production aggregate comparison and operational restore rehearsal remain release gates. The fixture suite does not substitute for those checks.
 
-**Next:** complete golden-fixture comparison and operational migration/restore rehearsal before selecting SQLite in a production config. Continue with T05 after the migration gates are addressed; do not treat the implementation branch as production-ready.
+**Next:** T05, explicit app states and usable navigation. SQLite remains opt-in; do not select it in production before the golden-data and restore gates pass.
