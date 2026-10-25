@@ -58,5 +58,7 @@ chmod 755 "$work_dir/release/scripts/start-ledger.sh" "$work_dir/release/scripts
 (cd "$work_dir/release" && sha256sum -c manifest.sha256)
 LEDGER_NODE_BIN="$node_bin" "$node_bin" "$work_dir/source/scripts/check-release.mjs" "$work_dir/release"
 chmod -R a-w "$work_dir/release"
+chmod u+w "$work_dir/release"
 mv "$work_dir/release" "$release_root/$release_id"
+chmod -R a-w "$release_root/$release_id"
 echo "Prepared immutable release $release_id ($commit_hash) with Node.js 24.22.1 and a verified schema manifest."
