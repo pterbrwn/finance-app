@@ -290,3 +290,15 @@ Code-only log. No production records, account names, credentials, private origin
 - Tests cover missing monthly tax and conditional commitments/debts, explicit zeros, excess credits/earnest, endpoint preview/save rejection, synthetic legacy quote history, guarded goal/budget actions, and incomplete UI warning/action state. `npm run check` passed under pinned Node 24.22.1 in a disposable source copy, including artifact, finance/client, JSON storage, and SQLite checks. The checkout `dist` and running service were not changed.
 
 **Next:** C04, protect local planning/review artifacts from commits.
+
+
+## C04 — Source/privacy boundary for local review documents
+
+**Status:** Implemented and verified.
+
+- Added exact ignore rules for the local execution plan, review, and completion-plan documents. All three files remain in place in the checkout and are not staged.
+- Extended the source boundary check to reject those exact paths even if force-added. Existing database sidecar, export, backup, and secret checks remain unchanged.
+- `npm run check:source` passed for the current source index. `git check-ignore` confirms each local document is ignored. In a disposable Git repository, an allowed source/config index passed and a force-added `docs/FINANCE_APP_REVIEW.md` was rejected without printing file contents.
+- No owner document was deleted or committed.
+
+**Next:** C05, enforce SQLite schema compatibility and accurate backup identity.

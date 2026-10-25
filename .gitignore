@@ -30,6 +30,9 @@ state.json
 state.json.*
 config.json
 config.local.*
+docs/FINANCE_APP_EXECUTION_PLAN.md
+docs/FINANCE_APP_REVIEW.md
+docs/FINANCE_APP_COMPLETION_PLAN.md
 *.tar.gz
 *.zip
 .DS_Store

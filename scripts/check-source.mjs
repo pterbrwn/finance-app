@@ -10,7 +10,7 @@ async function git(args) {
 // Inspect committed candidates from Git's index, including files force-added past
 // .gitignore. File contents are never printed, including on failure.
 const paths = (await git(['ls-files', '-z'])).split('\0').filter(Boolean);
-const forbidden = /(^|\/)(?:\.env[^/]*|\.openai|\.sites-runtime|\.wrangler|data|backups|imports|exports|outputs|node_modules|dist)(\/|$)|(?:^|\/)(?:state\.json(?:\..*)?|config\.json|config\.local\.[^/]+)$|\.(?:csv|tsv|ofx|qfx|qif|db(?:-.*)?|sqlite[^/]*|pem|key|p12|pfx|log|zip|gz)$/i;
+const forbidden = /(^|\/)(?:\.env[^/]*|\.openai|\.sites-runtime|\.wrangler|data|backups|imports|exports|outputs|node_modules|dist)(\/|$)|(?:^|\/)(?:state\.json(?:\..*)?|config\.json|config\.local\.[^/]+)$|^docs\/FINANCE_APP_(?:EXECUTION_PLAN|REVIEW|COMPLETION_PLAN)\.md$|\.(?:csv|tsv|ofx|qfx|qif|db(?:-.*)?|sqlite[^/]*|pem|key|p12|pfx|log|zip|gz)$/i;
 const secret = /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{25,}|(?:AKIA|ASIA)[A-Z0-9]{16}|access-(?:sandbox|production)-[a-z0-9-]{20,}/;
 let invalid = false;
 for (const path of paths) {
