@@ -2,9 +2,13 @@
 
 A personal finance dashboard hosted on a Jetson. Source code lives at https://github.com/pterbrwn/finance-app. GitHub contains code and synthetic test fixtures only.
 
+## Current operational build
+
+The private service runs release `122f014` on Node.js 24.22.1 with SQLite schema 3. The existing JSON state was imported and reconciled before activation; its paired JSON/config recovery copy remains private on the Jetson. The verified daily SQLite backup timer is active. The bank sync timer remains disabled. Existing provider records without a saved environment are blocked from sync until that environment is independently verified; manual entry and CSV import remain available.
+
 ## Privacy and access
 
-- Financial records are stored on the Jetson under `~/.local/state/ledger/`, outside the repository. The current service still uses `state.json`; the SQLite adapter and explicit importer are available for the staged migration. Directories use permissions `700` and private files use `600`.
+- Financial records are stored on the Jetson under `~/.local/state/ledger/`, outside the repository. The current service uses SQLite; a checksummed pre-migration JSON/config pair is retained in a private recovery directory. Directories use permissions `700` and private files use `600`.
 - Credentials and the bank token encryption key live in `~/.config/ledger/config.json` with permissions `600`. Never paste them into chat, a GitHub issue, or source code.
 - The Jetson service listens only on `127.0.0.1:3001` (the development default is port 3000). Tailscale Serve provides a private HTTPS address for remote access. The configured Tailscale owner is required; other tailnet identities and anonymous requests are rejected.
 - Remote access requires Tailscale on the client. Do not enable Tailscale Funnel, public port forwarding, or public hosting. Tailscale HTTPS certificate names appear in public certificate transparency logs; financial content remains private.
@@ -40,19 +44,21 @@ scripts/install-node-runtime.sh
 scripts/prepare-release.sh "$(git rev-parse --short=12 HEAD)"
 scripts/activate-release.sh "$(git rev-parse --short=12 HEAD)"
 mkdir -p ~/.config/systemd/user
-cp deploy/ledger*.service deploy/ledger-sync.timer ~/.config/systemd/user/
+cp deploy/ledger.service deploy/ledger-backup.service deploy/ledger-backup.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable ledger.service
+systemctl --user enable --now ledger-backup.timer
 systemctl --user restart ledger.service
+# Keep ledger-sync.timer disabled until live sync and recovery are verified.
 ```
 
 Use `systemctl --user status ledger.service` and `journalctl --user -u ledger.service` to inspect it. To keep user services running after SSH logout and at boot, enable lingering for your user with `loginctl enable-linger "$USER"` if permitted by the host.
 
-All server start paths use the same non-blocking `flock` under the private data directory, so a second process cannot write the JSON state concurrently. Financial state is written atomically and updates are serialized within the process as well. The user timer talks to the running service and never starts another writer. Check `/api/health` for the code/schema version and safe readiness status. Back up the private state and matching configuration/key locally before upgrades; backups must stay outside Git. To roll code back, activate a previously prepared release and restart the service; database/schema rollback also requires a compatible backup and migration plan.
+All server start paths use the same non-blocking `flock` under the private data directory, so a second process cannot write the active SQLite database concurrently. Financial state is written atomically and updates are serialized within the process as well. The bank sync timer talks to the running service and never starts another writer. Check `/api/health` for the code/schema version and safe readiness status. Back up the private state and matching configuration/key locally before upgrades; backups must stay outside Git. To roll code back, activate a previously prepared release and restart the service; database/schema rollback also requires a compatible backup and migration plan.
 
-### Staged SQLite migration
+### SQLite state and recovery
 
-The initial SQLite schema and repository use WAL, foreign keys, bounded write transactions, and the SQLite online backup API. `scripts/import-legacy-json.mjs SOURCE_JSON [NEW_DATABASE] [PRIVATE_CONFIG]` performs an explicit import, checks encrypted tokens locally with the existing key, records a source checksum, and reports counts only. Items without saved environment metadata remain unspecified. A repeated import of the same source is idempotent. `scripts/sqlite-backup.mjs DATABASE [BACKUP_FILE]` and `scripts/sqlite-restore.mjs BACKUP_FILE NEW_DATABASE_PATH` verify integrity and use private permissions. The running service continues to use JSON until the migration's production verification and rollback gates are completed.
+The deployed SQLite schema and repository use WAL, foreign keys, bounded write transactions, and the SQLite online backup API. The legacy importer checked encrypted tokens with the existing key, preserved record identities and payloads, and recorded a source checksum. A private paired JSON/config backup and a verified SQLite backup/restore rehearsal were completed before activation; the original JSON remains available as a pre-cutover recovery copy. New writes go to SQLite. Do not replace a newer database with that older JSON snapshot. Items without saved provider environment metadata remain blocked from sync until their environment is verified. The 3:00 AM local backup timer is active and the first systemd backup succeeded. The bank sync timer remains disabled.
 
 ## Connect banks
 
@@ -122,7 +128,7 @@ npm run check:source
 
 The HTTP suite uses disposable synthetic data and tests imports, restart persistence, permissions, Host/Origin protections, Tailscale identity checks, and local-only mode. It does not load your private config or production records.
 
-On mobile, transaction rows keep the amount visible alongside the merchant and category. Dialogs have accessible titles, return focus to their launch control, and support Escape; charts include numeric data tables. Source-render checks cover the responsive structure, but release acceptance still requires a real browser at 320 px and 390 px, 200% zoom, keyboard-only workflows, and manual assistive-technology review.
+Automated browser acceptance covers 1440, 390, and 320 CSS px, keyboard workflows, dialogs, chart data alternatives, and a 720 CSS px zoom proxy. The owner accepted the manual accessibility item for this deployment; headless automation does not emulate a screen reader or actual 200% browser zoom.
 
 The repository ignores local config, runtime state, bank exports, databases, logs, certificates, generated builds, and hosting metadata. Install [Gitleaks](https://github.com/gitleaks/gitleaks), ensure it is on PATH, and enable the included hooks:
 

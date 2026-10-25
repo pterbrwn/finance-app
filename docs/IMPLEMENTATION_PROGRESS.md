@@ -467,3 +467,16 @@ Code-only log. No production records, account names, credentials, private origin
 - Screen-reader behavior, physical pointer confirmation handling, owner-device private-access review, actual 200% zoom, and C10 owner acceptance remain open. C12–C14 private migration, recovery, proxy, and activation gates remain separate. No live preview, real financial data, service, or storage configuration was changed.
 
 **Next:** Record owner desktop screen-reader, actual zoom, private-access, and C10 acceptance evidence. Keep C12–C14 gated on the required operational prerequisites.
+
+## R07 — Operational activation and recovery
+
+**Status:** Candidate deployed privately; bank sync remains gated on provider metadata verification.
+
+- Owner confirmed that the browser is inaccessible with Tailscale disabled and accepted the manual accessibility item for this deployment. Tailscale Funnel remains disabled; the private Serve route is tailnet-only.
+- Commit `122f014` is published on `codex/finance-app-plan` and active at `~/.local/share/ledger/current`. The pinned Node 24.22.1 service is enabled and healthy on SQLite schema 3. Existing records were imported from JSON and compared by full stored payload, identities, category assignments, templates, overrides, balances, and metadata before activation. The JSON/config/key pair is checksummed and retained privately; SQLite integrity, foreign keys, and restore rehearsal passed.
+- A post-activation failure check found that the backup service wrapper exited without running through the `current` symlink. The entry-point resolution was fixed and packaged regression now asserts the symlinked systemd path creates a private daily backup. The runtime also now parses systemd timer state by property name; a reordered-output regression prevents Settings from misreporting timers.
+- The first systemd backup succeeded, the daily backup timer is enabled/active, and API Settings reports its true state. Bank sync remains disabled and inactive. Existing provider items lack saved environment metadata; the server guard refuses to send their tokens until the environment is verified. No live provider sync was run.
+- Final finance, local HTTP, browser/Axe, runtime-status, package checksums, synthetic import/backup/restore, health/schema/assets, rollback, and secret-scan checks passed. The new candidate was activated with health and asset checks; the active service, database integrity, reconciled record identities, backup state, and disabled bank sync timer were verified afterward.
+- Source docs contain no account names, balances, private address, credentials, or record identifiers. The live operational service now uses SQLite; the retained JSON file is a pre-cutover recovery snapshot and does not receive new writes.
+
+**Remaining:** Verify the actual environment of existing provider records before any sync; no bank timer or real sync is enabled. Owner accessibility acceptance was given for this deployment, while headless tests cannot independently measure actual zoom or screen-reader output.
