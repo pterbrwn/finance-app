@@ -92,6 +92,10 @@ Date,Merchant,Amount,Category,Currency,Status
 
 The same file imported into the same account is idempotent. Overlapping or modified files are not reconciled with each other or Plaid. Keep CSV accounts separate from accounts synced for the same dates. Native bank formats may need column and amount-sign conversion.
 
+## Dashboard states and navigation
+
+The dashboard starts with your actual saved state, including an honest empty view for new accounts. Sample data appears only after you choose **Explore sample data** or **Open sample preview**, and the preview has an always-visible exit action. Loading failures show an error without substituting example balances. A failed refresh keeps the last loaded records visible with a stale/error notice. The Overview, Transactions, Budgets, Accounts, Investments, Goals, Home planner, and Settings pages are addressable with `?page=...`; month, search, category, and account filters are kept in the URL for links and browser history. On narrow screens the navigation scrolls horizontally while keeping every destination reachable.
+
 ## Financial behavior
 
 Amounts use integer cents. Pending transactions and non-USD currencies are excluded from totals. Transfers and credit card payments are excluded from spending; refunds reduce category spending. Income less spending is net cash flow, not change in account balance. Budget limits recur monthly without rollover.

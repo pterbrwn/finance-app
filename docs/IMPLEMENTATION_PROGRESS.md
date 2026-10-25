@@ -74,3 +74,29 @@ Code-only log. No production records, account names, credentials, private origin
 - The required private production aggregate comparison and operational restore rehearsal remain release gates. The fixture suite does not substitute for those checks.
 
 **Next:** T05, explicit app states and usable navigation. SQLite remains opt-in; do not select it in production before the golden-data and restore gates pass.
+
+## T05 — Explicit app states and usable navigation
+
+**Status:** Complete. Commit recorded below after verification.
+
+- Removed automatic demo selection based on the absence of linked items or transactions. New users see an honest empty state with saved account/budget information; synthetic data requires an explicit preview action and has a persistent exit control.
+- Added loading, initial error, failed-refresh/stale, and linked-but-importing messages. Errors do not replace real balances with sample data.
+- Added Overview, Transactions, Budgets, Accounts, Investments, Goals, Home planner, and Settings navigation. Unimplemented areas state that they are empty/in preparation rather than showing fabricated values.
+- Page and transaction filters are reflected in the URL and browser history. Query inputs are bounded; the month parameter is validated. Narrow screens use a horizontally scrollable navigation row with 44 px touch targets.
+- Category and budget saves provide inline status and restore keyboard focus after rendering.
+- Finance/browser checks cover empty, budget-only, manual-only, linked-but-importing, initial-error, explicit demo, and hostile month-query states. Full finance, SQLite, and isolated HTTP suites passed in a disposable source copy under Node 24.
+
+**Next:** T06, custom categories and budget buckets.
+
+## T05 — Explicit app states and usable navigation
+
+**Status:** Complete. Commit recorded below after verification.
+
+- Removed automatic demo selection based on the absence of linked items or transactions. New users see an empty state with saved account/budget information; synthetic data requires an explicit preview action and has a persistent exit control.
+- Added loading, initial error, failed-refresh/stale, and linked-but-importing messages. Errors do not replace real balances with sample data.
+- Added Overview, Transactions, Budgets, Accounts, Investments, Goals, Home planner, and Settings navigation. Unimplemented areas state that they are empty/in preparation rather than showing fabricated values.
+- Page and transaction filters are reflected in the URL and browser history. Query inputs are bounded; the month parameter is validated. Narrow screens use a horizontally scrollable navigation row with 44 px touch targets.
+- Category and budget saves provide inline status and restore keyboard focus after rendering.
+- Finance/browser checks cover empty, budget-only, manual-only, linked-but-importing, initial-error, explicit demo, and hostile month-query states. Full finance, SQLite, and isolated HTTP suites passed in a disposable source copy under Node 24.
+
+**Next:** T06, custom categories and budget buckets.
