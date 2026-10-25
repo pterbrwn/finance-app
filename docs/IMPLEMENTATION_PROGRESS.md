@@ -326,3 +326,14 @@ Code-only log. No production records, account names, credentials, private origin
 - A controlled synthetic test covered daily/weekly selection and overlap, protected migration copies, private modes, successful restore, failed verification preserving every prior good snapshot, and backup/restore lock contention. In a disposable copy under pinned Node 24.22.1, `npm run check` and `npm run check:local-http` passed, including the new backup test and Settings assertions. The root checkout `dist` remains unchanged.
 
 **Next:** C07, measure realistic 10,000 and 100,000 transaction workloads.
+
+
+## C07 — Synthetic performance baseline
+
+**Status:** Workload measurements are complete; the documented C08 bottleneck list defines the next implementation scope.
+
+- Added `scripts/measure-performance.mjs`, a manual pinned-runtime benchmark, separate from ordinary timing-sensitive checks. It creates private temporary SQLite datasets with 10k/100k transactions, eight accounts, date/category/merchant variation, refunds, pending/review rows, overrides, goals, property/mortgage, scenarios, snapshots, and budgets. It exercises first/warm bootstrap, selected-month aggregation, filtered 50-row search, single/bulk category edits, a sync-page commit, 5k CSV preview/commit/restart/duplicate detection/undo, and backup/restore; it records response bytes, sample count, median/p95 for sampled reads, peak sampled heap/RSS, and event-loop delay.
+- Captured on 2026-10-25 UTC using Node 24.22.1 on Linux ARM64 Cortex-A78AE (6 CPUs, 8 GB RAM). Warm filtered-page p95 was 31.73 ms / 10,625 bytes at 10k and 317.84 ms / 10,735 bytes at 100k, within the stated read targets. Full `/api/state` responses were 2.13 MB and 21.24 MB. At 100k, category writes took 2.26–2.37 s, a sync-page commit 1.47 s, 5k import commit 2.12 s, import undo 1.80 s, and sampled peak RSS was 1.03 GB with 2.59 s event-loop delay p95.
+- `docs/PERFORMANCE_BASELINE.md` records fixture shape, method, full timings, caveats, targets, and C08 scope. The benchmark used only synthetic data and removed its temporary databases. No app source runtime, production data, live service, timer, or checkout `dist` was changed.
+
+**Next:** C08, bound bootstrap/page/summary reads and replace measured full-state mutation bottlenecks.
