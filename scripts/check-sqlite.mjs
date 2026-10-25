@@ -181,6 +181,21 @@ try {
   assert.equal(filteredSecondPage.total,2,'filtered total counts only the two effective Dining rows');assert.deepEqual(filteredSecondPage.transactions.map(row=>row.id),['legacy-dining'],'effective category filtering composes with search/account/date filters and paging');
   await effectiveCategoryRepository.close();
 
+  const budgetPersistencePath=join(directory,'budget-template-persistence.sqlite'),budgetMonthParts=new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit'}).formatToParts(new Date()),budgetCurrentMonth=budgetMonthParts.find(part=>part.type==='year').value+'-'+budgetMonthParts.find(part=>part.type==='month').value,budgetPriorDate=new Date(budgetCurrentMonth+'-01T12:00:00Z');budgetPriorDate.setUTCMonth(budgetPriorDate.getUTCMonth()-1);const budgetPriorMonth=budgetPriorDate.toISOString().slice(0,7),budgetCategoryId='custom:budget-persistence';
+  const budgetPersistenceRepository=await createSqliteRepositoryAt(budgetPersistencePath);
+  await budgetPersistenceRepository.mutate(state=>{state.categoryRecords=[{id:budgetCategoryId,name:'Current Budget Name',normalizedName:'current budget name',kind:'expense',system:false,order:20,archivedAt:null}];state.customCategories=['Current Budget Name'];state.budgets={'Current Budget Name':10000};state.budgetHistoryUnavailableBefore=budgetPriorMonth;state.budgetTemplates=[{categoryId:budgetCategoryId,amount:10000,effectiveFrom:budgetCurrentMonth}];state.monthlyBudgets={[`${budgetPriorMonth}:${budgetCategoryId}`]:0};});
+  await budgetPersistenceRepository.close();
+  const reopenedBudgetRepository=await createSqliteRepositoryAt(budgetPersistencePath),reopenedBudgetState=(await reopenedBudgetRepository.read()).state;
+  assert.deepEqual(reopenedBudgetState.budgetTemplates,[{categoryId:budgetCategoryId,amount:10000,effectiveFrom:budgetCurrentMonth}],'explicit category budget template survives SQLite close and reopen');
+  assert.equal(reopenedBudgetState.monthlyBudgets[`${budgetPriorMonth}:${budgetCategoryId}`],0,'SQLite preserves explicit zero month overrides alongside templates');
+  await reopenedBudgetRepository.mutate(state=>{state.categoryRecords[0]={...state.categoryRecords[0],name:'Renamed Budget'};state.customCategories=['Renamed Budget'];state.budgets={'Renamed Budget':10000};});
+  await reopenedBudgetRepository.close();
+  const renamedBudgetRepository=await createSqliteRepositoryAt(budgetPersistencePath),renamedBudgetState=(await renamedBudgetRepository.read()).state;
+  assert.equal(renamedBudgetState.categoryRecords[0].name,'Renamed Budget');
+  assert.deepEqual(renamedBudgetState.budgetTemplates,[{categoryId:budgetCategoryId,amount:10000,effectiveFrom:budgetCurrentMonth}],'stable category identity keeps its explicit template through rename and SQLite reopen');
+  assert.equal(renamedBudgetState.budgetHistoryUnavailableBefore,budgetPriorMonth,'SQLite retains the legacy history boundary');
+  await renamedBudgetRepository.close();
+
   const legacyDatabase=join(directory,'schema-v1.sqlite');
   const oldDb=new Database(legacyDatabase);
   oldDb.exec(await readFile(new URL('../server/migrations/001-initial.sql',import.meta.url),'utf8'));

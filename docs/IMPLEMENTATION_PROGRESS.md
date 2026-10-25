@@ -426,3 +426,16 @@ Code-only log. No production records, account names, credentials, private origin
 - No schema, service, preview, owner data, timer, or root `dist` changed.
 
 **Next:** R04, start a new category's initial budget template in the current reporting month.
+
+
+## R04 — Start new category budgets in the current reporting month
+
+**Status:** Implemented and verified in a disposable source copy.
+
+- Category creation now materializes pre-existing legacy budget templates before adding its new compatibility budget, then writes an explicit template beginning in the current `America/Chicago` month. Explicit zero remains a real limit; omitted amounts create no template.
+- The new-category dialog explains the start month, and sample-mode category creation follows the same current-month rule even when viewing historical data.
+- The synthetic finance regression fails on the previous worker implementation by showing a September template for an October creation with a September legacy boundary. It passes with the fix and verifies prior-month exclusion, unchanged legacy budgets and month overrides, explicit zero, omitted amount, and template preservation through category rename.
+- SQLite close/reopen coverage confirms the template, zero-valued month override, stable category identity after rename, and history boundary persist. Pinned Node 24.22.1 finance and SQLite checks passed after a disposable build.
+- No schema, service, preview, owner data, timer, or root `dist` changed.
+
+**Next:** R05, run the combined release gates in a fresh disposable source checkout, inspect the combined patch, prepare an immutable package, and push the reviewed branch without updating the owner's preview.

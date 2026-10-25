@@ -516,10 +516,14 @@ export default {
           checkRevision(s,input);
           if (categoryCatalog(s).some(c => c.normalizedName === normalizeCategory(name))) throw apiError('A bucket with this name already exists.', 409);
           if ((s.customCategories || []).length >= 50) throw apiError('Use up to 50 custom budget buckets.');
+          if (input.amount !== undefined && input.amount !== null) s.budgetTemplates=budgetTemplates(s);
           const catalog = categoryCatalog(s), records = s.categoryRecords || catalog.filter(c => !c.system);
           const category = { id: crypto.randomUUID(), name, normalizedName: normalizeCategory(name), kind: 'expense', system: false, order: Math.max(CATEGORIES.length-1,...catalog.map(c=>c.order))+1, archivedAt: null };
           s.owner = user; s.categoryRecords = [...records, category]; s.customCategories = [...(s.customCategories || []), name];
-          if (input.amount !== undefined && input.amount !== null) s.budgets[name] = input.amount;
+          if (input.amount !== undefined && input.amount !== null) {
+            s.budgets[name] = input.amount;
+            s.budgetTemplates.push({ categoryId:category.id, amount:input.amount, effectiveFrom:monthInReportingZone() });
+          }
           s.budgetCategoryIds = { ...(s.budgetCategoryIds || {}), [category.id]: name };
         });
         return response({ ok: true, revision:saved.revision, category: categoryCatalog(saved).find(c => c.name === name && !c.system) });

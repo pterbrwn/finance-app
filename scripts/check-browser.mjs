@@ -99,6 +99,7 @@ try{
   await page.locator('[data-view="budgets"]').first().click();
   await page.locator('[data-new-category]').click();
   const categoryDialog=page.getByRole('dialog');
+  await categoryDialog.getByText('begins in the current reporting month').waitFor();
   await categoryDialog.locator('#new-category-name').fill('Browser test category');
   await categoryDialog.getByRole('button',{name:'Create bucket'}).click();
   await page.getByText('Browser test category',{exact:true}).first().waitFor();
