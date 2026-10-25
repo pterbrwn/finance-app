@@ -62,6 +62,27 @@ try {
     repository.mutate(state => { state.budgets.Housing = 150000; })
   ]);
   assert.deepEqual({ ...(await repository.read()).state.budgets }, { Travel: 40000, Dining: 10000, Housing: 150000 });
+  const subsetRevision=(await repository.read()).state.revision||0;
+  await repository.mutateTransactionSubset(['txn-1'],state=>{assert.equal(state.transactions.length,1);assert.equal(state.revision,subsetRevision);state.transactions[0].override='Groceries';});
+  const subsetRead=(await repository.read()).state;
+  assert.equal(subsetRead.transactions[0].override,'Groceries','scoped transaction writes persist the selected row');
+  assert.equal(subsetRead.revision,subsetRevision+1,'scoped transaction writes advance the shared revision');
+  await assert.rejects(repository.mutateTransactionSubset(['txn-1'],state=>{state.transactions[0].override='Must Roll Back';throw new Error('synthetic scoped rollback');}),/synthetic scoped rollback/);
+  assert.equal((await repository.read()).state.transactions[0].override,'Groceries','failed scoped edits leave the row unchanged');
+  assert.equal((await repository.read()).state.revision,subsetRevision+1,'failed scoped edits leave the revision unchanged');
+  await repository.mutateTransactionSubset(['txn-1'],state=>{state.transactions[0].override='Travel';});
+  await repository.mutate(state=>{state.items.push({id:'sync-item',cursor:'cursor-before',lifecycle:'connected'});});
+  const beforeSyncRevision=(await repository.read()).state.revision;
+  await repository.mutateTransactionSubset(['sync-added'],state=>{state.items.find(item=>item.id==='sync-item').cursor='cursor-after';state.transactions.push({id:'sync-added',itemId:'sync-item',date:'2026-01-04',merchant:'Synced row',amount:500,currency:'USD'});});
+  let syncState=(await repository.read()).state;
+  assert.equal(syncState.items.find(item=>item.id==='sync-item').cursor,'cursor-after');
+  assert.equal(syncState.transactions.some(transaction=>transaction.id==='sync-added'),true);
+  assert.equal(syncState.revision,beforeSyncRevision+1,'sync cursor and transaction share one revision');
+  await assert.rejects(repository.mutateTransactionSubset(['sync-added'],state=>{state.items.find(item=>item.id==='sync-item').cursor='cursor-rolled-back';state.transactions[0].amount=999;throw new Error('synthetic cursor rollback');}),/synthetic cursor rollback/);
+  syncState=(await repository.read()).state;
+  assert.equal(syncState.items.find(item=>item.id==='sync-item').cursor,'cursor-after','failed sync write retains the prior cursor');
+  assert.equal(syncState.transactions.find(transaction=>transaction.id==='sync-added').amount,500,'failed sync write retains the prior transaction');
+  await repository.mutateTransactionSubset(['sync-added'],state=>{state.items.find(item=>item.id==='sync-item').cursor='cursor-before';state.transactions=[];});
   await assert.rejects(repository.mutate(state => {
     state.accounts.push({ id: 'orphan-account', itemId: 'missing-item' });
   }));

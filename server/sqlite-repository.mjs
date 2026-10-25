@@ -106,7 +106,11 @@ export function createSqliteRepository(db) {
     clear: Object.fromEntries(['transactions', 'holdings', 'accounts', 'items', 'custom_categories', 'budgets', 'budget_templates', 'monthly_budgets'].map(name => [name, db.prepare(`DELETE FROM ${name}`)])),
     putMeta: db.prepare('INSERT INTO state_meta(singleton,payload_json) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET payload_json=excluded.payload_json'),
     putItem: db.prepare('INSERT INTO items(id,payload_json) VALUES(?,?)'),
+    upsertItem: db.prepare(`INSERT INTO items(id,payload_json) VALUES(?,?)
+      ON CONFLICT(id) DO UPDATE SET payload_json=excluded.payload_json`),
     putAccount: db.prepare('INSERT INTO accounts(id,item_id,payload_json) VALUES(?,?,?)'),
+    upsertAccount: db.prepare(`INSERT INTO accounts(id,item_id,payload_json) VALUES(?,?,?)
+      ON CONFLICT(id) DO UPDATE SET item_id=excluded.item_id,payload_json=excluded.payload_json`),
     putTransaction: db.prepare('INSERT INTO transactions(id,account_id,item_id,payload_json) VALUES(?,?,?,?)'),
     putHolding: db.prepare('INSERT INTO holdings(id,item_id,payload_json) VALUES(?,?,?)'),
     putCategory: db.prepare('INSERT INTO custom_categories(id,name,normalized_name) VALUES(?,?,?)'),
@@ -224,6 +228,23 @@ export function createSqliteRepository(db) {
     statements.addImport.run(checksum, MIGRATION_VERSION, new Date().toISOString(), json(recordCounts));
     return { imported: true, recordCounts };
   });
+  const writeTransactionSubset = db.transaction((state, ids) => {
+    validateState({ ...state, items: [], accounts: [], holdings: [], transactions: state.transactions || [], budgets: {} });
+    const desired = new Map((state.transactions || []).map(transaction => [transaction.id, transaction]));
+    const remove = db.prepare('DELETE FROM transactions WHERE id=?');
+    const put = db.prepare(`INSERT INTO transactions(id,account_id,item_id,payload_json) VALUES(?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,item_id=excluded.item_id,payload_json=excluded.payload_json`);
+    for (const id of ids) {
+      const transaction = desired.get(id);
+      if (!transaction) remove.run(id);
+      else put.run(transaction.id, transaction.accountId ?? null, transaction.itemId ?? null, json(transaction));
+    }
+    for (const item of state.items || []) statements.upsertItem.run(item.id, json(item));
+    for (const id of state._deleteAccountIds || []) db.prepare('DELETE FROM accounts WHERE id=?').run(id);
+    for (const account of state.accounts || []) statements.upsertAccount.run(account.id, account.itemId ?? null, json(account));
+    const { transactions, items, accounts, holdings, _deleteAccountIds, customCategories, budgets, budgetTemplates, monthlyBudgets, ...meta } = state;
+    statements.putMeta.run(json(meta));
+  });
   return Object.freeze({
     schemaVersion: MIGRATION_VERSION,
     async read() { return { state: load() }; },
@@ -238,6 +259,29 @@ export function createSqliteRepository(db) {
         const state = load();
         await update(state);
         persist(state);
+        return state;
+      });
+      writes = operation.catch(() => {});
+      return operation;
+    },
+    async mutateTransactionSubset(ids, update) {
+      const uniqueIds = [...new Set(ids)];
+      const operation = writes.then(async () => {
+        const meta = statements.meta.get();
+        const state = meta ? parse(meta.payload_json) : { version: 1, owner: null, lastSync: null, lease: null };
+        state.revision = Number.isSafeInteger(state.revision) ? state.revision : 0;
+        state.transactions = uniqueIds.length
+          ? db.prepare(`SELECT payload_json FROM transactions WHERE id IN (${uniqueIds.map(() => '?').join(',')})`).all(...uniqueIds).map(row => parse(row.payload_json))
+          : [];
+        state.accounts = statements.rows.accounts.all().map(row => parse(row.payload_json));
+        state.items = statements.rows.items.all().map(row => parse(row.payload_json));
+        state.customCategories = db.prepare('SELECT name FROM custom_categories ORDER BY rowid').all().map(row => row.name);
+        state.budgets = Object.fromEntries(db.prepare('SELECT category,amount FROM budgets ORDER BY category').all().map(row => [row.category, row.amount]));
+        state.budgetTemplates = db.prepare('SELECT category_id AS categoryId,effective_from AS effectiveFrom,amount FROM budget_templates ORDER BY effective_from,category_id').all();
+        state.monthlyBudgets = Object.fromEntries(db.prepare('SELECT month,category_id AS categoryId,amount FROM monthly_budgets ORDER BY month,category_id').all().map(row => [`${row.month}:${row.categoryId}`, row.amount]));
+        await update(state);
+        state.revision = (Number.isSafeInteger(state.revision) ? state.revision : 0) + 1;
+        writeTransactionSubset(state, uniqueIds);
         return state;
       });
       writes = operation.catch(() => {});

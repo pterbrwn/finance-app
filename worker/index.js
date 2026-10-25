@@ -58,6 +58,11 @@ async function mutate(env, update) {
     state.revision = (Number.isSafeInteger(state.revision) ? state.revision : 0) + 1;
   });
 }
+async function mutateTransactions(env, ids, update) {
+  const repository=repositoryFor(env);
+  if(typeof repository.mutateTransactionSubset==='function')return repository.mutateTransactionSubset(ids,async state=>{await update(state);});
+  return mutate(env,update);
+}
 function checkRevision(state,input) { const revision=Number.isSafeInteger(state.revision)?state.revision:0;if (input.revision !== undefined && input.revision !== revision) throw apiError('This data changed in another tab. Reload it and try again.', 409); }
 async function body(request) {
   const text = await request.text();
@@ -197,11 +202,18 @@ async function runSyncJob(env,jobId){
           }catch(e){if(e.plaidCode!=='TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION'||attempt===2)throw e;}
         }
         const accountData=await plaid(env,'/accounts/get',{access_token});
-        await mutate(env,s=>{
+        const affectedIds=[...new Set(result.pages.flatMap(page=>[
+          ...(page.added||[]).flatMap(transaction=>[transaction.transaction_id,transaction.pending_transaction_id].filter(Boolean)),
+          ...(page.modified||[]).flatMap(transaction=>[transaction.transaction_id,transaction.pending_transaction_id].filter(Boolean)),
+          ...(page.removed||[]).map(transaction=>transaction.transaction_id).filter(Boolean)
+        ]))];
+        await mutateTransactions(env,affectedIds,s=>{
           assertSyncOwner(s,jobId);
           const liveItem=s.items.find(i=>i.id===item.id);if(!liveItem||liveItem.lifecycle==='unlinked')return;
           applySyncPages(s,item.id,result.pages);liveItem.cursor=result.cursor;liveItem.lastSync=new Date().toISOString();liveItem.lastSuccess=liveItem.lastSync;liveItem.error=null;
+          const oldAccountIds=s.accounts.filter(account=>account.itemId===item.id).map(account=>account.id);
           const providerToLocal=replaceProviderAccounts(s,item.id,accountData.accounts);remapProviderAccountReferences(s,item.id,providerToLocal);
+          const remainingAccountIds=new Set(s.accounts.filter(account=>account.itemId===item.id).map(account=>account.id));s._deleteAccountIds=oldAccountIds.filter(id=>!remainingAccountIds.has(id));
           s.syncJob.completed+=1;s.syncJob.lastHeartbeatAt=new Date().toISOString();
         });
       }catch(error){
@@ -425,18 +437,18 @@ export default {
         const input = await body(request);
         const category = categoryCatalog(state).find(c => c.id === input.categoryId && !c.archivedAt) || categoryCatalog(state).find(c => c.name === input.category && !c.archivedAt);
         if (!category) throw apiError('Choose a valid category.');
-        const saved = await mutate(env, s => { checkRevision(s,input); const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); const live = categoryCatalog(s).find(c => c.id === category.id && !c.archivedAt); if (!live) throw apiError('That category is no longer available.', 409); t.override = live.name; t.overrideCategoryId = live.id; });
+        const saved = await mutateTransactions(env,[input.id],s => { checkRevision(s,input); const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); const live = categoryCatalog(s).find(c => c.id === category.id && !c.archivedAt); if (!live) throw apiError('That category is no longer available.', 409); t.override = live.name; t.overrideCategoryId = live.id; });
         return response({ ok: true, revision: saved.revision });
       }
       if(path==='/api/category-bulk'&&request.method==='POST'){
         const input=await body(request),ids=Array.isArray(input.ids)?[...new Set(input.ids)]:[],category=categoryCatalog(state).find(c=>c.id===input.categoryId&&!c.archivedAt);
         if(!ids.length||ids.length>100||ids.some(id=>typeof id!=='string')||!category)throw apiError('Choose up to 100 transactions and a valid category.');
-        const id=crypto.randomUUID();const saved=await mutate(env,s=>{checkRevision(s,input);const selected=s.transactions.filter(t=>ids.includes(t.id));if(selected.length!==ids.length)throw apiError('One or more selected transactions are no longer available.',409);s.categoryEditBatches||=[];const changes=selected.map(t=>({id:t.id,override:t.override,overrideCategoryId:t.overrideCategoryId}));for(const t of selected){t.override=category.name;t.overrideCategoryId=category.id;}s.categoryEditBatches.push({id,categoryId:category.id,createdAt:new Date().toISOString(),changes});});
+        const id=crypto.randomUUID();const saved=await mutateTransactions(env,ids,s=>{checkRevision(s,input);const selected=s.transactions.filter(t=>ids.includes(t.id));if(selected.length!==ids.length)throw apiError('One or more selected transactions are no longer available.',409);s.categoryEditBatches||=[];const changes=selected.map(t=>({id:t.id,override:t.override,overrideCategoryId:t.overrideCategoryId}));for(const t of selected){t.override=category.name;t.overrideCategoryId=category.id;}s.categoryEditBatches.push({id,categoryId:category.id,createdAt:new Date().toISOString(),changes});});
         return response({ok:true,batchId:id,count:ids.length,revision:saved.revision});
       }
       if(path==='/api/category-bulk-undo'&&request.method==='POST'){
         const input=await body(request),batch=state.categoryEditBatches?.find(item=>item.id===input.batchId);if(!batch)throw apiError('Bulk edit undo record not found.',404);
-        let undone=0;const saved=await mutate(env,s=>{checkRevision(s,input);const index=s.categoryEditBatches.findIndex(item=>item.id===input.batchId);if(index<0)throw apiError('Bulk edit undo record not found.',404);const [record]=s.categoryEditBatches.splice(index,1);for(const prior of record.changes){const transaction=s.transactions.find(t=>t.id===prior.id);if(!transaction||transaction.overrideCategoryId!==record.categoryId)continue;if(prior.override===undefined)delete transaction.override;else transaction.override=prior.override;if(prior.overrideCategoryId===undefined)delete transaction.overrideCategoryId;else transaction.overrideCategoryId=prior.overrideCategoryId;undone++;}});
+        let undone=0;const saved=await mutateTransactions(env,batch.changes.map(change=>change.id),s=>{checkRevision(s,input);const index=s.categoryEditBatches.findIndex(item=>item.id===input.batchId);if(index<0)throw apiError('Bulk edit undo record not found.',404);const [record]=s.categoryEditBatches.splice(index,1);for(const prior of record.changes){const transaction=s.transactions.find(t=>t.id===prior.id);if(!transaction||transaction.overrideCategoryId!==record.categoryId)continue;if(prior.override===undefined)delete transaction.override;else transaction.override=prior.override;if(prior.overrideCategoryId===undefined)delete transaction.overrideCategoryId;else transaction.overrideCategoryId=prior.overrideCategoryId;undone++;}});
         return response({ok:true,revision:saved.revision,undone,skipped:batch.changes.length-undone});
       }
       if(path==='/api/import-preview'&&request.method==='POST'){
@@ -451,7 +463,8 @@ export default {
         if(preview.unknownCategories.length)throw apiError('Map unknown categories to an existing bucket or create that bucket before importing.');
         if(preview.overlaps.length&&input.confirmOverlaps!==true)throw apiError('Review matching transactions and explicitly confirm whether to keep these rows.',409);
         let imported=0,skipped=0;
-        const saved=await mutate(env,s=>{
+        const plannedIds=preview.rows.map((row,index)=>'csv:'+preview.fileId+':'+index);
+        const saved=await mutateTransactions(env,plannedIds,s=>{
           checkRevision(s,input);s.owner=user;s.importBatches||=[];
           if(s.importBatches.some(batch=>batch.id===preview.fileId)){skipped=preview.rows.length;return;}
           if(!s.accounts.some(a=>a.id===preview.accountId))s.accounts.push({id:preview.accountId,itemId:null,name:preview.name,mask:null,type:'manual',subtype:'CSV import',balance:null,currency:'USD',source:'csv'});
@@ -464,7 +477,7 @@ export default {
       if(path==='/api/import-undo'&&request.method==='POST'){
         const input=await body(request),batch=state.importBatches?.find(value=>value.id===input.batchId);
         if(!batch)throw apiError('Import batch not found.',404);
-        const saved=await mutate(env,s=>{checkRevision(s,input);const index=s.importBatches.findIndex(value=>value.id===input.batchId);if(index<0)throw apiError('Import batch not found.',404);const [removed]=s.importBatches.splice(index,1),ids=new Set(removed.transactionIds);s.transactions=s.transactions.filter(t=>!ids.has(t.id));});
+        const saved=await mutateTransactions(env,batch.transactionIds,s=>{checkRevision(s,input);const index=s.importBatches.findIndex(value=>value.id===input.batchId);if(index<0)throw apiError('Import batch not found.',404);s.importBatches.splice(index,1);const ids=new Set(batch.transactionIds);s.transactions=s.transactions.filter(t=>!ids.has(t.id));});
         return response({ok:true,revision:saved.revision,undone:batch.transactionIds.length});
       }
       if (path === '/api/budget' && request.method === 'POST') {

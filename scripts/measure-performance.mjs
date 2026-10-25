@@ -69,6 +69,7 @@ for (const size of sizes) {
   const rows = Array.from({ length: size }, (_, index) => transaction(index));
   await repository.mutate(state => {
     state.owner = 'synthetic-owner'; state.revision = 0;
+    state.items = [{id:'synthetic-item',cursor:'before-sync',lifecycle:'connected'}];
     state.accounts = Array.from({ length: 8 }, (_, index) => ({ id: `manual-${index}`, itemId: null, type: 'depository', subtype: 'checking', name: `Synthetic checking ${index + 1}`, balance: 1000000, available: 900000, currency: 'USD', source: 'manual', manual: true, balanceAsOf: '2026-10-25' }));
     state.transactions = rows;
     state.goals = [{ id: 'goal-emergency', name: 'Synthetic emergency fund', target: 500000, targetDate: '2027-12-31' }];
@@ -116,9 +117,9 @@ for (const size of sizes) {
     return response;
   }, 1));
   const syncStarted = performance.now();
-  await repository.mutate(current => {
+  await repository.mutateTransactionSubset(['synthetic-sync-page'],current => {
     applySyncPages(current, 'synthetic-item', [{ added: [{ transaction_id: 'synthetic-sync-page', account_id: 'provider-account', date: '2026-10-25', amount: 4.25, name: 'Synthetic sync page', iso_currency_code: 'USD' }], modified: [], removed: [] }]);
-    current.revision = (current.revision || 0) + 1;
+    current.items.find(item=>item.id==='synthetic-item').cursor='after-sync';
   });
   results.push({ name: 'sync_page_commit', samples: 1, medianMs: Number((performance.now() - syncStarted).toFixed(2)) });
 
