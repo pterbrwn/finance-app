@@ -1,3 +1,5 @@
+import { transactionMatchesCategory } from '../shared/categories.mjs';
+
 export const STATE_KEY = 'finance/owner-v1.json';
 
 export const blankState = () => ({
@@ -63,7 +65,7 @@ export function createStateRepository(store) {
 
   async function queryTransactions({ page=1,limit=50,search='',category='',accountId='',from='',to='',review=false }={}) {
     const { state } = await read();
-    const matches=(state.transactions||[]).filter(row=>(!search||String(row.merchant||'').toLocaleLowerCase('en-US').includes(search.toLocaleLowerCase('en-US')))&&(!category||(row.overrideCategoryId===category||row.override===category||row.category===category))&&(!accountId||row.accountId===accountId)&&(!from||row.date>=from)&&(!to||row.date<=to)&&(!review||row.review===true||row.confidence!==undefined&&row.confidence<.5||(row.override||row.category)==='Other')).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
+    const matches=(state.transactions||[]).filter(row=>(!search||String(row.merchant||'').toLocaleLowerCase('en-US').includes(search.toLocaleLowerCase('en-US')))&&(!category||transactionMatchesCategory(row,category))&&(!accountId||row.accountId===accountId)&&(!from||row.date>=from)&&(!to||row.date<=to)&&(!review||row.review===true||row.confidence!==undefined&&row.confidence<.5||(row.override||row.category)==='Other')).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
     return {page,limit,total:matches.length,transactions:matches.slice((page-1)*limit,page*limit),revision:state.revision||0};
   }
 

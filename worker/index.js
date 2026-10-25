@@ -1,5 +1,5 @@
 // The loopback-only Node server supplies the local owner's identity.
-import { CATEGORIES } from '../shared/categories.mjs';
+import { CATEGORIES, transactionMatchesCategory } from '../shared/categories.mjs';
 import { budgetMonthKey, resolveBudget, validMonth } from '../shared/budgets.mjs';
 import { cents } from '../shared/money.mjs';
 import { accountRecord, investmentHoldings, providerAccountKey } from '../shared/investments.mjs';
@@ -301,7 +301,7 @@ export default {
       if(path==='/api/transactions'&&request.method==='GET'){
         const query=url.searchParams,page=Number(query.get('page')||1),limit=Math.min(100,Math.max(1,Number(query.get('limit')||50))),search=(query.get('search')||'').slice(0,120).toLocaleLowerCase('en-US'),category=query.get('category')||'',accountId=query.get('account')||'',from=query.get('from')||'',to=query.get('to')||'',review=query.get('review')==='true';
         if(!Number.isSafeInteger(page)||page<1||!Number.isSafeInteger(limit)||from&&!validDateOnly(from)||to&&!validDateOnly(to))throw apiError('Choose a valid transaction page and date range.');
-        const matches=state.transactions.filter(t=>(!search||String(t.merchant||'').toLocaleLowerCase('en-US').includes(search))&&(!category||(t.overrideCategoryId===category||(!t.overrideCategoryId&&(t.override||t.category)===category)||t.override===category||t.category===category))&&(!accountId||t.accountId===accountId)&&(!from||t.date>=from)&&(!to||t.date<=to)&&(!review||t.review===true||t.confidence!==undefined&&t.confidence<0.5||(t.override||t.category)==='Other')).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
+        const matches=state.transactions.filter(t=>(!search||String(t.merchant||'').toLocaleLowerCase('en-US').includes(search))&&(!category||transactionMatchesCategory(t,category))&&(!accountId||t.accountId===accountId)&&(!from||t.date>=from)&&(!to||t.date<=to)&&(!review||t.review===true||t.confidence!==undefined&&t.confidence<0.5||(t.override||t.category)==='Other')).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
         return response({page,limit,total:matches.length,transactions:matches.slice((page-1)*limit,page*limit),revision:state.revision});
       }
       if(path==='/api/balance-snapshot'&&request.method==='POST'){

@@ -9,7 +9,21 @@ const { eligibleCashAccounts, goalProjection, summarizeGoals } = await import('.
 const { amortizeFixedRate, compareAmortization, summarizeProperties } = await import('../dist/shared/mortgages.mjs');
 const { calculateHomeScenario, validateScenarioInput } = await import('../dist/shared/scenarios.mjs');
 const { makeBalanceSheetSnapshot, summarizeBalanceSheet } = await import('../dist/shared/net-worth.mjs');
+const { createStateRepository } = await import('../server/repository.mjs');
 globalThis.crypto ||= webcrypto;
+
+const effectiveCategoryRows=[
+  {id:'source-groceries',date:'2026-10-23',merchant:'Synthetic unchanged groceries',category:'Groceries',categoryId:'system:groceries'},
+  {id:'override-dining',date:'2026-10-25',merchant:'Synthetic overridden dining',category:'Groceries',categoryId:'system:groceries',override:'Dining',overrideCategoryId:'system:dining'},
+  {id:'legacy-dining',date:'2026-10-24',merchant:'Synthetic legacy dining',category:'Groceries',override:'Dining'},
+  {id:'empty-override',date:'2026-10-22',merchant:'Synthetic empty override',category:'Groceries',categoryId:'system:groceries',override:'',overrideCategoryId:'system:dining'}
+];
+const repositoryState={version:1,owner:null,items:[],accounts:[],transactions:effectiveCategoryRows};
+const categoryRepository=createStateRepository({get:async()=>({etag:'synthetic',json:async()=>repositoryState}),put:async()=>({etag:'synthetic'})});
+for(const [category,expected] of [['Groceries',['source-groceries','empty-override']],['system:groceries',['source-groceries','empty-override']],['Dining',['override-dining','legacy-dining']],['system:dining',['override-dining']]])
+  assert.deepEqual((await categoryRepository.queryTransactions({category})).transactions.map(row=>row.id),expected,`JSON state repository filters by effective category ${category}`);
+const fallbackWorker=await worker.fetch(new Request('https://ledger.test/api/transactions?category=Dining',{headers:{'oai-authenticated-user-id':'owner'}}),{REPOSITORY:{read:async()=>({state:repositoryState})}});
+assert.deepEqual((await fallbackWorker.json()).transactions.map(row=>row.id),['override-dining','legacy-dining'],'worker full-state fallback filters by the effective displayed category');
 
 const goalAccounts=[
   {id:'cash',name:'Checking',type:'depository',balance:10000,availableBalance:8000,currency:'USD',itemId:'bank',includeInReporting:true},

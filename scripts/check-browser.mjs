@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -81,6 +81,17 @@ try{
   const bulkEditResult=await bulkEditResponse;
   assert.equal(bulkEditResult.status(),200,`bulk category API response: ${await bulkEditResult.text()}`);
   await page.locator('#undo-bulk-category').waitFor();
+  await page.locator('#search').fill('Synthetic');
+  await page.locator('#category-filter').selectOption({label:'Groceries'});
+  await page.getByText('Synthetic Market',{exact:true}).waitFor();
+  assert.equal(await page.getByText('Synthetic bulk market',{exact:true}).count(),0,'source category filter excludes the transaction after it receives an override');
+  await page.locator('#category-filter').selectOption({label:'Shopping'});
+  await page.getByText('Synthetic bulk market',{exact:true}).waitFor();
+  const scopedExportDownload=page.waitForEvent('download');await page.locator('#export').click();
+  const scopedExport=await scopedExportDownload,path=await scopedExport.path(),scopedCSV=await readFile(path,'utf8');
+  assert.match(scopedCSV,/Synthetic bulk market/,'category-scoped exports include the matching effective-category transaction');
+  assert.doesNotMatch(scopedCSV,/Synthetic Market/,'category-scoped exports exclude other source-category transactions');
+  await page.locator('#category-filter').selectOption('');
   await page.locator('#undo-bulk-category').click();
   await page.getByText('Synthetic bulk market',{exact:true}).waitFor();
   const exportDownload=page.waitForEvent('download');await page.locator('#export').click();assert.match((await exportDownload).suggestedFilename(),/^ledger-.*\.csv$/);

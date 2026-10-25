@@ -148,7 +148,7 @@ export function createSqliteRepository(db) {
   function queryTransactionPage({page=1,limit=50,search='',category='',accountId='',from='',to='',review=false}={}) {
     const clauses=[],values=[];
     if(search){clauses.push("instr(ledger_casefold(json_extract(payload_json,'$.merchant')) ,?)>0");values.push(search.toLocaleLowerCase('en-US'));}
-    if(category){clauses.push("(json_extract(payload_json,'$.overrideCategoryId')=? OR json_extract(payload_json,'$.override')=? OR json_extract(payload_json,'$.category')=?)");values.push(category,category,category);}
+    if(category){const effectiveName="coalesce(nullif(json_extract(payload_json,'$.override'),''),json_extract(payload_json,'$.category'))",effectiveId="CASE WHEN nullif(json_extract(payload_json,'$.override'),'') IS NOT NULL THEN json_extract(payload_json,'$.overrideCategoryId') ELSE json_extract(payload_json,'$.categoryId') END";clauses.push(`(${effectiveName}=? OR ${effectiveId}=?)`);values.push(category,category);}
     if(accountId){clauses.push('account_id=?');values.push(accountId);}
     if(from){clauses.push("json_extract(payload_json,'$.date')>=?");values.push(from);}
     if(to){clauses.push("json_extract(payload_json,'$.date')<=?");values.push(to);}

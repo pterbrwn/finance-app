@@ -161,6 +161,26 @@ try {
   assert.equal(completeSummary.transactionCount,4);
   await orderingRepository.close();
 
+  const effectiveCategoryRepository=await createSqliteRepositoryAt(join(directory,'effective-category.sqlite'));
+  await effectiveCategoryRepository.mutate(state=>{state.transactions=[
+    {id:'source-groceries',accountId:'synthetic-checking',date:'2026-10-23',merchant:'Synthetic unchanged groceries',amount:100,currency:'USD',category:'Groceries',categoryId:'system:groceries'},
+    {id:'override-dining',accountId:'synthetic-checking',date:'2026-10-25',merchant:'Synthetic overridden dining',amount:200,currency:'USD',category:'Groceries',categoryId:'system:groceries',override:'Dining',overrideCategoryId:'system:dining'},
+    {id:'legacy-dining',accountId:'synthetic-checking',date:'2026-10-24',merchant:'Synthetic legacy dining',amount:300,currency:'USD',category:'Groceries',override:'Dining'},
+    {id:'empty-override',accountId:'synthetic-checking',date:'2026-10-22',merchant:'Synthetic empty override',amount:400,currency:'USD',category:'Groceries',categoryId:'system:groceries',override:'',overrideCategoryId:'system:dining'},
+    {id:'renamed-custom',accountId:'synthetic-checking',date:'2026-10-21',merchant:'Synthetic renamed custom',amount:500,currency:'USD',category:'Old custom name',categoryId:'custom:stable',override:'New custom name',overrideCategoryId:'custom:stable'}
+  ];});
+  const categoryIds=async(category,options={})=>(await effectiveCategoryRepository.queryTransactions({page:1,limit:50,...options,category})).transactions.map(row=>row.id);
+  assert.deepEqual(await categoryIds('Groceries'),['source-groceries','empty-override'],'effective Groceries name excludes rows currently overridden to another category');
+  assert.deepEqual(await categoryIds('system:groceries'),['source-groceries','empty-override'],'effective source category ID is used when there is no nonempty override');
+  assert.deepEqual(await categoryIds('Dining'),['override-dining','legacy-dining'],'legacy label-only and ID-backed overrides match their displayed category');
+  assert.deepEqual(await categoryIds('system:dining'),['override-dining'],'override category IDs do not include source-category matches');
+  assert.deepEqual(await categoryIds('Old custom name'),[],'a renamed transaction does not remain under its previous source label');
+  assert.deepEqual(await categoryIds('New custom name'),['renamed-custom']);
+  assert.deepEqual(await categoryIds('custom:stable'),['renamed-custom'],'renamed custom category identity remains filterable by ID');
+  const filteredSecondPage=await effectiveCategoryRepository.queryTransactions({page:2,limit:1,category:'Dining',search:'synthetic',accountId:'synthetic-checking',from:'2026-10-01',to:'2026-10-31'});
+  assert.equal(filteredSecondPage.total,2,'filtered total counts only the two effective Dining rows');assert.deepEqual(filteredSecondPage.transactions.map(row=>row.id),['legacy-dining'],'effective category filtering composes with search/account/date filters and paging');
+  await effectiveCategoryRepository.close();
+
   const legacyDatabase=join(directory,'schema-v1.sqlite');
   const oldDb=new Database(legacyDatabase);
   oldDb.exec(await readFile(new URL('../server/migrations/001-initial.sql',import.meta.url),'utf8'));
