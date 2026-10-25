@@ -1,0 +1,17 @@
+[Unit]
+Description=Ledger private finance dashboard
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Development/finance-app
+ExecStart=/usr/bin/node scripts/dev-server.mjs
+Environment=PORT=3001
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

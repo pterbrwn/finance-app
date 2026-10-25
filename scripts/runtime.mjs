@@ -1,0 +1,34 @@
+import { readFile, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { createLocalBucket } from './local-storage.mjs';
+
+export const configPath = resolve(process.env.LEDGER_CONFIG_FILE || join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'ledger/config.json'));
+export const dataDirectory = resolve(process.env.LEDGER_LOCAL_DATA_DIR || join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'ledger'));
+
+export async function localRuntime() {
+  let config = {};
+  try {
+    const info = await stat(configPath);
+    if ((info.mode & 0o077) !== 0 || info.uid !== process.getuid()) throw new Error('Ledger config must belong to this user and have permissions 600.');
+    config = JSON.parse(await readFile(configPath, 'utf8'));
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  const enabled = config.enablePlaid === true;
+  if (config.publicOrigin) {
+    const url = new URL(config.publicOrigin);
+    if (url.protocol !== 'https:' || !url.hostname.endsWith('.ts.net') || url.origin !== config.publicOrigin || !config.tailscaleLogin) throw new Error('Tailscale access needs an exact HTTPS ts.net origin and an owner login.');
+  }
+  return {
+    publicOrigin: config.publicOrigin,
+    tailscaleLogin: config.tailscaleLogin,
+    BUCKET: await createLocalBucket(dataDirectory),
+    LOCAL_ONLY: !enabled,
+    PLAID_ENV: enabled ? config.plaidEnv : undefined,
+    PLAID_CLIENT_ID: enabled ? config.plaidClientId : undefined,
+    PLAID_SECRET: enabled ? config.plaidSecret : undefined,
+    TOKEN_ENCRYPTION_KEY: enabled ? config.tokenEncryptionKey : undefined,
+    PLAID_REDIRECT_URI: enabled ? config.plaidRedirectUri : undefined
+  };
+}

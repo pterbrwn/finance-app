@@ -1,0 +1,10 @@
+[Unit]
+Description=Update Ledger daily at 6 AM Central
+
+[Timer]
+OnCalendar=*-*-* 06:00:00 America/Chicago
+Persistent=true
+Unit=ledger-sync.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+node scripts/check-source.mjs
+gitleaks git --redact --no-banner

@@ -1,0 +1,10 @@
+{
+  "enablePlaid": false,
+  "plaidEnv": "sandbox",
+  "plaidClientId": "",
+  "plaidSecret": "",
+  "tokenEncryptionKey": "",
+  "plaidRedirectUri": "",
+  "publicOrigin": "",
+  "tailscaleLogin": ""
+}
