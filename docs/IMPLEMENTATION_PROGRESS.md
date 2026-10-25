@@ -379,3 +379,16 @@ Code-only log. No production records, account names, credentials, private origin
 - The plan's full manual suite is still pending: screen-reader flows, focus return/visibility and error announcements, category archive and recurring/month overrides, manual investments, mortgage and unsupported projection, scenario preview/compare/actions, backup/sync stale/error recovery, slow/offline/conflict preservation, long-name and chart alternatives, and owner-device private-access review. Orca could not be exercised because this session has no graphical desktop session. Do not treat C10 as fully accepted until these checks have recorded evidence.
 
 **Next:** C11 automated synthetic release/security gate can proceed independently, but final acceptance and C12/C13 remain pending outstanding manual evidence and private migration prerequisites.
+
+
+## C11 — Final synthetic release and security gate
+
+**Status:** Automated acceptance passed for commit `dacd211bec01`; production migration and activation have not run.
+
+- A fresh shared clone of `dacd211bec01` installed dependencies under Node 24.22.1 with zero reported npm vulnerabilities. `npm run check`, `npm run check:local-http`, and `npm run check:browser` all passed. These include the legacy importer, encrypted token/cursor preservation, interrupted sync recovery, transient/unavailable provider responses, revision conflicts, sync overlap, concurrency, loopback host/origin and proxy-identity guards, and real browser/Axe checks using synthetic state.
+- The fresh 10k/100k performance workload passed. At 100k, warm bounded state p95 was 171.04 ms / 11.4 KB, filtered page p95 202.25 ms / 10.7 KB, month aggregation p95 12.94 ms, single/bulk category writes 412/413 ms, sync page 2.45 ms, 5k CSV commit 755 ms and undo 400 ms. Peak sampled RSS was 420 MB. Workload used only synthetic data and removed temporary databases.
+- `check:source` passed for the 64-file source index. Gitleaks scanned all 40 commits through this candidate (about 835 KB) and found no leaks. `git diff --check` passed.
+- A fresh immutable candidate for `dacd211bec01` was prepared in a temporary release root and passed package checksums, packaged legacy import, backup/restore, startup, health/build/schema identity, static asset delivery, compatible rollback, and incompatible-downgrade refusal. No production release directory or current symlink was changed.
+- The local loopback/proxy header tests are synthetic; they do not prove the live HTTPS proxy strips forged identity headers. C10's required owner-device screen-reader and remaining manual browser checks are still open, so this automated gate does not authorize C12/C13 activation.
+
+**Next:** C10 manual acceptance remains an owner desktop dependency. After it is recorded, resume C12 with the private storage/key reconciliation and recovery checks; activate only after that operational gate passes.
