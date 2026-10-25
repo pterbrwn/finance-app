@@ -302,3 +302,15 @@ Code-only log. No production records, account names, credentials, private origin
 - No owner document was deleted or committed.
 
 **Next:** C05, enforce SQLite schema compatibility and accurate backup identity.
+
+
+## C05 — SQLite schema compatibility and backup identity
+
+**Status:** Implemented and verified in a disposable source copy.
+
+- The SQLite opener now refuses future versions, missing or noncontiguous migration history, missing or unexpected application tables, and unversioned populated files before changing permissions or journal mode. It applies only pending migrations, with each migration and its version record in one transaction; supported upgrades still require a verified private backup first.
+- Backup manifests report the schema version read from the verified backup. A backup API failure now follows the same temporary-file cleanup path as later verification failures. Import emptiness checks include `state_meta` and import ledger rows so metadata-only destinations cannot be overwritten.
+- SQLite fixtures verify current schema round trips for encrypted token/cursor pairs, category overrides, budget templates and overrides, goals/allocation history, property and mortgage snapshots, scenario versions/funding, balance snapshots, import undo metadata, sync state, plus integrity, foreign keys, backup, and restore.
+- Synthetic tests cover current schema use, v1-to-v2 migration with pre-migration backup, future-schema refusal without journal/content changes, inconsistent histories, unversioned tables, metadata-only import refusal, and atomic rollback after an injected migration interruption. Pinned Node 24.22.1 `scripts/check-sqlite.mjs` passed in a disposable source copy. The checkout `dist`, live service, and production data were not changed.
+
+**Next:** C06, scheduled verified backups, retention, and Settings status.

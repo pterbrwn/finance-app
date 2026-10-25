@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { createCipheriv, randomBytes } from 'node:crypto';
 import { chmod, writeFile } from 'node:fs/promises';
 import Database from 'better-sqlite3';
-import { createSqliteRepositoryAt, openLedgerDatabase, SQLITE_SCHEMA_VERSION } from '../server/sqlite-repository.mjs';
+import { createSqliteRepository, createSqliteRepositoryAt, openLedgerDatabase, SQLITE_SCHEMA_VERSION } from '../server/sqlite-repository.mjs';
 
 assert.match(process.version, /^v24\./);
 assert.equal(SQLITE_SCHEMA_VERSION, 2);
@@ -24,6 +24,12 @@ try {
     state.budgets.Travel = 40000;
     state.budgetTemplates.push({categoryId:'category-travel',effectiveFrom:'2026-10',amount:40000});
     state.monthlyBudgets['2026-10:category-travel'] = 0;
+    state.goals = [{id:'goal-1',name:'Emergency fund',target:500000,allocationHistory:[{id:'allocation-1',amount:12500}]}];
+    state.properties = [{id:'property-1',value:32000000,mortgageSnapshots:[{date:'2026-10-01',balance:24000000}]}];
+    state.scenarios = [{id:'scenario-1',versions:[{id:'quote-1',inputs:{purchasePrice:40000000},funding:{goalId:'goal-1'}}]}];
+    state.balanceSnapshots = [{date:'2026-10-25',assets:51000000}];
+    state.importHistory = [{id:'undo-1',transactionIds:['txn-1']}];
+    state.syncJobs = [{id:'job-1',status:'interrupted'}];
   });
   const read = (await repository.read()).state;
   assert.equal(read.transactions[0].override, 'Travel');
@@ -32,6 +38,12 @@ try {
   assert.equal(read.budgets.Travel, 40000);
   assert.deepEqual(read.budgetTemplates,[{categoryId:'category-travel',effectiveFrom:'2026-10',amount:40000}]);
   assert.equal(read.monthlyBudgets['2026-10:category-travel'],0);
+  assert.deepEqual(read.goals,[{id:'goal-1',name:'Emergency fund',target:500000,allocationHistory:[{id:'allocation-1',amount:12500}]}]);
+  assert.deepEqual(read.properties,[{id:'property-1',value:32000000,mortgageSnapshots:[{date:'2026-10-01',balance:24000000}]}]);
+  assert.deepEqual(read.scenarios,[{id:'scenario-1',versions:[{id:'quote-1',inputs:{purchasePrice:40000000},funding:{goalId:'goal-1'}}]}]);
+  assert.deepEqual(read.balanceSnapshots,[{date:'2026-10-25',assets:51000000}]);
+  assert.deepEqual(read.importHistory,[{id:'undo-1',transactionIds:['txn-1']}]);
+  assert.deepEqual(read.syncJobs,[{id:'job-1',status:'interrupted'}]);
   await Promise.all([
     repository.mutate(state => { state.budgets.Dining = 10000; }),
     repository.mutate(state => { state.budgets.Housing = 150000; })
@@ -54,6 +66,7 @@ try {
   const backupResult = spawnSync(process.execPath, ['scripts/sqlite-backup.mjs', databasePath, backupPath], { cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8' });
   assert.equal(backupResult.status, 0, backupResult.stderr);
   assert.equal(JSON.parse(backupResult.stdout).ok, true);
+  assert.equal(JSON.parse(backupResult.stdout).schemaVersion, 2, 'backup manifest reports the database schema it contains');
   assert.equal((await stat(backupPath)).mode & 0o777, 0o600);
   const restoredPath = join(directory, 'restored.sqlite');
   const restoreResult = spawnSync(process.execPath, ['scripts/sqlite-restore.mjs', backupPath, restoredPath], { cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8' });
@@ -96,6 +109,14 @@ try {
   assert.equal(importedDb.prepare('SELECT amount FROM budgets WHERE category=?').get('Travel').amount, 5);
   importedDb.close();
 
+  const metadataOnlyPath = join(directory, 'metadata-only.sqlite');
+  const metadataOnlyDb = await openLedgerDatabase(metadataOnlyPath);
+  metadataOnlyDb.prepare('INSERT INTO state_meta(singleton,payload_json) VALUES(1,?)').run(JSON.stringify({version:1,goals:[{id:'preserve-me'}]}));
+  const metadataOnlyRepository = createSqliteRepository(metadataOnlyDb);
+  await assert.rejects(metadataOnlyRepository.importLegacyState({items:[],accounts:[],transactions:[],holdings:[],budgets:{},customCategories:[]}, 'synthetic-different-source'), /already contains records/);
+  assert.deepEqual((await metadataOnlyRepository.read()).state.goals, [{id:'preserve-me'}], 'metadata-only entities prevent an import from overwriting them');
+  await metadataOnlyRepository.close();
+
   const legacyDatabase=join(directory,'schema-v1.sqlite');
   const oldDb=new Database(legacyDatabase);
   oldDb.exec(await readFile(new URL('../server/migrations/001-initial.sql',import.meta.url),'utf8'));
@@ -116,7 +137,26 @@ try {
   assert.equal(preMigrationBackup.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count,1,'backup captured the old schema before applying migration 002');
   preMigrationBackup.close();
 
-  console.log('SQLite ARM64 runtime, constraints, import preservation/idempotency, automatic migration backup, backup and restore passed.');
+  const futureSchemaPath=join(directory,'future-schema.sqlite'),futureSchema=new Database(futureSchemaPath);
+  futureSchema.pragma('journal_mode = DELETE');futureSchema.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL); CREATE TABLE future_data(value TEXT);');
+  futureSchema.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(3,?)').run(new Date().toISOString());futureSchema.prepare('INSERT INTO future_data(value) VALUES(?)').run('preserved');futureSchema.close();
+  await assert.rejects(openLedgerDatabase(futureSchemaPath),/newer than this application supports/);
+  const afterFutureRefusal=new Database(futureSchemaPath,{readonly:true,fileMustExist:true});assert.equal(afterFutureRefusal.pragma('journal_mode',{simple:true}),'delete','future-schema refusal does not change the database journal mode');assert.equal(afterFutureRefusal.prepare('SELECT value FROM future_data').get().value,'preserved');afterFutureRefusal.close();
+
+  const invalidHistoryPath=join(directory,'invalid-history.sqlite'),invalidHistory=new Database(invalidHistoryPath);
+  invalidHistory.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL);');invalidHistory.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(2,?)').run(new Date().toISOString());invalidHistory.close();
+  await assert.rejects(openLedgerDatabase(invalidHistoryPath),/migration history is inconsistent/);
+  const unversionedPath=join(directory,'unversioned.sqlite'),unversioned=new Database(unversionedPath);unversioned.exec('CREATE TABLE unrelated(value TEXT);');unversioned.close();
+  await assert.rejects(openLedgerDatabase(unversionedPath),/without migration history/);
+
+  const rollbackPath=join(directory,'atomic-migration.sqlite'),rollbackDb=new Database(rollbackPath);
+  rollbackDb.exec(await readFile(new URL('../server/migrations/001-initial.sql',import.meta.url),'utf8'));
+  rollbackDb.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(1,?)').run(new Date().toISOString());
+  rollbackDb.exec("CREATE TRIGGER block_schema_v2 BEFORE INSERT ON schema_migrations WHEN NEW.version=2 BEGIN SELECT RAISE(ABORT,'synthetic migration interruption'); END;");rollbackDb.close();
+  await assert.rejects(openLedgerDatabase(rollbackPath),/synthetic migration interruption/);
+  const rolledBack=new Database(rollbackPath,{readonly:true,fileMustExist:true});assert.equal(rolledBack.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='monthly_budgets'").get().count,0,'failed DDL is rolled back with its migration version');assert.equal(rolledBack.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,1);rolledBack.close();
+
+  console.log('SQLite ARM64 runtime, constraints, import preservation/idempotency, schema compatibility, atomic migration, automatic migration backup, backup and restore passed.');
 } finally {
   await rm(directory, { recursive: true, force: true });
 }

@@ -6,6 +6,11 @@ import { createHash, randomUUID } from 'node:crypto';
 
 const MIGRATION_VERSION = 2;
 const TABLES = ['items', 'accounts', 'transactions', 'holdings'];
+const MIGRATIONS = [
+  { version: 1, file: '001-initial.sql' },
+  { version: 2, file: '002-monthly-budgets.sql' }
+];
+const CORE_TABLES = ['schema_migrations','state_meta','items','accounts','transactions','holdings','custom_categories','budgets','import_batches'];
 const json = value => JSON.stringify(value);
 const parse = value => JSON.parse(value);
 
@@ -45,13 +50,26 @@ export async function openLedgerDatabase(path) {
   try { existed=(await stat(filename)).size>0; } catch(error) { if(error.code!=='ENOENT')throw error; }
   const db = new Database(filename, { timeout: 5000 });
   try {
+    const hasMigrations=!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get();
+    const tableNames=new Set(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row=>row.name));
+    let currentVersion=0;
+    if(hasMigrations){
+      const versions=db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map(row=>row.version);
+      if(versions.some(version=>Number.isSafeInteger(version)&&version>MIGRATION_VERSION))throw new Error('Database schema is newer than this application supports; no changes were made.');
+      if(!versions.length||versions.some((version,index)=>!Number.isSafeInteger(version)||version!==index+1))throw new Error('Database migration history is inconsistent; no changes were made.');
+      currentVersion=versions.at(-1);
+    }else if(tableNames.size){
+      throw new Error('Database contains tables without migration history; no changes were made.');
+    }
+    if(currentVersion>0){
+      const expectedTables=new Set([...CORE_TABLES,...(currentVersion>=2?['budget_templates','monthly_budgets']:[])]);
+      if([...expectedTables].some(name=>!tableNames.has(name))||[...tableNames].some(name=>!expectedTables.has(name)))throw new Error('Database tables do not match the recorded migration history; no changes were made.');
+    }
     await chmod(filename, 0o600);
-    db.pragma('journal_mode = WAL');
-    db.pragma('synchronous = FULL');
     db.pragma('foreign_keys = ON');
     db.pragma('busy_timeout = 5000');
-    const hasMigrations=!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get();
-    const currentVersion=hasMigrations?(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version||0):0;
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = FULL');
     if(existed&&currentVersion<MIGRATION_VERSION){
       const backupDirectory=join(dirname(filename),'backups');
       await mkdir(backupDirectory,{recursive:true,mode:0o700});await chmod(backupDirectory,0o700);
@@ -64,10 +82,13 @@ export async function openLedgerDatabase(path) {
         check.close();check=null;await chmod(temporary,0o600);await rename(temporary,backupPath);
       }catch(error){check?.close();await rm(temporary,{force:true});throw new Error('Could not create a verified pre-migration backup; migration stopped.');}
     }
-    for (const version of [1, 2]) {
-      const migration = await readFile(new URL(`./migrations/${String(version).padStart(3,'0')}-${version===1?'initial':'monthly-budgets'}.sql`, import.meta.url), 'utf8');
-      db.exec(migration);
-      db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(version, new Date().toISOString());
+    for (const entry of MIGRATIONS.filter(migration=>migration.version>currentVersion)) {
+      const migration = await readFile(new URL(`./migrations/${entry.file}`, import.meta.url), 'utf8');
+      const apply=db.transaction(()=>{
+        db.exec(migration);
+        db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(entry.version, new Date().toISOString());
+      });
+      apply();
     }
     return db;
   }catch(error){
@@ -124,7 +145,7 @@ export function createSqliteRepository(db) {
   });
   const importLegacy = db.transaction((state, checksum) => {
     if (statements.findImport.get(checksum)) return { imported: false };
-    const count = db.prepare('SELECT (SELECT COUNT(*) FROM items)+(SELECT COUNT(*) FROM accounts)+(SELECT COUNT(*) FROM transactions)+(SELECT COUNT(*) FROM holdings)+(SELECT COUNT(*) FROM budgets)+(SELECT COUNT(*) FROM custom_categories)+(SELECT COUNT(*) FROM budget_templates)+(SELECT COUNT(*) FROM monthly_budgets) AS count').get().count;
+    const count = db.prepare('SELECT (SELECT COUNT(*) FROM state_meta)+(SELECT COUNT(*) FROM items)+(SELECT COUNT(*) FROM accounts)+(SELECT COUNT(*) FROM transactions)+(SELECT COUNT(*) FROM holdings)+(SELECT COUNT(*) FROM budgets)+(SELECT COUNT(*) FROM custom_categories)+(SELECT COUNT(*) FROM budget_templates)+(SELECT COUNT(*) FROM monthly_budgets)+(SELECT COUNT(*) FROM import_batches) AS count').get().count;
     if (count) throw new Error('Destination already contains records; refusing to merge an unreviewed import.');
     persist(state);
     const recordCounts = Object.fromEntries([...TABLES, 'customCategories'].map(name => [name, state[name]?.length ?? 0]));

@@ -16,23 +16,24 @@ await chmod(directory, 0o700);
 try { await stat(target); throw new Error('Backup destination already exists.'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 const temporary = `${target}.tmp-${randomUUID()}`;
 const db = new Database(source, { readonly: true, fileMustExist: true });
-try {
-  await db.backup(temporary);
-} finally {
-  db.close();
-}
 let backup;
 try {
+  await db.backup(temporary);
+  db.close();
   backup = new Database(temporary, { readonly: true, fileMustExist: true });
   const integrity = backup.pragma('integrity_check', { simple: true });
   const foreignKeys = backup.pragma('foreign_key_check');
   if (integrity !== 'ok' || foreignKeys.length) throw new Error('Backup verification failed.');
+  const hasMigrations=!!backup.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get();
+  const schemaVersion=hasMigrations?(backup.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version||0):null;
   backup.close(); backup = null;
   await chmod(temporary, 0o600);
   await rename(temporary, target);
-  console.log(JSON.stringify({ ok: true, backup: target, schemaVersion: 1 }));
+  console.log(JSON.stringify({ ok: true, backup: target, schemaVersion }));
 } catch (error) {
   backup?.close();
   await rm(temporary, { force: true });
   throw error;
+} finally {
+  try { db.close(); } catch {}
 }
