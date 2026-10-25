@@ -11,6 +11,7 @@ import { repositoryFor } from '../server/repository.mjs';
 export { categoryFor, fromPlaid, totals, applyChanges, applySyncPages, investmentHoldings };
 
 const normalizeCategory = value => String(value || '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
+const validDateOnly = value => typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value+'T12:00:00Z').toISOString().slice(0,10)===value;
 const systemCategories = CATEGORIES.map((name,index) => ({ id: 'system:'+name.toLowerCase().replace(/[^a-z0-9]+/g,'-'), name, normalizedName: normalizeCategory(name), kind: name === 'Income' ? 'income' : name === 'Transfers' ? 'transfer' : 'expense', system: true, order: index, archivedAt: null }));
 function categoryCatalog(state) {
   const legacy = (state.customCategories || []).map((value,index) => typeof value === 'string' ? { id:'legacy:'+encodeURIComponent(normalizeCategory(value)), name:value, normalizedName:normalizeCategory(value), kind:'expense', system:false, order:CATEGORIES.length+index, archivedAt:null } : value);
@@ -19,6 +20,10 @@ function categoryCatalog(state) {
   return [...systemCategories, ...customs].sort((a,b) => a.order-b.order || a.name.localeCompare(b.name));
 }
 const categories = state => categoryCatalog(state).filter(category => !category.archivedAt).map(category => category.name);
+function replaceProviderAccounts(state,itemId,accounts){
+  const previous=new Map(state.accounts.filter(a=>a.itemId===itemId).map(a=>[a.id,a]));
+  state.accounts=state.accounts.filter(a=>a.itemId!==itemId).concat(accounts.map(raw=>{const next=accountRecord(raw,itemId),old=previous.get(next.id);return old?{...next,includeInReporting:old.includeInReporting,archivedAt:old.archivedAt}:next;}));
+}
 const apiError = (message, status = 400) => Object.assign(new Error(message), { status });
 function response(data, status = 200) { return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }); }
 function ready(env) { return !env.LOCAL_ONLY && !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET && env.TOKEN_ENCRYPTION_KEY && ['sandbox', 'production'].includes(env.PLAID_ENV)); }
@@ -108,14 +113,15 @@ async function decryptToken(env, value) {
 async function syncBanks(env) {
   const leaseId = crypto.randomUUID();
   const acquired = await mutate(env, s => {
-    if (!s.items.length) throw apiError('Connect a bank before syncing.');
+    if (!s.items.some(item=>item.lifecycle!=='unlinked')) throw apiError('Connect an account before syncing.');
     if (s.lease && s.lease.expiresAt > Date.now()) throw apiError('A bank sync is already running.', 409);
     s.lease = { id: leaseId, expiresAt: Date.now() + 5 * 60_000 };
   });
   const failures = [];
   try {
-    for (const item of acquired.items) {
+    for (const item of acquired.items.filter(item=>item.lifecycle!=='unlinked')) {
       try {
+        if (!item.environment || item.environment !== env.PLAID_ENV) throw apiError('Connection environment must be verified before syncing. Reconnect only after the saved environment is confirmed.');
         const access_token = await decryptToken(env, item.token);
         if (item.product === 'investments') {
           const data = await plaid(env, '/investments/holdings/get', { access_token });
@@ -125,7 +131,7 @@ async function syncBanks(env) {
             const liveItem = s.items.find(i => i.id === item.id);
             if (!liveItem) return;
             s.holdings = (s.holdings || []).filter(h => h.itemId !== item.id).concat(holdings);
-            s.accounts = s.accounts.filter(a => a.itemId !== item.id).concat(data.accounts.map(a => accountRecord(a, item.id)));
+            replaceProviderAccounts(s,item.id,data.accounts);
             liveItem.lastSync = new Date().toISOString(); liveItem.error = null;
           });
           continue;
@@ -152,7 +158,7 @@ async function syncBanks(env) {
           if (!liveItem) return;
           applySyncPages(s, item.id, result.pages);
           liveItem.cursor = result.cursor; liveItem.lastSync = new Date().toISOString(); liveItem.error = null;
-          s.accounts = s.accounts.filter(a => a.itemId !== item.id).concat(accountData.accounts.map(a => accountRecord(a, item.id)));
+          replaceProviderAccounts(s,item.id,accountData.accounts);
         });
       } catch (e) {
         failures.push({ bank: item.name, message: e.status ? e.message : 'Bank update failed. Try again later.' });
@@ -186,14 +192,16 @@ export default {
       const { state, storageSchemaVersion } = await readState(env);
       if (state.owner && state.owner !== user) return response({ error: 'This dashboard belongs to another account.' }, 403);
       if (path === '/api/health' && request.method === 'GET') return response({ codeVersion: typeof BUILD_ID === 'string' ? BUILD_ID : 'unversioned', schemaVersion: Number.isInteger(storageSchemaVersion) ? storageSchemaVersion : Number.isInteger(state.version) ? state.version : null, configurationReady: ready(env), localOnly: !!env.LOCAL_ONLY, lastSync: state.lastSync || null });
-      if (['/api/link-token', '/api/exchange-token', '/api/sync', '/api/scheduled-sync', '/api/disconnect'].includes(path) && !ready(env)) return response({ error: 'Bank connections are disabled. Import CSV files for local-only operation.' }, 503);
+      if (['/api/link-token', '/api/exchange-token', '/api/sync', '/api/scheduled-sync', '/api/disconnect', '/api/delete-history'].includes(path) && !ready(env)) return response({ error: 'Bank connections are disabled. Import CSV files for local-only operation.' }, 503);
       if (path === '/api/state' && request.method === 'GET') return response(publicState(state, env));
       if (path === '/api/link-token' && request.method === 'POST') {
         const input = await body(request);
         const params = { user: { client_user_id: user }, client_name: 'Ledger Personal Finance', language: 'en', country_codes: ['US'], ...(env.PLAID_REDIRECT_URI ? { redirect_uri: env.PLAID_REDIRECT_URI } : {}) };
         if (input.itemId) {
           const item = state.items.find(i => i.id === input.itemId);
-          if (!item) throw apiError('Bank connection not found.', 404);
+          if (!item || item.lifecycle==='unlinked' || !item.token) throw apiError('This connection is unlinked. Add it again to resume access.', 409);
+          if (!item.environment || item.environment !== env.PLAID_ENV) throw apiError('Saved connection environment does not match the configured provider environment. No token was sent.');
+          if (input.product && input.product !== item.product) throw apiError('Connection type cannot change during update mode.', 409);
           params.access_token = await decryptToken(env, item.token);
         } else {
           const product = input.product || 'transactions';
@@ -202,13 +210,14 @@ export default {
           if (product === 'transactions') params.transactions = { days_requested: 365 };
         }
         const data = await plaid(env, '/link/token/create', params);
-        return response({ link_token: data.link_token });
+        return response({ link_token: data.link_token, environment: env.PLAID_ENV });
       }
       if (path === '/api/exchange-token' && request.method === 'POST') {
         const input = await body(request);
         if (typeof input.public_token !== 'string' || input.public_token.length > 500) throw apiError('Invalid bank authorization.');
         const product = input.product || 'transactions';
         if (!['transactions', 'investments'].includes(product)) throw apiError('Choose bank or investment accounts.');
+        if(input.environment&&input.environment!==env.PLAID_ENV)throw apiError('The saved authorization environment does not match the configured provider environment. Restart the connection in its original environment.');
         // Validate encryption before consuming the one-time public token.
         await tokenKey(env);
         const data = await plaid(env, '/item/public_token/exchange', { public_token: input.public_token });
@@ -216,7 +225,9 @@ export default {
         await mutate(env, s => {
           if (s.owner && s.owner !== user) throw apiError('Access denied.', 403);
           s.owner = user;
-          if (!s.items.some(i => i.id === data.item_id)) s.items.push({ id: data.item_id, name: String(input.name || 'Connected account').slice(0,100), product, token, cursor: null, lastSync: null, error: null });
+          const existing=s.items.find(i=>i.id===data.item_id);
+          if(existing){existing.name=String(input.name||existing.name||'Connected account').slice(0,100);existing.product=product;existing.environment=env.PLAID_ENV;existing.token=token;existing.lifecycle='connected';existing.error=null;}
+          else s.items.push({ id: data.item_id, name: String(input.name || 'Connected account').slice(0,100), product, environment:env.PLAID_ENV, token, cursor: null, lastSync: null, error: null, lifecycle:'connected' });
         });
         return response({ connected: true, ...await syncBanks(env) });
       }
@@ -321,6 +332,41 @@ export default {
         });
         return response({ ok: true, revision:saved.revision, category: result });
       }
+      if (path === '/api/manual-account' && request.method === 'POST') {
+        const input=await body(request),name=typeof input.name==='string'?input.name.trim():'';
+        if(input.action==='archive'||input.action==='restore'||input.action==='include'){
+          if(input.action==='include'&&typeof input.value!=='boolean')throw apiError('Choose whether to include this account in reports.');
+          const saved=await mutate(env,s=>{checkRevision(s,input);const account=s.accounts.find(a=>a.id===input.id&&a.manual);if(!account)throw apiError('Manual account not found.',404);if(input.action==='include')account.includeInReporting=input.value;else account.archivedAt=input.action==='archive'?new Date().toISOString():null;account.updatedAt=new Date().toISOString();});
+          return response({ok:true,revision:saved.revision});
+        }
+        const allowedTypes=['depository','credit','investment','retirement','hsa','asset','liability','other'];
+        const currency=typeof input.currency==='string'?input.currency.toUpperCase():'USD';
+        if(!name||name.length>100||typeof input.type!=='string'||!allowedTypes.includes(input.type)||!/^[A-Z]{3}$/.test(currency)||input.balance!==null&&(!Number.isSafeInteger(input.balance)||Math.abs(input.balance)>1_000_000_000_000)||input.balance!==null&&!validDateOnly(input.asOf)||input.institution!==undefined&&(typeof input.institution!=='string'||input.institution.length>100)||input.notes!==undefined&&(typeof input.notes!=='string'||input.notes.length>500)||input.includeInReporting!==undefined&&typeof input.includeInReporting!=='boolean')throw apiError('Enter a valid manual account name, type, currency, and observed balance.');
+        let savedAccount;
+        const saved=await mutate(env,s=>{
+          checkRevision(s,input);
+          const existing=input.id?s.accounts.find(a=>a.id===input.id&&a.manual):null;
+          if(input.id&&!existing)throw apiError('Manual account not found.',404);
+          const now=new Date().toISOString();
+          savedAccount={...(existing||{}),id:existing?.id||crypto.randomUUID(),itemId:null,connectionId:null,source:'manual',manual:true,name,institution:input.institution?.trim()||null,type:input.type,subtype:typeof input.subtype==='string'?input.subtype.trim().slice(0,60)||null:null,balance:input.balance,currency,balanceAsOf:input.balance===null?null:input.asOf,balanceSource:input.balance===null?null:'manual',includeInReporting:input.includeInReporting!==false,notes:input.notes?.trim()||'',createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};
+          if(existing)Object.assign(existing,savedAccount);else s.accounts.push(savedAccount);
+          s.owner=user;
+        });
+        return response({ok:true,revision:saved.revision,account:savedAccount});
+      }
+      if (path === '/api/account-update' && request.method === 'POST') {
+        const input=await body(request);
+        const saved=await mutate(env,s=>{
+          checkRevision(s,input);
+          const account=s.accounts.find(a=>a.id===input.id&&!a.manual);
+          if(!account)throw apiError('Connected account not found.',404);
+          if(input.action==='archive')account.archivedAt=account.archivedAt||new Date().toISOString();
+          else if(input.action==='restore')account.archivedAt=null;
+          else if(input.action==='include')account.includeInReporting=input.value===true;
+          else throw apiError('Choose archive, restore, or include.');
+        });
+        return response({ok:true,revision:saved.revision});
+      }
       if (path === '/api/investment-account' && request.method === 'POST') {
         const input = await body(request), name = typeof input.name === 'string' ? input.name.trim() : '';
         if (!name || name.length > 100 || !Number.isSafeInteger(input.balance) || input.balance < 0 || input.balance > 1_000_000_000_000 || !['hsa', '401k', 'ira', 'brokerage', 'other'].includes(input.subtype)) throw apiError('Enter an account name, type, and a valid USD balance.');
@@ -335,9 +381,17 @@ export default {
         const input = await body(request), item = state.items.find(i => i.id === input.itemId);
         if (!item) throw apiError('Bank connection not found.', 404);
         if (state.lease && state.lease.expiresAt > Date.now()) throw apiError('Wait for the current sync to finish before disconnecting.', 409);
-        await plaid(env, '/item/remove', { access_token: await decryptToken(env, item.token) });
-        await mutate(env, s => { s.items = s.items.filter(i => i.id !== item.id); s.accounts = s.accounts.filter(a => a.itemId !== item.id); s.transactions = s.transactions.filter(t => t.itemId !== item.id); s.holdings = (s.holdings || []).filter(h => h.itemId !== item.id); });
-        return response({ ok: true });
+        if(item.lifecycle!=='unlinked'&&item.token){if(!item.environment||item.environment!==env.PLAID_ENV)throw apiError('Saved connection environment must be verified before unlinking; no token was sent.');await plaid(env, '/item/remove', { access_token: await decryptToken(env, item.token) });}
+        const saved=await mutate(env, s => { const link=s.items.find(i=>i.id===item.id); if(!link)return; link.token=null;link.lifecycle='unlinked';link.error=null;link.unlinkedAt=new Date().toISOString(); });
+        return response({ ok: true, historyRetained:true, revision:saved.revision });
+      }
+      if (path === '/api/delete-history' && request.method === 'POST') {
+        const input=await body(request),item=state.items.find(i=>i.id===input.itemId);
+        if(!item)throw apiError('Connection history not found.',404);
+        if(state.lease&&state.lease.expiresAt>Date.now())throw apiError('Wait for the current sync to finish before deleting history.',409);
+        if(item.lifecycle!=='unlinked'&&item.token){if(!item.environment||item.environment!==env.PLAID_ENV)throw apiError('Saved connection environment must be verified before deleting history; no token was sent.');await plaid(env,'/item/remove',{access_token:await decryptToken(env,item.token)});}
+        await mutate(env,s=>{s.items=s.items.filter(i=>i.id!==item.id);s.accounts=s.accounts.filter(a=>a.itemId!==item.id);s.transactions=s.transactions.filter(t=>t.itemId!==item.id);s.holdings=(s.holdings||[]).filter(h=>h.itemId!==item.id);});
+        return response({ok:true,historyDeleted:true});
       }
       return response({ error: 'Not found' }, 404);
     } catch (e) { return response({ error: e.status ? e.message : 'Something went wrong. Please try again.' }, e.status || 500); }

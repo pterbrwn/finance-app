@@ -115,3 +115,16 @@ Code-only log. No production records, account names, credentials, private origin
 
 **Next:** T08, generic account and connection management.
 
+
+## T08 — Generic account and connection management
+
+**Status:** Implementation complete. Acceptance checks pass in an isolated source copy; production remains on its prior release.
+
+- Replaced the two hardcoded bank cards with a generic Accounts page and always-visible Add account flow for bank/credit, investment/retirement/HSA, manual accounts, and CSV imports. Optional LMCU, Chase, Fidelity, Empower, and WEX suggestions do not assert compatibility.
+- Link initiation now carries the selected product and provider environment through callback and OAuth resume. Update mode validates saved product/environment before decrypting or sending a token; exchange rejects a changed environment before token exchange.
+- Repeated provider callbacks update the existing connection record, preserving its identity and transaction cursor. Initial-sync errors leave the saved connection visible as connected with a needs-sync message.
+- Added manual account create/edit/archive/restore, stable independent IDs for same-named records, observed balance date/currency/notes, and include/exclude controls. Provider account sync preserves each account's archive and reporting inclusion settings.
+- Added provider account inclusion/archive/restore. Unlink revokes provider access and retains local history; permanent history deletion is a separate confirmed UI action and removes only that connection's accounts, transactions, and holdings.
+- Tests cover product selection, mismatched update product, unknown environment blocking before requests, account settings, manual ID behavior, unlink retention, history deletion scope, and connected-but-first-sync state. `npm run check` and `npm run check:local-http` passed in isolated copies under Node 24. The project checkout's generated `dist` was not changed.
+
+**Next:** T09, investment data and manual fallback integration.

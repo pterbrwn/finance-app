@@ -75,13 +75,24 @@ try {
   env.PLAID_REDIRECT_URI='https://ledger.test/';
   assert.equal((await call('link-token',{})).status,200);
   assert.equal(seen.at(-1).input.redirect_uri,'https://ledger.test/');
-  const connected=await call('exchange-token',{public_token:'public-test',name:'Chase'});
+  assert.equal((await call('link-token',{product:'investments'})).status,200);
+  assert.deepEqual(seen.at(-1).input.products,['investments'],'investment intent is preserved when creating Link');
+  const connected=await call('exchange-token',{public_token:'public-test',name:'Chase',product:'transactions'});
   assert.equal(connected.status,200);assert.equal((await connected.json()).ok,true);
   let publicData=await (await call('state')).json();
   assert.equal(publicData.transactions.length,1);assert.equal(publicData.items[0].name,'Chase');
   assert.ok(!JSON.stringify(publicData).includes('never-expose'));
   assert.ok(!env.BUCKET.value.includes('never-expose'));
   assert.equal(publicData.items[0].token,undefined);assert.equal(publicData.items[0].cursor,undefined);
+  const savedAccount=publicData.accounts.find(a=>a.itemId==='item-1');
+  assert.ok(savedAccount);
+  const includeResult=await call('account-update',{id:savedAccount.id,action:'include',value:false,revision:publicData.revision});
+  assert.equal(includeResult.status,200);
+  publicData=await (await call('state')).json();
+  assert.equal(publicData.accounts.find(a=>a.id===savedAccount.id).includeInReporting,false);
+  assert.equal((await call('link-token',{itemId:'item-1',product:'investments'})).status,409,'update mode cannot silently change the saved product');
+  assert.equal((await call('account-update',{id:savedAccount.id,action:'archive',revision:publicData.revision})).status,200);
+  assert.ok((await (await call('state')).json()).accounts.find(a=>a.id===savedAccount.id).archivedAt);
   assert.equal((await call('state',undefined,'other-owner')).status,403);
   assert.equal((await call('category',{id:'posted',category:'Travel'})).status,200);
   assert.equal((await call('sync',{})).status,200);
@@ -109,6 +120,14 @@ try {
   assert.equal((await call('budget-reset',{categoryId:'system:travel',month:currentMonth,revision:publicData.revision})).status,200);
   publicData=await (await call('state')).json();
   assert.equal(resolveBudget(publicData.budgetTemplates,publicData.monthlyBudgets,'system:travel',currentMonth).amount,51000,'reset restores the effective recurring template');
+  const privateConnection=JSON.parse(env.BUCKET.value),connection=privateConnection.items.find(i=>i.id==='item-1');
+  delete connection.environment;env.BUCKET.value=JSON.stringify(privateConnection);
+  const syncRequestCount=seen.filter(x=>x.url.endsWith('/transactions/sync')).length;
+  const unknownEnvironment=await (await call('sync',{})).json();
+  assert.equal(unknownEnvironment.ok,false);
+  assert.match(unknownEnvironment.failures[0].message,/environment must be verified/i);
+  assert.equal(seen.filter(x=>x.url.endsWith('/transactions/sync')).length,syncRequestCount,'unknown environments never receive a decrypted token request');
+  connection.environment='sandbox';env.BUCKET.value=JSON.stringify(privateConnection);
   const createdCategoryResponse=await call('category-create',{name:'Gifts & Giving',amount:10000,revision:publicData.revision});
   assert.equal(createdCategoryResponse.status,200);
   const createdCategory=await createdCategoryResponse.json(),categoryId=createdCategory.category.id;
@@ -133,6 +152,22 @@ try {
   assert.ok(!publicData.categories.includes('Generosity & Gifts'));
   assert.equal(publicData.categoryCatalog.find(c=>c.id===categoryId).archivedAt!==null,true);
   assert.equal(publicData.transactions[0].override,'Generosity & Gifts');
+  const manualOneResponse=await call('manual-account',{name:'Shared Name',institution:'Local Bank',type:'depository',balance:123456,currency:'USD',asOf:'2026-10-01',revision:publicData.revision});
+  assert.equal(manualOneResponse.status,200);
+  const manualOne=(await manualOneResponse.json()).account;
+  publicData=await (await call('state')).json();
+  const manualTwoResponse=await call('manual-account',{name:'Shared Name',type:'credit',balance:35000,currency:'USD',asOf:'2026-10-01',revision:publicData.revision});
+  assert.equal(manualTwoResponse.status,200);
+  const manualTwo=(await manualTwoResponse.json()).account;
+  assert.notEqual(manualOne.id,manualTwo.id,'same-named manual accounts have independent IDs');
+  publicData=await (await call('state')).json();
+  const updatedManual=await call('manual-account',{id:manualOne.id,name:'Renamed Savings',institution:'Local Bank',type:'depository',balance:null,currency:'USD',revision:publicData.revision});
+  assert.equal(updatedManual.status,200);
+  assert.equal((await updatedManual.json()).account.id,manualOne.id,'editing retains the account ID');
+  publicData=await (await call('state')).json();
+  assert.equal(publicData.accounts.find(a=>a.id===manualOne.id).balance,null,'unknown manual balances remain unavailable');
+  assert.equal((await call('manual-account',{id:manualTwo.id,action:'archive',revision:publicData.revision})).status,200);
+  assert.ok((await (await call('state')).json()).accounts.find(a=>a.id===manualTwo.id).archivedAt);
   const csv={account:'Manual account',csv:'Date,Merchant,Amount,Category\n2026-10-01,Meijer,22.35,Groceries'};
   assert.equal((await (await call('import',csv)).json()).imported,1);
   assert.equal((await (await call('import',csv)).json()).skipped,1);
@@ -141,15 +176,18 @@ try {
   assert.equal((await call('scheduled-sync',{})).status,200);
   assert.equal((await call('disconnect',{itemId:'item-1'})).status,200);
   publicData=await (await call('state')).json();
-  assert.equal(publicData.items.length,0);assert.equal(publicData.transactions.length,1);
-  assert.equal(publicData.transactions[0].category,'Groceries');
+  assert.equal(publicData.items.length,1);assert.equal(publicData.items[0].lifecycle,'unlinked');assert.equal(publicData.transactions.filter(t=>t.itemId==='item-1').length,1);
+  assert.ok(publicData.transactions.some(t=>t.itemId==='item-1'&&t.id==='posted'),'unlink retains provider transaction history');
+  assert.equal((await call('delete-history',{itemId:'item-1'})).status,200);
+  publicData=await (await call('state')).json();
+  assert.equal(publicData.items.length,0);assert.equal(publicData.transactions.filter(t=>t.itemId==='item-1').length,0);assert.equal(publicData.transactions.length,1,'deleting a provider connection preserves unrelated CSV history');assert.equal(publicData.accounts.some(a=>a.itemId==='item-1'),false);
 } finally { globalThis.fetch=realFetch; }
 
 // Local-only mode overrides even present credentials and prevents network calls.
 env.LOCAL_ONLY=true;
 globalThis.fetch=()=>{throw new Error('Unexpected external request in local-only mode');};
 try {
-  for(const path of ['link-token','exchange-token','sync','scheduled-sync','disconnect'])assert.equal((await call(path,{})).status,503);
+  for(const path of ['link-token','exchange-token','sync','scheduled-sync','disconnect','delete-history'])assert.equal((await call(path,{})).status,503);
   const localState=await (await call('state')).json();
   assert.equal(localState.setup.localOnly,true);
   assert.equal(localState.setup.configured,false);
@@ -200,7 +238,7 @@ const budgetOnlyHtml=await clientPage('https://ledger.test/',{...pageBase,budget
 assert.ok(budgetOnlyHtml.includes('Saved monthly budgets'));
 assert.ok(budgetOnlyHtml.includes('Housing'));
 const importingHtml=await clientPage('https://ledger.test/?page=accounts',{...pageBase,items:[{id:'chase-item',name:'Chase'}],setup:{configured:true,localOnly:false,environment:'production'}});
-assert.ok(importingHtml.includes('Initial import in progress'));
+assert.ok(importingHtml.includes('Waiting for the first successful sync'));
 assert.ok(importingHtml.includes('<h1>Accounts</h1>'));
 const linkedEmptyHtml=await clientPage('https://ledger.test/',{...pageBase,items:[{id:'chase-item',name:'Chase'}],setup:{configured:true,localOnly:false,environment:'production'}});
 assert.ok(linkedEmptyHtml.includes('Your bank is connected'));
