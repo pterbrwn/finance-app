@@ -227,3 +227,16 @@ Code-only log. No production records, account names, credentials, private origin
 - Browser-render assertions and the full finance, SQLite, and isolated HTTP checks pass from a disposable source copy. This ARM64 environment has no installed browser, Playwright, or axe runner, so the requested 320/390 px, 200% zoom, keyboard-only, screen-reader, and slow/offline browser workflows have not been manually verified here; keep them on the T17 release checklist.
 
 **Next:** T17, operational acceptance and release gate. Do not activate production until the browser and operational checks are performed in the owner environment.
+
+
+## T17 — Operational acceptance and release
+
+**Status:** Source and synthetic acceptance checks are complete; the production release gate remains open pending owner-environment verification. No production activation was performed.
+
+- A synthetic 5,000-row CSV fixture now exercises the maximum supported import size. The finance, storage, SQLite, artifact, and isolated local HTTP checks pass from a disposable source copy. The source boundary check passed for 52 source files, and Gitleaks found no secrets across the 25-commit history scanned. Earlier T02 release work exercised synthetic prepare/activate/rollback and database backup/restore; T10 covers interrupted-job recovery.
+- Read-only runtime inspection found the local service active and bound to loopback; the sync timer remains disabled. The root page responds, but `/api/health` and `/health` return 404 on the running service. Private HTTPS authorized/unauthorized identity behavior and Funnel-disabled state have not been fully verified from an owner session. The 404 and unverified identity checks are release blockers; this log contains no private service address or financial data.
+- The checkout's `dist` and running service were left unchanged. Builds and checks ran in disposable copies. There is no production rollback location to record because no release was activated.
+- Still required before T17 can pass: investigate and resolve the running service health-route mismatch; verify the served code/schema/runtime version and service restart/rollback procedure in the owner environment; verify private HTTPS identity behavior and that public Funnel is disabled without disconnecting the active session; manually run T16's 320/390 px, 200% zoom, keyboard-only, screen-reader, and slow/offline workflows, with automated accessibility checks; and record the chosen release artifact and rollback location after those checks.
+- Provider authorization and actual institution coverage remain owner/provider dependent. The daily sync timer stays off unless the owner separately authorizes and verifies live operation.
+
+**Next:** T17 owner-environment release checklist. T18 remains later expansion after the core is trusted.

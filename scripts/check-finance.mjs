@@ -105,6 +105,8 @@ assert.throws(()=>parseCSV('Date,Merchant,Amount\n2026-10-01,Store,1"2'),/quote/
 const mappedCSV=parseCSV('Posted On,Payee,Debit,Category\n10/25/2026,Vendor,12.50,NewTag',['Travel'],{columnMapping:{date:'Posted On',merchant:'Payee',amount:'Debit',category:'Category'},dateFormat:'MM/DD/YYYY',amountMode:'negative-spending',categoryMapping:{NewTag:'Travel'}})[0];
 assert.equal(mappedCSV.date,'2026-10-25');assert.equal(mappedCSV.amount,-1250);assert.equal(mappedCSV.category,'Travel');assert.equal(mappedCSV.sourceCategory,'NewTag');
 assert.throws(()=>parseCSV('Date,Merchant,Amount\n2026-10-01,Store,NaN'),/amount/);
+const largeSyntheticCSV='Date,Merchant,Amount,Category\n'+Array.from({length:5000},(_,index)=>'2026-10-01,Synthetic Merchant '+index+',1.00,Shopping').join('\n');assert.equal(parseCSV(largeSyntheticCSV).length,5000,'the maximum supported import size validates with synthetic records');
+
 assert.throws(()=>parseCSV('Date,Merchant,Amount,Currency\n2026-10-01,Store,1.00,CAD'),/USD/);
 
 class Bucket {
