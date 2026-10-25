@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createCipheriv, randomBytes } from 'node:crypto';
 import { chmod, writeFile } from 'node:fs/promises';
 import Database from 'better-sqlite3';
-import { createSqliteRepositoryAt, SQLITE_SCHEMA_VERSION } from '../server/sqlite-repository.mjs';
+import { createSqliteRepositoryAt, openLedgerDatabase, SQLITE_SCHEMA_VERSION } from '../server/sqlite-repository.mjs';
 
 assert.match(process.version, /^v24\./);
-assert.equal(SQLITE_SCHEMA_VERSION, 1);
+assert.equal(SQLITE_SCHEMA_VERSION, 2);
 const directory = await mkdtemp(join(tmpdir(), 'ledger-sqlite-check-'));
 try {
   const databasePath = join(directory, 'ledger.sqlite');
@@ -22,12 +22,16 @@ try {
     state.holdings.push({ id: 'holding-1', itemId: 'item-1', quantity: '1.250' });
     state.customCategories.push('Travel');
     state.budgets.Travel = 40000;
+    state.budgetTemplates.push({categoryId:'category-travel',effectiveFrom:'2026-10',amount:40000});
+    state.monthlyBudgets['2026-10:category-travel'] = 0;
   });
   const read = (await repository.read()).state;
   assert.equal(read.transactions[0].override, 'Travel');
   assert.equal(read.items[0].token.data, 'synthetic-ciphertext');
   assert.equal(read.accounts[0].balance, 12345);
   assert.equal(read.budgets.Travel, 40000);
+  assert.deepEqual(read.budgetTemplates,[{categoryId:'category-travel',effectiveFrom:'2026-10',amount:40000}]);
+  assert.equal(read.monthlyBudgets['2026-10:category-travel'],0);
   await Promise.all([
     repository.mutate(state => { state.budgets.Dining = 10000; }),
     repository.mutate(state => { state.budgets.Housing = 150000; })
@@ -57,6 +61,8 @@ try {
   const restored = new Database(restoredPath, { readonly: true, fileMustExist: true });
   assert.equal(restored.pragma('integrity_check', { simple: true }), 'ok');
   assert.equal(restored.prepare('SELECT COUNT(*) AS count FROM transactions').get().count, 1);
+  assert.equal(restored.prepare('SELECT COUNT(*) AS count FROM budget_templates').get().count,1);
+  assert.equal(restored.prepare('SELECT amount FROM monthly_budgets').get().amount,0);
   assert.equal(restored.prepare("SELECT json_extract(payload_json, '$.override') AS value FROM transactions").get().value, 'Travel');
   restored.close();
 
@@ -90,7 +96,27 @@ try {
   assert.equal(importedDb.prepare('SELECT amount FROM budgets WHERE category=?').get('Travel').amount, 5);
   importedDb.close();
 
-  console.log('SQLite ARM64 runtime, constraints, import preservation/idempotency, backup and restore passed.');
+  const legacyDatabase=join(directory,'schema-v1.sqlite');
+  const oldDb=new Database(legacyDatabase);
+  oldDb.exec(await readFile(new URL('../server/migrations/001-initial.sql',import.meta.url),'utf8'));
+  oldDb.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(1,?)').run(new Date().toISOString());
+  oldDb.close();
+  const migrated=await openLedgerDatabase(legacyDatabase);
+  assert.equal(migrated.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,2);
+  assert.equal(migrated.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='monthly_budgets'").get().count,1);
+  migrated.close();
+  const migrationBackupDirectory=join(directory,'backups');
+  const migrationBackups=(await readdir(migrationBackupDirectory)).filter(name=>name.endsWith('.sqlite'));
+  assert.equal(migrationBackups.length,1);
+  assert.equal((await stat(migrationBackupDirectory)).mode & 0o777,0o700);
+  const preMigrationBackupPath=join(migrationBackupDirectory,migrationBackups[0]);
+  assert.equal((await stat(preMigrationBackupPath)).mode & 0o777,0o600);
+  const preMigrationBackup=new Database(preMigrationBackupPath,{readonly:true,fileMustExist:true});
+  assert.equal(preMigrationBackup.pragma('integrity_check',{simple:true}),'ok');
+  assert.equal(preMigrationBackup.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count,1,'backup captured the old schema before applying migration 002');
+  preMigrationBackup.close();
+
+  console.log('SQLite ARM64 runtime, constraints, import preservation/idempotency, automatic migration backup, backup and restore passed.');
 } finally {
   await rm(directory, { recursive: true, force: true });
 }

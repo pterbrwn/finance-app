@@ -2,7 +2,7 @@ import { createHash, createDecipheriv } from 'node:crypto';
 import { chmod, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { createSqliteRepository, openLedgerDatabase } from '../server/sqlite-repository.mjs';
+import { createSqliteRepository, openLedgerDatabase, SQLITE_SCHEMA_VERSION } from '../server/sqlite-repository.mjs';
 
 const [sourceArg, destinationArg, configArg] = process.argv.slice(2);
 if (!sourceArg || process.argv.length > 5) throw new Error('Usage: node scripts/import-legacy-json.mjs SOURCE_JSON [NEW_DATABASE] [PRIVATE_CONFIG]');
@@ -67,7 +67,7 @@ try {
   if (integrity !== 'ok' || foreignKeys.length) throw new Error('Imported database integrity verification failed.');
   await chmod(destination, 0o600);
   const unknownEnvironmentItems = state.items.filter(item => !item.environment && !item.env).length;
-  console.log(JSON.stringify({ ok: true, imported: result.imported, checksum, schemaVersion: 1, recordCounts: result.recordCounts ?? null, verifiedEncryptedTokens: tokenItems.length, environmentUnspecifiedItems: unknownEnvironmentItems }));
+  console.log(JSON.stringify({ ok: true, imported: result.imported, checksum, schemaVersion: SQLITE_SCHEMA_VERSION, recordCounts: result.recordCounts ?? null, verifiedEncryptedTokens: tokenItems.length, environmentUnspecifiedItems: unknownEnvironmentItems }));
   database.close(); database = null;
 } catch (error) {
   database?.close();

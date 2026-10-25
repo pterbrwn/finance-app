@@ -3,6 +3,8 @@ import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
 
+process.umask(0o077);
+
 const [sourceArg, targetArg] = process.argv.slice(2);
 if (!sourceArg || process.argv.length > 4) throw new Error('Usage: node scripts/sqlite-backup.mjs DATABASE [BACKUP_FILE]');
 const source = resolve(sourceArg);

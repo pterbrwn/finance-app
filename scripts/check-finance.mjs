@@ -2,7 +2,14 @@ import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
 const { default: worker, totals, fromPlaid, categoryFor, applyChanges, applySyncPages, parseCSV } = await import('../dist/server/index.js');
+const { budgetMonthKey, resolveBudget } = await import('../dist/shared/budgets.mjs');
 globalThis.crypto ||= webcrypto;
+
+assert.deepEqual(resolveBudget([{categoryId:'food',amount:10000,effectiveFrom:'2026-01'}],{},'food','2026-03'),{amount:10000,source:'template',effectiveFrom:'2026-01',month:'2026-03',categoryId:'food'});
+assert.equal(resolveBudget([{categoryId:'food',amount:10000,effectiveFrom:'2026-01'},{categoryId:'food',amount:12000,effectiveFrom:'2026-07'}],{},'food','2026-06').amount,10000);
+assert.equal(resolveBudget([{categoryId:'food',amount:10000,effectiveFrom:'2026-01'},{categoryId:'food',amount:12000,effectiveFrom:'2026-07'}],{},'food','2026-07').amount,12000);
+assert.equal(resolveBudget([{categoryId:'food',amount:10000,effectiveFrom:'2026-01'}],{'2026-03:food':0},'food','2026-03').amount,0);
+assert.equal(resolveBudget([{categoryId:'food',amount:10000,effectiveFrom:'2026-01'}],{'2026-03:food':null},'food','2026-03').amount,null);
 
 assert.deepEqual(totals([
   {amount:10000,category:'Shopping',currency:'USD'},
@@ -88,6 +95,20 @@ try {
   assert.equal((await call('budget',{category:'Travel',amount:51000,revision:budgetRevision})).status,200);
   assert.equal((await call('budget',{category:'Travel',amount:52000,revision:budgetRevision})).status,409,'stale budget edits require a reload');
   publicData=await (await call('state')).json();
+  const currentBudgetMonth=new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit'}).formatToParts(new Date());
+  const currentMonth=currentBudgetMonth.find(x=>x.type==='year').value+'-'+currentBudgetMonth.find(x=>x.type==='month').value;
+  const nextMonthDate=new Date(currentMonth+'-01T12:00:00Z');nextMonthDate.setUTCMonth(nextMonthDate.getUTCMonth()+1);const nextMonth=nextMonthDate.toISOString().slice(0,7);
+  assert.equal((await call('budget',{category:'Travel',categoryId:'system:travel',amount:25000,mode:'month',month:currentMonth,revision:publicData.revision})).status,200);
+  publicData=await (await call('state')).json();
+  assert.equal(resolveBudget(publicData.budgetTemplates,publicData.monthlyBudgets,'system:travel',currentMonth).amount,25000);
+  assert.equal(resolveBudget(publicData.budgetTemplates,publicData.monthlyBudgets,'system:travel',nextMonth).amount,51000);
+  assert.equal((await call('budget',{category:'Travel',categoryId:'system:travel',amount:0,mode:'template',month:nextMonth,revision:publicData.revision})).status,200);
+  publicData=await (await call('state')).json();
+  assert.equal(resolveBudget(publicData.budgetTemplates,publicData.monthlyBudgets,'system:travel',currentMonth).amount,25000,'future template edits leave earlier month overrides intact');
+  assert.equal(resolveBudget(publicData.budgetTemplates,publicData.monthlyBudgets,'system:travel',nextMonth).amount,0,'zero is an intentional zero-dollar limit');
+  assert.equal((await call('budget-reset',{categoryId:'system:travel',month:currentMonth,revision:publicData.revision})).status,200);
+  publicData=await (await call('state')).json();
+  assert.equal(resolveBudget(publicData.budgetTemplates,publicData.monthlyBudgets,'system:travel',currentMonth).amount,51000,'reset restores the effective recurring template');
   const createdCategoryResponse=await call('category-create',{name:'Gifts & Giving',amount:10000,revision:publicData.revision});
   assert.equal(createdCategoryResponse.status,200);
   const createdCategory=await createdCategoryResponse.json(),categoryId=createdCategory.category.id;
@@ -143,12 +164,16 @@ assert.ok(!html.includes('<script>'));
 const assetResponse=await worker.fetch(new Request('https://ledger.test/assets/app.js'),env);
 assert.equal(assetResponse.headers.get('Content-Type'),'text/javascript; charset=utf-8');
 const client=await assetResponse.text();
+const budgetAsset=await worker.fetch(new Request('https://ledger.test/assets/budgets.mjs'),env);
+assert.equal(budgetAsset.headers.get('Content-Type'),'text/javascript; charset=utf-8');
+assert.ok((await budgetAsset.text()).includes('resolveBudget'));
+const browserClient=client.replace("import { budgetMonthKey, resolveBudget } from '/assets/budgets.mjs';",'');
 assert.equal((await worker.fetch(new Request('https://ledger.test/assets/../worker/index.js'),env)).status,404);
 const elements=new Map();
 const element=id=>{if(!elements.has(id))elements.set(id,{innerHTML:'',textContent:'',className:'',addEventListener(){}});return elements.get(id);};
 const queryNodes=new Map();
 const querySelectorAll=selector=>{if(selector==='[data-open-demo]'){if(!queryNodes.has(selector))queryNodes.set(selector,[{onclick:null}]);return queryNodes.get(selector);}return [];};
-vm.runInNewContext(client,{document:{getElementById:element,querySelectorAll,activeElement:null},window:{scrollTo(){},addEventListener(){}},fetch:async()=>({ok:true,json:async()=>({items:[],accounts:[],transactions:[],budgets:{},setup:{configured:false}})}),URL,URLSearchParams,Date,Intl,Map,Set,JSON,Promise,console,setTimeout,clearTimeout,location:{href:'https://ledger.test/',pathname:'/'},history:{replaceState(){},pushState(){}},sessionStorage:{getItem:()=>null}});
+vm.runInNewContext(browserClient,{document:{getElementById:element,querySelectorAll,activeElement:null},window:{scrollTo(){},addEventListener(){}},fetch:async()=>({ok:true,json:async()=>({items:[],accounts:[],transactions:[],budgets:{},setup:{configured:false}})}),budgetMonthKey,resolveBudget,URL,URLSearchParams,Date,Intl,Map,Set,JSON,Promise,console,setTimeout,clearTimeout,location:{href:'https://ledger.test/',pathname:'/'},history:{replaceState(){},pushState(){}},sessionStorage:{getItem:()=>null}});
 await new Promise(resolve=>setTimeout(resolve,0));
 assert.ok(element('app').innerHTML.includes('No accounts or transactions have been imported yet'));
 assert.ok(!element('app').innerHTML.includes('Whole Foods Market'));
@@ -161,7 +186,8 @@ async function clientPage(href,stateOrError){
   const selectors=new Map();
   const select=selector=>{if(selector==='[data-open-demo]'){if(!selectors.has(selector))selectors.set(selector,[{onclick:null}]);return selectors.get(selector);}return [];};
   const elements={document:{getElementById:get,querySelectorAll:select,activeElement:null},window:{scrollTo(){},addEventListener(){}},fetch:async()=>{if(stateOrError instanceof Error)throw stateOrError;return{ok:true,json:async()=>stateOrError};},URL,URLSearchParams,Date,Intl,Map,Set,JSON,Promise,console,setTimeout,clearTimeout,location:{href,pathname:'/'},history:{replaceState(){},pushState(){}},sessionStorage:{getItem:()=>null}};
-  vm.runInNewContext(client,elements);
+  elements.budgetMonthKey=budgetMonthKey;elements.resolveBudget=resolveBudget;
+  vm.runInNewContext(browserClient,elements);
   await new Promise(resolve=>setTimeout(resolve,0));
   return get('app').innerHTML;
 }
@@ -187,4 +213,8 @@ assert.ok(!hostileMonthHtml.includes('<script>alert(1)</script>'));
 const hostileCategoryHtml=await clientPage('https://ledger.test/?page=transactions',{...pageBase,categoryCatalog:[{id:'custom-1',name:'Gifts & <img src=x onerror=alert(1)>',kind:'expense',system:false,order:12,archivedAt:null}],transactions:[{id:'safe-tx',merchant:'Synthetic Merchant',amount:100,date:'2026-10-01',category:'Other',currency:'USD'}]});
 assert.ok(!hostileCategoryHtml.includes('<img src=x onerror=alert(1)>'));
 assert.ok(hostileCategoryHtml.includes('&lt;img src=x onerror=alert(1)&gt;'));
+const localParts=new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit'}).formatToParts(new Date()),thisMonth=localParts.find(x=>x.type==='year').value+'-'+localParts.find(x=>x.type==='month').value;
+const monthBudgetHtml=await clientPage('https://ledger.test/?page=budgets&month='+thisMonth,{...pageBase,categoryCatalog:[{id:'system:housing',name:'Housing',kind:'expense',system:true,order:0,archivedAt:null}],budgetTemplates:[{categoryId:'system:housing',amount:50000,effectiveFrom:thisMonth}],monthlyBudgets:{[thisMonth+':system:housing']:0},budgetHistoryUnavailableBefore:thisMonth});
+assert.ok(monthBudgetHtml.includes('Only '+thisMonth));
+assert.ok(monthBudgetHtml.includes('Zero-dollar limit'));
 console.log('Finance checks passed: totals, refunds/transfers, currencies, pending replacements, CSV validation/idempotency, authentication, encryption, incremental sync, persistence, disconnect, and client render.');

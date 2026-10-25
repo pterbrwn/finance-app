@@ -15,14 +15,15 @@ await mkdir(resolve(root,'dist/server/migrations'),{recursive:true});
 await mkdir(resolve(root,'dist/shared'),{recursive:true});
 await copyFile(resolve(root,'worker/index.js'),resolve(root,'dist/server/index.js'));
 await copyFile(resolve(root,'server/repository.mjs'),resolve(root,'dist/server/repository.mjs'));
-for (const file of ['sqlite-repository.mjs','migrations/001-initial.sql']) {
+for (const file of ['sqlite-repository.mjs','migrations/001-initial.sql','migrations/002-monthly-budgets.sql']) {
   await copyFile(resolve(root,'server',file),resolve(root,'dist/server',file));
 }
-for (const file of ['categories.mjs','money.mjs','investments.mjs','reporting.mjs','reconciliation.mjs']) {
+for (const file of ['categories.mjs','money.mjs','investments.mjs','reporting.mjs','reconciliation.mjs','budgets.mjs']) {
   await copyFile(resolve(root,'shared',file),resolve(root,'dist/shared',file));
 }
+const budgetModule=await readFile(resolve(root,'shared/budgets.mjs'),'utf8');
 await writeFile(resolve(root,'dist/server/generated.mjs'),
   'export const BUILD_ID = '+JSON.stringify(buildId)+';\n'+
-  'export const UI_ASSETS = Object.freeze('+JSON.stringify({'/assets/app.js':client,'/assets/styles.css':css})+');\n');
+  'export const UI_ASSETS = Object.freeze('+JSON.stringify({'/assets/app.js':client,'/assets/styles.css':css,'/assets/budgets.mjs':budgetModule})+');\n');
 await writeFile(resolve(root,'dist/package.json'),'{"type":"module"}\n');
 console.log('Built standalone Ledger application.');

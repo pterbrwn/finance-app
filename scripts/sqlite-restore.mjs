@@ -3,6 +3,8 @@ import { chmod, mkdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+process.umask(0o077);
+
 const [backupArg, destinationArg] = process.argv.slice(2);
 if (!backupArg || !destinationArg || process.argv.length !== 4) throw new Error('Usage: node scripts/sqlite-restore.mjs BACKUP_FILE NEW_DATABASE_PATH');
 const backupPath = resolve(backupArg);

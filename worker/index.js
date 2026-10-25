@@ -1,5 +1,6 @@
 // The loopback-only Node server supplies the local owner's identity.
 import { CATEGORIES } from '../shared/categories.mjs';
+import { budgetMonthKey, resolveBudget, validMonth } from '../shared/budgets.mjs';
 import { cents } from '../shared/money.mjs';
 import { accountRecord, investmentHoldings } from '../shared/investments.mjs';
 import { categoryFor, fromPlaid, totals } from '../shared/reporting.mjs';
@@ -21,8 +22,19 @@ const categories = state => categoryCatalog(state).filter(category => !category.
 const apiError = (message, status = 400) => Object.assign(new Error(message), { status });
 function response(data, status = 200) { return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }); }
 function ready(env) { return !env.LOCAL_ONLY && !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET && env.TOKEN_ENCRYPTION_KEY && ['sandbox', 'production'].includes(env.PLAID_ENV)); }
+function monthInReportingZone(date = new Date()) { const parts = new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit'}).formatToParts(date); return `${parts.find(p=>p.type==='year').value}-${parts.find(p=>p.type==='month').value}`; }
+function budgetTemplates(state) {
+  const templates = [...(Array.isArray(state.budgetTemplates) ? state.budgetTemplates : [])];
+  const effectiveFrom = state.budgetHistoryUnavailableBefore || monthInReportingZone();
+  for (const [name,amount] of Object.entries(state.budgets || {})) {
+    const category = categoryCatalog(state).find(c=>c.name===name&&c.kind==='expense');
+    if (category && !templates.some(entry=>entry.categoryId===category.id)) templates.push({ categoryId:category.id, amount, effectiveFrom });
+  }
+  return templates;
+}
 async function readState(env) {
-  return repositoryFor(env).read();
+  const repository=repositoryFor(env);
+  return { ...await repository.read(), storageSchemaVersion:repository.schemaVersion };
 }
 async function mutate(env, update) {
   return repositoryFor(env).mutate(async state => {
@@ -152,7 +164,10 @@ async function syncBanks(env) {
   } finally { await mutate(env, s => { if (s.lease?.id === leaseId) s.lease = null; }); }
 }
 function publicState(state, env) {
-  return { ...state, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured' } };
+  const currentBudgetMonth = monthInReportingZone();
+  const templates = budgetTemplates(state), overrides = state.monthlyBudgets || {};
+  const budgets = Object.fromEntries(categoryCatalog(state).filter(c=>c.kind==='expense'&&!c.archivedAt).map(c=>[c.name,resolveBudget(templates,overrides,c.id,currentBudgetMonth).amount]).filter(([,amount])=>amount!==null));
+  return { ...state, budgets, budgetTemplates: templates, monthlyBudgets: overrides, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured' } };
 }
 export default {
   async fetch(request, env) {
@@ -168,9 +183,9 @@ export default {
       if (request.method === 'POST' && request.headers.get('Origin') && request.headers.get('Origin') !== url.origin) return response({ error: 'Request origin is not allowed.' }, 403);
       const user = request.headers.get('oai-authenticated-user-id');
       if (!user) return response({ error: 'Local owner access is required.' }, 401);
-      const { state } = await readState(env);
+      const { state, storageSchemaVersion } = await readState(env);
       if (state.owner && state.owner !== user) return response({ error: 'This dashboard belongs to another account.' }, 403);
-      if (path === '/api/health' && request.method === 'GET') return response({ codeVersion: typeof BUILD_ID === 'string' ? BUILD_ID : 'unversioned', schemaVersion: Number.isInteger(state.version) ? state.version : null, configurationReady: ready(env), localOnly: !!env.LOCAL_ONLY, lastSync: state.lastSync || null });
+      if (path === '/api/health' && request.method === 'GET') return response({ codeVersion: typeof BUILD_ID === 'string' ? BUILD_ID : 'unversioned', schemaVersion: Number.isInteger(storageSchemaVersion) ? storageSchemaVersion : Number.isInteger(state.version) ? state.version : null, configurationReady: ready(env), localOnly: !!env.LOCAL_ONLY, lastSync: state.lastSync || null });
       if (['/api/link-token', '/api/exchange-token', '/api/sync', '/api/scheduled-sync', '/api/disconnect'].includes(path) && !ready(env)) return response({ error: 'Bank connections are disabled. Import CSV files for local-only operation.' }, 503);
       if (path === '/api/state' && request.method === 'GET') return response(publicState(state, env));
       if (path === '/api/link-token' && request.method === 'POST') {
@@ -230,9 +245,30 @@ export default {
       if (path === '/api/budget' && request.method === 'POST') {
         const input = await body(request);
         const category = categoryCatalog(state).find(c => c.id === input.categoryId && !c.archivedAt) || categoryCatalog(state).find(c => c.name === input.category && !c.archivedAt);
-        if (!category || category.kind !== 'expense' || !Number.isSafeInteger(input.amount) || input.amount < 0 || input.amount > 100_000_000) throw apiError('Enter a valid monthly budget.');
-        const saved=await mutate(env, s => { checkRevision(s,input); const live=categoryCatalog(s).find(c=>c.id===category.id&&!c.archivedAt); if(!live) throw apiError('That category is no longer available.',409); s.owner = user; s.budgets[live.name] = input.amount; s.budgetCategoryIds = { ...(s.budgetCategoryIds || {}), [live.id]: live.name }; });
-        return response({ ok: true, revision:saved.revision });
+        const mode=input.mode||'template', month=input.month||monthInReportingZone();
+        if (!category || category.kind !== 'expense' || !['template','month'].includes(mode) || !validMonth(month) || input.amount!==null&&(!Number.isSafeInteger(input.amount)||input.amount<0||input.amount>100_000_000)) throw apiError('Enter a valid monthly budget.');
+        const saved=await mutate(env, s => {
+          checkRevision(s,input);
+          const live=categoryCatalog(s).find(c=>c.id===category.id&&!c.archivedAt); if(!live) throw apiError('That category is no longer available.',409);
+          s.owner=user; s.budgetHistoryUnavailableBefore ||= monthInReportingZone();
+          s.budgetTemplates=budgetTemplates(s);
+          if(mode==='template'){
+            const index=s.budgetTemplates.findIndex(entry=>entry.categoryId===live.id&&entry.effectiveFrom===month);
+            const template={categoryId:live.id,amount:input.amount,effectiveFrom:month};
+            if(index>=0)s.budgetTemplates[index]=template;else s.budgetTemplates.push(template);
+            if(month<=monthInReportingZone()){if(input.amount===null)delete s.budgets[live.name];else s.budgets[live.name]=input.amount;}
+          }else{
+            s.monthlyBudgets={...(s.monthlyBudgets||{}),[budgetMonthKey(month,live.id)]:input.amount};
+          }
+          s.budgetCategoryIds={...(s.budgetCategoryIds||{}),[live.id]:live.name};
+        });
+        return response({ ok:true,revision:saved.revision,amount:resolveBudget(budgetTemplates(saved),saved.monthlyBudgets||{},category.id,month).amount });
+      }
+      if (path === '/api/budget-reset' && request.method === 'POST') {
+        const input=await body(request),category=categoryCatalog(state).find(c=>c.id===input.categoryId&&!c.archivedAt);
+        if(!category||category.kind!=='expense'||!validMonth(input.month))throw apiError('Choose a valid category and month.');
+        const saved=await mutate(env,s=>{checkRevision(s,input);s.monthlyBudgets={...(s.monthlyBudgets||{})};delete s.monthlyBudgets[budgetMonthKey(input.month,category.id)];});
+        return response({ok:true,revision:saved.revision,amount:resolveBudget(budgetTemplates(saved),saved.monthlyBudgets||{},category.id,input.month).amount});
       }
       if (path === '/api/category-create' && request.method === 'POST') {
         const input = await body(request), name = typeof input.name === 'string' ? input.name.trim().replace(/\s+/g, ' ') : '';

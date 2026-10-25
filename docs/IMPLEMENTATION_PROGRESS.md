@@ -72,6 +72,7 @@ Code-only log. No production records, account names, credentials, private origin
 - SQLite writes are serialized in-process; a concurrent-update regression check proves independent budget changes are retained.
 - No production database was created or activated. The live service continues to use the original JSON state.
 - The required private production aggregate comparison and operational restore rehearsal remain release gates. The fixture suite does not substitute for those checks.
+- The local SQLite adapter now exposes schema version 2 with normalized recurring-template and monthly-override tables. A pre-existing version-1 database is backed up through the online SQLite backup API before migration 002, verified, then migrated; failed backup verification stops the migration.
 
 **Next:** T05, explicit app states and usable navigation. SQLite remains opt-in; do not select it in production before the golden-data and restore gates pass.
 
@@ -90,7 +91,7 @@ Code-only log. No production records, account names, credentials, private origin
 
 ## T06 — Saved custom categories and budget buckets
 
-**Status:** Complete. Commit recorded below after verification.
+**Status:** Complete. Commit: `e943a71`.
 
 - Added stable IDs and expense kinds for custom buckets, plus stable generated IDs and protected kinds for built-in Income and Transfers.
 - Added create, rename, move, and archive APIs. Renaming retains the category ID, updates budget labels and existing assignments, and preserves the previous source category where needed. Archived categories remain selectable on historical transactions but are excluded from new assignments.
@@ -101,15 +102,16 @@ Code-only log. No production records, account names, credentials, private origin
 
 **Next:** T07, monthly template/override semantics and budget UI.
 
-## T05 — Explicit app states and usable navigation
+## T07 — Monthly budget semantics
 
-**Status:** Complete. Commit recorded below after verification.
+**Status:** Implementation complete. Commit recorded below after verification.
 
-- Removed automatic demo selection based on the absence of linked items or transactions. New users see an empty state with saved account/budget information; synthetic data requires an explicit preview action and has a persistent exit control.
-- Added loading, initial error, failed-refresh/stale, and linked-but-importing messages. Errors do not replace real balances with sample data.
-- Added Overview, Transactions, Budgets, Accounts, Investments, Goals, Home planner, and Settings navigation. Unimplemented areas state that they are empty/in preparation rather than showing fabricated values.
-- Page and transaction filters are reflected in the URL and browser history. Query inputs are bounded; the month parameter is validated. Narrow screens use a horizontally scrollable navigation row with 44 px touch targets.
-- Category and budget saves provide inline status and restore keyboard focus after rendering.
-- Finance/browser checks cover empty, budget-only, manual-only, linked-but-importing, initial-error, explicit demo, and hostile month-query states. Full finance, SQLite, and isolated HTTP suites passed in a disposable source copy under Node 24.
+- Added shared month validation and budget resolution. A month override wins (including explicit `null` no-limit and `0`), otherwise the most recent recurring template effective on or before the selected month applies.
+- Legacy monthly limits become templates effective from the current `America/Chicago` month. Earlier history is marked unavailable; no snapshots are invented.
+- Added SQLite migration 002 for recurring templates and month overrides; local storage round-trips zero and null values. Existing schema-v1 databases get a verified private online backup before migration, and health reports the SQLite schema version.
+- Added month-specific override, override reset, and effective-dated template API writes. Updating a template preserves earlier periods; edits use expected revisions.
+- Budgets now show the selected month, template versus override, spent/remaining/overspent behavior, reset action, and distinct zero/no-limit states. The month selector includes transaction and budget months.
+- Shared unit/API checks cover template roll-forward, month override, future changes, reset, zero and null. Browser smoke checks cover selected-month form states. Full finance, SQLite, and HTTP suites passed in isolated Node 24 copies.
 
-**Next:** T06, custom categories and budget buckets.
+**Next:** T08, generic account and connection management.
+

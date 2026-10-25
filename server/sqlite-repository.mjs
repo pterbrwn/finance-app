@@ -1,10 +1,10 @@
 import Database from 'better-sqlite3';
-import { chmod, mkdir } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { chmod, mkdir, rename, rm, stat } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
-const MIGRATION_VERSION = 1;
+const MIGRATION_VERSION = 2;
 const TABLES = ['items', 'accounts', 'transactions', 'holdings'];
 const json = value => JSON.stringify(value);
 const parse = value => JSON.parse(value);
@@ -23,22 +23,56 @@ function validateState(state) {
   if (!state.budgets || Array.isArray(state.budgets) || typeof state.budgets !== 'object') throw new TypeError('State budgets must be an object.');
   for (const amount of Object.values(state.budgets)) if (!Number.isSafeInteger(amount) || amount < 0) throw new Error('Invalid budget amount.');
   if (!Array.isArray(state.customCategories ?? [])) throw new TypeError('State customCategories must be a list.');
+  const templates=state.budgetTemplates??[];
+  if(!Array.isArray(templates))throw new TypeError('State budgetTemplates must be a list.');
+  const templateKeys=new Set();
+  for(const row of templates){
+    if(!row||typeof row.categoryId!=='string'||!row.categoryId||!/^\d{4}-(0[1-9]|1[0-2])$/.test(row.effectiveFrom)||row.amount!==null&&(!Number.isSafeInteger(row.amount)||row.amount<0))throw new Error('Invalid budget template.');
+    const key=`${row.categoryId}:${row.effectiveFrom}`;if(templateKeys.has(key))throw new Error('Duplicate budget template.');templateKeys.add(key);
+  }
+  const monthly=state.monthlyBudgets??{};
+  if(!monthly||Array.isArray(monthly)||typeof monthly!=='object')throw new TypeError('State monthlyBudgets must be an object.');
+  for(const [key,amount] of Object.entries(monthly)){const month=key.slice(0,7),categoryId=key.slice(8);if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)||!categoryId||amount!==null&&(!Number.isSafeInteger(amount)||amount<0))throw new Error('Invalid monthly budget override.');}
+  if(state.budgetHistoryUnavailableBefore!==undefined&&!/^\d{4}-(0[1-9]|1[0-2])$/.test(state.budgetHistoryUnavailableBefore))throw new Error('Invalid budget history boundary.');
 }
 
 export async function openLedgerDatabase(path) {
+  process.umask(0o077);
   const filename = resolve(path);
   await mkdir(dirname(filename), { recursive: true, mode: 0o700 });
   await chmod(dirname(filename), 0o700);
+  let existed=false;
+  try { existed=(await stat(filename)).size>0; } catch(error) { if(error.code!=='ENOENT')throw error; }
   const db = new Database(filename, { timeout: 5000 });
-  try { await chmod(filename, 0o600); } catch {}
-  db.pragma('journal_mode = WAL');
-  db.pragma('synchronous = FULL');
-  db.pragma('foreign_keys = ON');
-  db.pragma('busy_timeout = 5000');
-  const migration = await readFile(new URL('./migrations/001-initial.sql', import.meta.url), 'utf8');
-  db.exec(migration);
-  db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(MIGRATION_VERSION, new Date().toISOString());
-  return db;
+  try {
+    await chmod(filename, 0o600);
+    db.pragma('journal_mode = WAL');
+    db.pragma('synchronous = FULL');
+    db.pragma('foreign_keys = ON');
+    db.pragma('busy_timeout = 5000');
+    const hasMigrations=!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'").get();
+    const currentVersion=hasMigrations?(db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version||0):0;
+    if(existed&&currentVersion<MIGRATION_VERSION){
+      const backupDirectory=join(dirname(filename),'backups');
+      await mkdir(backupDirectory,{recursive:true,mode:0o700});await chmod(backupDirectory,0o700);
+      const stamp=new Date().toISOString().replaceAll(':','-'),backupPath=join(backupDirectory,`pre-migration-${currentVersion}-to-${MIGRATION_VERSION}-${stamp}.sqlite`),temporary=`${backupPath}.tmp-${randomUUID()}`;
+      let check;
+      try{
+        await db.backup(temporary);
+        check=new Database(temporary,{readonly:true,fileMustExist:true});
+        if(check.pragma('integrity_check',{simple:true})!=='ok'||check.pragma('foreign_key_check').length)throw new Error('Pre-migration backup failed integrity verification.');
+        check.close();check=null;await chmod(temporary,0o600);await rename(temporary,backupPath);
+      }catch(error){check?.close();await rm(temporary,{force:true});throw new Error('Could not create a verified pre-migration backup; migration stopped.');}
+    }
+    for (const version of [1, 2]) {
+      const migration = await readFile(new URL(`./migrations/${String(version).padStart(3,'0')}-${version===1?'initial':'monthly-budgets'}.sql`, import.meta.url), 'utf8');
+      db.exec(migration);
+      db.prepare('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(version, new Date().toISOString());
+    }
+    return db;
+  }catch(error){
+    db.close();throw error;
+  }
 }
 
 export function createSqliteRepository(db) {
@@ -46,7 +80,7 @@ export function createSqliteRepository(db) {
   const statements = {
     meta: db.prepare('SELECT payload_json FROM state_meta WHERE singleton=1'),
     rows: Object.fromEntries(TABLES.map(name => [name, db.prepare(`SELECT payload_json FROM ${name} ORDER BY rowid`)])),
-    clear: Object.fromEntries(['transactions', 'holdings', 'accounts', 'items', 'custom_categories', 'budgets'].map(name => [name, db.prepare(`DELETE FROM ${name}`)])),
+    clear: Object.fromEntries(['transactions', 'holdings', 'accounts', 'items', 'custom_categories', 'budgets', 'budget_templates', 'monthly_budgets'].map(name => [name, db.prepare(`DELETE FROM ${name}`)])),
     putMeta: db.prepare('INSERT INTO state_meta(singleton,payload_json) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET payload_json=excluded.payload_json'),
     putItem: db.prepare('INSERT INTO items(id,payload_json) VALUES(?,?)'),
     putAccount: db.prepare('INSERT INTO accounts(id,item_id,payload_json) VALUES(?,?,?)'),
@@ -54,6 +88,8 @@ export function createSqliteRepository(db) {
     putHolding: db.prepare('INSERT INTO holdings(id,item_id,payload_json) VALUES(?,?,?)'),
     putCategory: db.prepare('INSERT INTO custom_categories(id,name,normalized_name) VALUES(?,?,?)'),
     putBudget: db.prepare('INSERT INTO budgets(category,amount) VALUES(?,?)'),
+    putTemplate: db.prepare('INSERT INTO budget_templates(category_id,effective_from,amount) VALUES(?,?,?)'),
+    putMonthlyBudget: db.prepare('INSERT INTO monthly_budgets(month,category_id,amount) VALUES(?,?,?)'),
     findImport: db.prepare('SELECT source_checksum FROM import_batches WHERE source_checksum=?'),
     addImport: db.prepare('INSERT INTO import_batches(source_checksum,schema_version,imported_at,record_counts_json) VALUES(?,?,?,?)')
   };
@@ -63,12 +99,14 @@ export function createSqliteRepository(db) {
     for (const name of TABLES) state[name] = statements.rows[name].all().map(row => parse(row.payload_json));
     state.customCategories = db.prepare('SELECT name FROM custom_categories ORDER BY rowid').all().map(row => row.name);
     state.budgets = Object.fromEntries(db.prepare('SELECT category,amount FROM budgets ORDER BY category').all().map(row => [row.category, row.amount]));
+    state.budgetTemplates = db.prepare('SELECT category_id AS categoryId,effective_from AS effectiveFrom,amount FROM budget_templates ORDER BY effective_from,category_id').all();
+    state.monthlyBudgets = Object.fromEntries(db.prepare('SELECT month,category_id AS categoryId,amount FROM monthly_budgets ORDER BY month,category_id').all().map(row => [`${row.month}:${row.categoryId}`,row.amount]));
     return state;
   }
   const persist = db.transaction(state => {
     validateState(state);
-    for (const name of [...TABLES, 'custom_categories', 'budgets']) statements.clear[name].run();
-    const { items = [], accounts = [], transactions = [], holdings = [], customCategories = [], budgets = {}, ...meta } = state;
+    for (const name of [...TABLES, 'custom_categories', 'budgets', 'budget_templates', 'monthly_budgets']) statements.clear[name].run();
+    const { items = [], accounts = [], transactions = [], holdings = [], customCategories = [], budgets = {}, budgetTemplates = [], monthlyBudgets = {}, ...meta } = state;
     statements.putMeta.run(json(meta));
     for (const row of items) statements.putItem.run(row.id, json(row));
     for (const row of accounts) statements.putAccount.run(row.id, row.itemId ?? null, json(row));
@@ -81,10 +119,12 @@ export function createSqliteRepository(db) {
       statements.putCategory.run(id, name, name.toLocaleLowerCase('en-US'));
     }
     for (const [category, amount] of Object.entries(budgets)) statements.putBudget.run(category, amount);
+    for (const template of budgetTemplates) statements.putTemplate.run(template.categoryId, template.effectiveFrom, template.amount);
+    for (const [key, amount] of Object.entries(monthlyBudgets)) { const month=key.slice(0,7), categoryId=key.slice(8); statements.putMonthlyBudget.run(month, categoryId, amount); }
   });
   const importLegacy = db.transaction((state, checksum) => {
     if (statements.findImport.get(checksum)) return { imported: false };
-    const count = db.prepare('SELECT (SELECT COUNT(*) FROM items)+(SELECT COUNT(*) FROM accounts)+(SELECT COUNT(*) FROM transactions)+(SELECT COUNT(*) FROM holdings)+(SELECT COUNT(*) FROM budgets)+(SELECT COUNT(*) FROM custom_categories) AS count').get().count;
+    const count = db.prepare('SELECT (SELECT COUNT(*) FROM items)+(SELECT COUNT(*) FROM accounts)+(SELECT COUNT(*) FROM transactions)+(SELECT COUNT(*) FROM holdings)+(SELECT COUNT(*) FROM budgets)+(SELECT COUNT(*) FROM custom_categories)+(SELECT COUNT(*) FROM budget_templates)+(SELECT COUNT(*) FROM monthly_budgets) AS count').get().count;
     if (count) throw new Error('Destination already contains records; refusing to merge an unreviewed import.');
     persist(state);
     const recordCounts = Object.fromEntries([...TABLES, 'customCategories'].map(name => [name, state[name]?.length ?? 0]));
@@ -93,6 +133,7 @@ export function createSqliteRepository(db) {
     return { imported: true, recordCounts };
   });
   return Object.freeze({
+    schemaVersion: MIGRATION_VERSION,
     async read() { return { state: load() }; },
     async mutate(update) {
       const operation = writes.then(async () => {
