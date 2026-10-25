@@ -452,3 +452,18 @@ Code-only log. No production records, account names, credentials, private origin
 - C10 owner manual acceptance and C12–C14 production operations remain outstanding. Automated checks and this branch push do not constitute manual acceptance or production activation.
 
 **Next:** Owner completes C10 manual acceptance, then resumes the separate C12–C14 operational gates.
+
+## R06 — Repairs from agent-browser review
+
+**Status:** Implementation and synthetic automation complete. Owner-device acceptance remains separate.
+
+- Added expected-revision category restore while retaining category identity, assignments, and budget history. The UI now exposes Restore, preserves focus/status, and includes archived categories in historical transaction filters while keeping them unavailable for new assignments. Browser and finance regressions cover archive/restore, reload, stale revisions, filtering/export, and historical records.
+- Scenario dialogs now reveal and focus the first required field inside a collapsed section. Browser acceptance covers explicit zero costs, preview versus saved results, editing, comparison, and the separate confirmed goal and Housing-budget actions.
+- Failed fetch and non-JSON responses now produce readable errors. Category rename, budget save, and scenario save checks verify entered values remain on conflict/offline failure; scenario and budget errors keep fields usable. The category bulk selector also survives intervening renders.
+- Mortgage restore is available for archived records. Automated acceptance covers unsupported interest-only projection, archive/restore, and the property/scenario journey.
+- Expanded accessibility checks found status text contrast and narrow-screen table scroll-region violations in the new category scenario. Updated colors and table semantics; the final Axe run reports no serious/critical violations in covered views.
+- Final checks passed under Node 24.22.1 from a disposable source copy: `npm run check`, `npm run check:local-http`, and `npm run check:browser`. `git diff --check` passed. The final named agent-browser run used only a private, synthetic, local SQLite instance; its report and screenshots are in `/tmp/ledger-repair-final-20261025/report/`.
+- Agent-browser showed no browser errors or console messages in the checked journeys. It verified category create/archive/restore, disabled sync/backup status, and 390/320 px pages without horizontal document overflow. Its CLI did not apply actual browser zoom with `Control+plus`; only the 720 CSS px Playwright proxy passed. Agent-browser did not repeat all transaction, investment/liability, mortgage editing, scenario, and request-failure paths; where not covered by Playwright or API checks these remain unverified.
+- Screen-reader behavior, physical pointer confirmation handling, owner-device private-access review, actual 200% zoom, and C10 owner acceptance remain open. C12–C14 private migration, recovery, proxy, and activation gates remain separate. No live preview, real financial data, service, or storage configuration was changed.
+
+**Next:** Record owner desktop screen-reader, actual zoom, private-access, and C10 acceptance evidence. Keep C12–C14 gated on the required operational prerequisites.

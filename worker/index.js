@@ -549,7 +549,11 @@ export default {
             s.customCategories = (s.customCategories || []).map(value => value === oldName ? name : value);
             if (s.budgetCategoryIds?.[category.id]) s.budgetCategoryIds[category.id] = name;
           } else if (input.action === 'archive') {
+            if (category.archivedAt) throw apiError('Category is already archived.',409);
             records[index] = { ...category, archivedAt: new Date().toISOString() };
+          } else if (input.action === 'restore') {
+            if (!category.archivedAt) throw apiError('Category is already active.',409);
+            records[index] = { ...category, archivedAt: null };
           } else if (input.action === 'move') {
             if (!['up','down'].includes(input.direction)) throw apiError('Choose a valid category order.');
             const ordered = records.map((c,i)=>({c,i})).sort((a,b)=>a.c.order-b.c.order);
