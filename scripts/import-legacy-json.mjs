@@ -2,7 +2,14 @@ import { createHash, createDecipheriv } from 'node:crypto';
 import { chmod, mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { createSqliteRepository, openLedgerDatabase, SQLITE_SCHEMA_VERSION } from '../server/sqlite-repository.mjs';
+let sqliteRepositoryModule;
+try {
+  sqliteRepositoryModule=await import('../server/sqlite-repository.mjs');
+} catch(error) {
+  if(error.code!=='ERR_MODULE_NOT_FOUND')throw error;
+  sqliteRepositoryModule=await import('../dist/server/sqlite-repository.mjs');
+}
+const { createSqliteRepository, openLedgerDatabase, SQLITE_SCHEMA_VERSION }=sqliteRepositoryModule;
 
 const [sourceArg, destinationArg, configArg] = process.argv.slice(2);
 if (!sourceArg || process.argv.length > 5) throw new Error('Usage: node scripts/import-legacy-json.mjs SOURCE_JSON [NEW_DATABASE] [PRIVATE_CONFIG]');
