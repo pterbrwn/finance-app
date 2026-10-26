@@ -520,3 +520,15 @@ Code-only log. No production records, account names, credentials, private origin
 - An early command was launched from the main checkout by mistake and regenerated the ignored `dist/` directory before stopping at a stale render-harness assertion. Subsequent builds and all final gates ran in the disposable source copy; no service, owner data, preview, or provider sync was touched. The checkout's ignored `dist/` is not final verification evidence and predates the last source edits.
 
 **Next:** Continue B01/B02 and BP-F1/BP01–BP12 from [CURRENT_STATE_REPORT.md](CURRENT_STATE_REPORT.md), update one case at a time, and do not claim full QA completion until the remaining P1 save and plan/actual coverage is closed.
+
+## R11 — Bucket balance carryover
+
+**Status:** Implemented and verified in an isolated synthetic source copy. Production activation is pending.
+
+- Added derived monthly carryover from each bucket’s prior planned balance and posted USD expense activity. Stable category IDs preserve the calculation through category renames and transaction recategorization.
+- Carryover includes negative balances while a bucket remains planned. An unplanned month ends that bucket’s carryover; a later plan starts at zero.
+- The calculation begins at the saved budget-history boundary so it does not invent legacy history. Carryover does not change this month’s planned-income allocation.
+- Budgets and Overview show the available amount including carried balances; the plan’s remaining column and month-end outlook include them.
+- Added synthetic calculations/API coverage for underspending, overspending, refunds, unplanned gaps, a month override, and the history boundary, plus a rendered Budgets row assertion. `npm run check`, `npm run check:local-http`, and `npm run check:browser` passed in a disposable source copy. The build completed; no private records or bank sync were touched.
+
+**Next:** Prepare an immutable release from the committed source, take a verified private SQLite backup, then activate and check health/assets without triggering bank sync.

@@ -64,11 +64,18 @@ For a selected month, let P be resolved projected income and B[i] each resolved 
 - If actual spending exists in an unplanned category, label the plan **Incomplete: unplanned spending**. Show the balance as **Unallocated before unplanned expenses**, not a confident under-budget verdict. Include that spending in actual totals and the outlook. Unknown future expenses cannot be estimated automatically.
 - Preserve stored month overrides, effective dates, and the legacy history-unavailable boundary. Do not backfill plans for earlier months or write a historical plan simply by viewing it.
 
+### Bucket carryover
+
+- Opening carryover for a bucket is its previous month’s closing balance. Available this month = opening carryover + this month’s planned amount; closing balance = available this month - actual spending.
+- Carry positive and negative balances forward while the bucket has a plan. If a month has no plan for that bucket, its carryover ends; restarting the plan later starts at zero.
+- Carryover is derived from saved plans and posted USD expense transactions, not stored as a second editable amount. Reclassification or late transactions therefore recalculate affected months.
+- Start at `budgetHistoryUnavailableBefore`; do not infer carryover from earlier months with unavailable budget history. Carryover changes the bucket’s available/remaining amount and month-end spending outlook, but does not count again as this month’s income or allocation.
+
 ### Actuals and variance
 
 - Actual income A = net posted USD income for the selected month, using the effective category. Actual spending S[i] = net posted USD expense spending in that category. Refunds reduce S[i] and may make it negative.
 - Pending/non-USD records are excluded from monetary totals and identified as excluded where useful. Transfers, account balances, credit-card payments classified as transfers, and goal allocations are not income or expense additions.
-- Bucket remaining = B[i] - S[i] when B[i] is known. A negative result means over that bucket by its magnitude. Income still to reach plan = P - A; a positive value is income not yet received, not income already available.
+- Bucket remaining = opening carryover + B[i] - S[i] when B[i] is known. A negative result means over that bucket by its magnitude. Income still to reach plan = P - A; a positive value is income not yet received, not income already available.
 - Actual net so far = A - sum(S[i]). This is monthly net cash flow, not a bank balance or money available to withdraw.
 - Past-month actual net can be compared with the saved planned net: actual-net variance = actual net - planned net; positive is better than plan. Label income/expense variances explicitly because their favorable directions differ.
 - Actuals never rewrite saved plan values. A user can deliberately revise a plan, and then comparison uses that revised saved plan. An immutable original-plan audit/version history is outside this iteration; do not claim it exists.
@@ -150,7 +157,7 @@ Record status, changed files, focused checks, evidence, and next step in the pro
 | BUD-04 | **PARTIAL** — saved remaining expectations and stale actual-basis rejection are covered by API/calculation tests; full UI adjustment and actual-arrival matrix remains. | BP06–BP09 pass, including arrivals consuming remaining estimates and no double counting. |
 | BUD-05 | **PARTIAL** — responsive/keyboard/Axe gates run; full failure injection and manual zoom/screen-reader evidence remain. | BP10–BP12 plus final relevant gates pass; unresolved failures remain explicit. |
 
-Do not implement optional payroll schedules, bank-balance forecasting, carryover/envelopes, goal transfers, drag-and-drop, or charts as prerequisites for these tasks. The plan/actual comparison and dependable saving are the priority.
+Do not implement optional payroll schedules, bank-balance forecasting, goal transfers, drag-and-drop, or charts as prerequisites for these tasks. Bucket carryover was added later as an explicit owner request and follows the contract above.
 
 ## Independent examples and acceptance tests
 

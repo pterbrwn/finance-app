@@ -257,6 +257,15 @@ function budgetActuals(state,month){
   }
   return{income,categories,activity};
 }
+function budgetRollovers(state,month){
+  const boundary=state.budgetHistoryUnavailableBefore, start=validMonth(boundary)&&boundary<=month?boundary:month;
+  const months=[];for(let cursor=start;;){months.push(cursor);if(cursor===month)break;const[year,number]=cursor.split('-').map(Number);cursor=number===12?`${String(year+1).padStart(4,'0')}-01`:`${String(year).padStart(4,'0')}-${String(number+1).padStart(2,'0')}`;}
+  const aliases=new Map(Object.entries(state.budgetCategoryIds||{}).map(([id,name])=>[name,id])),actuals=new Map();
+  for(const row of state.transactions||[]){const rowMonth=row.date?.slice(0,7);if(!validMonth(rowMonth)||rowMonth<start||rowMonth>=month||row.pending||row.currency!=='USD')continue;const overridden=typeof row.override==='string'&&row.override.length>0,name=overridden?row.override:row.category;if(name==='Income'||name==='Transfers')continue;const id=(overridden?row.overrideCategoryId:row.categoryId)||aliases.get(name);if(!id)continue;const key=`${rowMonth}:${id}`,amount=(actuals.get(key)||0)+row.amount;if(!Number.isSafeInteger(amount))throw new TypeError('Historical bucket spending exceeds the safe integer-cent range.');actuals.set(key,amount);}
+  const templates=budgetTemplates(state),overrides=state.monthlyBudgets||{},result={};
+  for(const category of categoryCatalog(state).filter(row=>row.kind==='expense')){let balance=0;for(const historicalMonth of months){const plan=resolveBudget(templates,overrides,category.id,historicalMonth).amount;if(plan===null){balance=0;continue;}if(historicalMonth===month){result[category.id]=balance;break;}const assigned=plan+balance;if(!Number.isSafeInteger(assigned))throw new TypeError('Bucket rollover exceeds the safe integer-cent range.');balance=assigned-(actuals.get(`${historicalMonth}:${category.id}`)||0);if(!Number.isSafeInteger(balance))throw new TypeError('Bucket rollover exceeds the safe integer-cent range.');}}
+  return result;
+}
 function scenarioFunding(state, linkedGoalId, asOf=new Date()) {
   const summary=summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,asOf);
   const goal=linkedGoalId?summary.goals.find(value=>value.id===linkedGoalId&&!value.archived):null;
@@ -287,7 +296,7 @@ export default {
         const month=url.searchParams.get('month')||monthInReportingZone();if(!validMonth(month))throw apiError('Choose a valid reporting month.');
         const {state}=await repository.read();if(state.owner&&state.owner!==user)return response({error:'This dashboard belongs to another account.'},403);
         const actuals=budgetActuals(state,month);
-        return response({month,revision:Number.isSafeInteger(state.revision)?state.revision:0,categories:categoryCatalog(state),budgetTemplates:budgetTemplates(state),monthlyBudgets:state.monthlyBudgets||{},budgetCategoryIds:state.budgetCategoryIds||{},incomePlanTemplates:state.incomePlanTemplates||[],monthlyIncomePlans:state.monthlyIncomePlans||{},monthlyBudgetOutlooks:state.monthlyBudgetOutlooks||{},budgetHistoryUnavailableBefore:state.budgetHistoryUnavailableBefore||null,actuals});
+        return response({month,revision:Number.isSafeInteger(state.revision)?state.revision:0,categories:categoryCatalog(state),budgetTemplates:budgetTemplates(state),monthlyBudgets:state.monthlyBudgets||{},budgetCategoryIds:state.budgetCategoryIds||{},incomePlanTemplates:state.incomePlanTemplates||[],monthlyIncomePlans:state.monthlyIncomePlans||{},monthlyBudgetOutlooks:state.monthlyBudgetOutlooks||{},budgetHistoryUnavailableBefore:state.budgetHistoryUnavailableBefore||null,actuals,budgetRollovers:budgetRollovers(state,month)});
       }
       if(request.method==='GET'&&typeof repository.readDashboard==='function'&&['/api/health','/api/state','/api/transactions','/api/month-summary','/api/scenarios','/api/sync-status'].includes(path)){
         const state=path==='/api/state'?(await repository.readDashboard()).state:await repository.readIdentity();

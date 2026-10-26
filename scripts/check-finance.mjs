@@ -517,4 +517,6 @@ assert.ok(monthBudgetHtml.includes('name="amount" type="number"'));
 assert.ok(!monthBudgetHtml.includes('value="NaN"'),'missing budget state does not render an invalid numeric amount');
 assert.ok(monthBudgetHtml.includes('This month'));
 assert.ok(monthBudgetHtml.includes('Projected take-home income minus each planned bucket.'));
+const rolloverBudgetHtml=await clientPage('https://ledger.test/?page=budgets&month='+thisMonth,{...pageBase,month:thisMonth,categories:[{id:'system:housing',name:'Housing',kind:'expense',system:true,order:0,archivedAt:null}],categoryCatalog:[{id:'system:housing',name:'Housing',kind:'expense',system:true,order:0,archivedAt:null}],budgetTemplates:[{categoryId:'system:housing',amount:50000,effectiveFrom:thisMonth}],budgetRollovers:{'system:housing':10000},budgetHistoryUnavailableBefore:thisMonth,actuals:{income:0,categories:{},activity:{}}});
+assert.ok(rolloverBudgetHtml.includes('$600.00 available · $100.00 carried over'),'Budgets visibly adds the rollover to this month’s plan');
 console.log('Finance checks passed: totals, refunds/transfers, currencies, pending replacements, CSV validation/idempotency, authentication, encryption, incremental sync, persistence, disconnect, and client render.');

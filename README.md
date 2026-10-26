@@ -114,7 +114,7 @@ Budgets supports custom expense buckets with optional monthly limits. A custom b
 
 ## Financial behavior
 
-Amounts use integer cents. Pending transactions and non-USD currencies are excluded from totals. Transfers and credit card payments are excluded from spending; refunds reduce category spending. Income less spending is net cash flow, not change in account balance. Budget templates take effect from a selected month; a month override is separate, and resetting it returns to the effective template. Blank means no limit; zero is a deliberate zero-dollar limit. Legacy budgets have no invented history before the migration month.
+Amounts use integer cents. Pending transactions and non-USD currencies are excluded from totals. Transfers and credit card payments are excluded from spending; refunds reduce category spending. Income less spending is net cash flow, not change in account balance. Budget templates take effect from a selected month; a month override is separate, and resetting it returns to the effective template. Blank means no limit; zero is a deliberate zero-dollar limit. Planned bucket balances carry forward month to month, including negative balances, using posted spending and only history available since the migration boundary.
 
 Plaid sync collects pagination before committing, restarts after pagination mutations, handles added/modified/removed transactions, and preserves category overrides when pending transactions post. Access tokens use AES-256-GCM with random nonces and are never returned to the browser. Unlink revokes the Plaid Item and retains its local accounts, transactions, and holdings; deleting that connection's history is a separate explicit action. Manual CSV accounts remain separate.
 

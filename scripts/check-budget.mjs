@@ -18,6 +18,10 @@ assert.deepEqual(projection.rows.map(row=>row.runningBalance),[320000,260000,230
 assert.equal(projection.plannedExpenses,310000);assert.equal(projection.actualSpending,260000);
 assert.equal(projection.plannedNet,190000);assert.equal(projection.actualNet,-10000);
 assert.equal(projection.rows[1].remaining,-5000,'overspent bucket remains visible as a negative value');
+const carried=calculateBudgetPlan({month,incomePlan:{amount:500000},buckets:[{categoryId:'fund',plan:{amount:50000},rollover:10000,actual:40000}]});
+assert.equal(carried.rows[0].available,60000,'opening carryover is added to this month’s planned amount');
+assert.equal(carried.rows[0].remaining,20000,'bucket remaining uses available funds after actual spending');
+assert.equal(carried.bucketRemaining,20000,'total bucket remaining includes carried balances');
 assert.equal(projection.expectedIncome,500000);assert.equal(projection.expectedSpending,315000);assert.equal(projection.expectedNet,185000);
 assert.equal(calculateBudgetPlan({month,incomePlan:{amount:300000},buckets}).plannedNet,-10000);
 assert.equal(calculateBudgetPlan({month,incomePlan:{amount:null},buckets}).plannedNet,null,'unknown income does not become zero');
@@ -33,7 +37,12 @@ assert.throws(()=>calculateBudgetPlan({month:'2026-13'}));
 
 class Bucket {
   value=JSON.stringify({version:1,owner:'synthetic-owner',revision:0,items:[],accounts:[],holdings:[],transactions:[
+    {id:'old-paycheck',date:'2026-07-02',amount:-250000,currency:'USD',category:'Income',categoryId:'system:income',pending:false},
+    {id:'old-grocery',date:'2026-07-03',amount:100000,currency:'USD',category:'Groceries',categoryId:'system:groceries',pending:false},
     {id:'paycheck-1',date:'2026-10-02',amount:-250000,currency:'USD',category:'Income',categoryId:'system:income',pending:false},
+    {id:'sep-grocery',date:'2026-09-04',amount:40000,currency:'USD',category:'Groceries',categoryId:'system:groceries',pending:false},
+    {id:'sep-housing',date:'2026-09-04',amount:60000,currency:'USD',category:'Housing',categoryId:'system:housing',pending:false},
+    {id:'sep-dining-refund',date:'2026-09-05',amount:-5000,currency:'USD',category:'Dining',categoryId:'system:dining',pending:false},
     {id:'housing-1',date:'2026-10-03',amount:180000,currency:'USD',category:'Housing',categoryId:'system:housing',pending:false},
     {id:'food-1',date:'2026-10-04',amount:65000,currency:'USD',category:'Groceries',categoryId:'system:groceries',pending:false},
     {id:'transport-1',date:'2026-10-05',amount:10000,currency:'USD',category:'Transport',categoryId:'system:transport',pending:false},
@@ -41,7 +50,13 @@ class Bucket {
     {id:'cad-1',date:'2026-10-07',amount:70000,currency:'CAD',category:'Shopping',categoryId:'system:shopping',pending:false},
     {id:'pending-1',date:'2026-10-08',amount:5000,currency:'USD',category:'Shopping',categoryId:'system:shopping',pending:true},
     {id:'transfer-1',date:'2026-10-09',amount:20000,currency:'USD',category:'Transfers',categoryId:'system:transfers',pending:false}
-  ],budgets:{},customCategories:[],categoryRecords:[],budgetTemplates:[],monthlyBudgets:{}});
+  ],budgets:{},customCategories:[],categoryRecords:[],budgetTemplates:[
+    {categoryId:'system:groceries',effectiveFrom:'2026-09',amount:50000},
+    {categoryId:'system:housing',effectiveFrom:'2026-09',amount:50000},
+    {categoryId:'system:dining',effectiveFrom:'2026-09',amount:50000},
+    {categoryId:'system:shopping',effectiveFrom:'2026-08',amount:20000},
+    {categoryId:'system:shopping',effectiveFrom:'2026-09',amount:null}
+  ],monthlyBudgets:{'2026-09:system:groceries':60000},budgetHistoryUnavailableBefore:'2026-08'});
   revision=0;
   async get(){return{etag:String(this.revision),json:async()=>JSON.parse(this.value)};}
   async put(_key,value,{onlyIf}){if(onlyIf.etagMatches!==String(this.revision))return null;this.value=value;this.revision++;return{etag:String(this.revision)};}
@@ -49,6 +64,10 @@ class Bucket {
 const bucket=new Bucket(),env={BUCKET:bucket,LOCAL_ONLY:true},request=async(path,input)=>worker.fetch(new Request('https://ledger.test/api/'+path,{method:input===undefined?'GET':'POST',headers:{'oai-authenticated-user-id':'synthetic-owner',...(input?{'Content-Type':'application/json'}:{})},body:input===undefined?undefined:JSON.stringify(input)}),env);
 let summary=await(await request('budget-summary?month='+month)).json();
 assert.equal(summary.actuals.income,250000);assert.deepEqual(summary.actuals.categories,{'system:housing':180000,'system:groceries':65000,'system:transport':10000,'system:other':5000});
+assert.equal(summary.budgetRollovers['system:groceries'],20000,'month-specific historical plans contribute to rollover');
+assert.equal(summary.budgetRollovers['system:housing'],-10000,'negative bucket balances carry forward');
+assert.equal(summary.budgetRollovers['system:dining'],55000,'refunds increase the carried balance');
+assert.equal(summary.budgetRollovers['system:shopping']||0,0,'an unplanned month ends carryover');
 assert.equal(summary.actuals.activity['system:shopping'],undefined,'pending and non-USD activity is excluded from budget activity');
 let revision=summary.revision;
 let response=await request('income-plan',{month,mode:'template',amount:500000,revision});assert.equal(response.status,200);revision=(await response.json()).revision;
