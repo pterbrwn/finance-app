@@ -1,7 +1,7 @@
 # Current implementation and verification report
 
 **Date:** 2026-10-26
-**Source:** current uncommitted worktree
+**Source:** application commit `d9d47b7` (deployed privately after verification)
 **Verification runtime:** Node.js 24.22.1
 **Test checkout:** `/tmp/ledger-verify.3LRdhC` (source copy; build and fixtures stayed there)
 
@@ -44,6 +44,12 @@ Budget implementation is in place, but BP-F1/BP01–BP12 are only partially cove
 
 ## Workspace note
 
-An early test command was accidentally launched from the main checkout instead of the disposable copy and regenerated its ignored `dist/` directory before stopping at a stale browser-module test harness assertion. The tracked source was not staged or deployed; the final verification builds and all runtime fixtures ran from `/tmp/ledger-verify.3LRdhC`. No live service, private financial data, provider sync, or owner preview was accessed or changed. Because the main checkout's ignored `dist/` predates the final source edits, it was not used as verification evidence.
+An early test command was accidentally launched from the main checkout instead of the disposable copy and regenerated its ignored `dist/` directory before stopping at a stale browser-module test harness assertion. The final verification builds and all runtime fixtures ran from `/tmp/ledger-verify.3LRdhC`. Because the main checkout's ignored `dist/` predates the final source edits, it was not used as verification evidence.
 
 The test plans and progress log remain the controlling next-step lists; the full acceptance matrix is not marked complete.
+
+## Deployment
+
+- Commit `d9d47b7` was pushed to `origin/codex/finance-app-plan` and activated as the private production release at `~/.local/share/ledger/current`.
+- A fresh private SQLite backup completed immediately before activation. The release preparation verified its immutable package checksums and compatibility with schema 3.
+- Post-activation checks confirmed `ledger.service` is active and `/api/health` reports build `d9d47b7`, schema 3. No bank sync was triggered.
