@@ -4,7 +4,7 @@ A personal finance dashboard hosted on a Jetson. Source code lives at https://gi
 
 ## Current operational build
 
-The private service runs release `122f014` on Node.js 24.22.1 with SQLite schema 3. The existing JSON state was imported and reconciled before activation; its paired JSON/config recovery copy remains private on the Jetson. The verified daily SQLite backup timer is active. The bank sync timer remains disabled. Existing provider records without a saved environment are blocked from sync until that environment is independently verified; manual entry and CSV import remain available.
+The private service runs release `7b922e5` on Node.js 24.22.1 with SQLite schema 3. The existing JSON state was imported and reconciled before activation; its paired JSON/config recovery copy remains private on the Jetson. The verified daily SQLite backup timer is active. The bank sync timer remains disabled. Existing provider records without a saved environment are blocked from sync until that environment is independently verified; manual entry and CSV import remain available.
 
 ## Privacy and access
 

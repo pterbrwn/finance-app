@@ -523,12 +523,14 @@ Code-only log. No production records, account names, credentials, private origin
 
 ## R11 — Bucket balance carryover
 
-**Status:** Implemented and verified in an isolated synthetic source copy. Production activation is pending.
+**Status:** Implemented, verified, and deployed in private production as release `7b922e5`.
 
 - Added derived monthly carryover from each bucket’s prior planned balance and posted USD expense activity. Stable category IDs preserve the calculation through category renames and transaction recategorization.
 - Carryover includes negative balances while a bucket remains planned. An unplanned month ends that bucket’s carryover; a later plan starts at zero.
 - The calculation begins at the saved budget-history boundary so it does not invent legacy history. Carryover does not change this month’s planned-income allocation.
 - Budgets and Overview show the available amount including carried balances; the plan’s remaining column and month-end outlook include them.
-- Added synthetic calculations/API coverage for underspending, overspending, refunds, unplanned gaps, a month override, and the history boundary, plus a rendered Budgets row assertion. `npm run check`, `npm run check:local-http`, and `npm run check:browser` passed in a disposable source copy. The build completed; no private records or bank sync were touched.
+- Added synthetic calculations/API coverage for underspending, overspending, refunds, unplanned gaps, a month override, and the history boundary, plus a rendered Budgets row assertion. `npm run check`, `npm run check:local-http`, and `npm run check:browser` passed in a disposable source copy.
+- Commit `7b922e5` was pushed to `origin/codex/finance-app-plan`, packaged immutably with Node 24.22.1, and passed package checksum/import/backup/restore/startup/health/schema/assets/rollback checks. A fresh SQLite schema 3 backup passed integrity and foreign-key validation before activation.
+- Activation reports success; post-activation checks show `ledger.service` active and `/api/health` on `7b922e5`, schema 3. The sync timer remains inactive; no provider sync ran.
 
-**Next:** Prepare an immutable release from the committed source, take a verified private SQLite backup, then activate and check health/assets without triggering bank sync.
+**Next:** Continue the remaining B01/B02 and BP-F1/BP01–BP12 acceptance work recorded above; this release does not close those broader QA gaps.

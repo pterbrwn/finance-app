@@ -1,9 +1,9 @@
 # Current implementation and verification report
 
 **Date:** 2026-10-26
-**Source:** application commit `dbfaeef` (deployed privately after verification)
+**Source:** application commit `7b922e5` (deployed privately after verification)
 **Verification runtime:** Node.js 24.22.1
-**Test checkout:** `/tmp/ledger-verify.3LRdhC` (source copy; build and fixtures stayed there)
+**Test checkout:** disposable synthetic source copies, removed after each run
 
 ## Implemented
 
@@ -13,6 +13,7 @@
 - Replaced budget cards with a compact, separator-based row view for projected income, planned bucket amounts, actual spending, bucket remaining, running income balance, planned result, actual net, and expected month-end result.
 - Added recurring and month-specific projected income, API-backed selected-month actuals, per-bucket plan/actual calculations, explicit zero/reset handling, and editable remaining expectations. Plan metadata remains distinct from calculated amounts; an initially detected metadata-shape defect was fixed and covered by regressions.
 - Added safe integer-cent overflow checks for planned and actual totals and explicit “Incomplete: unplanned spending” / “Unallocated before unplanned expenses” wording, including a purchase/refund pair whose net is zero but whose gross activity still makes the plan incomplete.
+- Added derived bucket carryover from prior planned balances and posted spending, including negative balances, month overrides, refunds, and an unplanned-month reset. The calculation respects the recorded budget-history boundary. Budgets and Overview show available balances including carryover.
 - Added budget calculation/API tests, SQLite round-trip checks for the new plan/outlook metadata, and refreshed the existing browser-render harness for the module imports and new DOM bindings.
 - Expanded confirmation handling in browser tests and made the imported transaction dates follow the current Chicago reporting month.
 
@@ -52,5 +53,7 @@ The test plans and progress log remain the controlling next-step lists; the full
 
 - Commit `d9d47b7` added the transaction-save repair and budget outlook, and was activated as the private production release.
 - Follow-up commit `dbfaeef` preserves the focused input's caret selection when asynchronous search results rerender the page. A fresh private SQLite backup completed before this activation.
+- Commit `7b922e5` added bucket carryover. Synthetic calculation/API/render coverage and the finance, local HTTP, browser, and immutable package checks passed.
+- A fresh schema 3 SQLite backup passed integrity and foreign-key checks before activation. Post-activation, `ledger.service` is active and `/api/health` reports `7b922e5`, schema 3; static assets load. `ledger-sync.timer` remains inactive, and no bank sync was triggered.
 - The caret fix passed JavaScript syntax validation and immutable package checks; a dedicated browser regression was not run. It is ready for owner manual verification.
 - Post-activation checks confirmed `ledger.service` is active and `/api/health` reports build `dbfaeef`, schema 3. No bank sync was triggered.
