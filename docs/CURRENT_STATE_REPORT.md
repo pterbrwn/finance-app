@@ -1,7 +1,7 @@
 # Current implementation and verification report
 
 **Date:** 2026-10-26
-**Source:** application commit `d9d47b7` (deployed privately after verification)
+**Source:** application commit `dbfaeef` (deployed privately after verification)
 **Verification runtime:** Node.js 24.22.1
 **Test checkout:** `/tmp/ledger-verify.3LRdhC` (source copy; build and fixtures stayed there)
 
@@ -50,6 +50,7 @@ The test plans and progress log remain the controlling next-step lists; the full
 
 ## Deployment
 
-- Commit `d9d47b7` was pushed to `origin/codex/finance-app-plan` and activated as the private production release at `~/.local/share/ledger/current`.
-- A fresh private SQLite backup completed immediately before activation. The release preparation verified its immutable package checksums and compatibility with schema 3.
-- Post-activation checks confirmed `ledger.service` is active and `/api/health` reports build `d9d47b7`, schema 3. No bank sync was triggered.
+- Commit `d9d47b7` added the transaction-save repair and budget outlook, and was activated as the private production release.
+- Follow-up commit `dbfaeef` preserves the focused input's caret selection when asynchronous search results rerender the page. A fresh private SQLite backup completed before this activation.
+- The caret fix passed JavaScript syntax validation and immutable package checks; a dedicated browser regression was not run. It is ready for owner manual verification.
+- Post-activation checks confirmed `ledger.service` is active and `/api/health` reports build `dbfaeef`, schema 3. No bank sync was triggered.
