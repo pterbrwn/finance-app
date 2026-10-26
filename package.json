@@ -16,9 +16,10 @@
     "check:sqlite": "bash scripts/run-node.sh scripts/check-sqlite.mjs",
     "check:backup": "bash scripts/run-node.sh scripts/check-backup.mjs",
     "check:browser": "bash scripts/run-node.sh scripts/check-browser.mjs",
+    "check:budget": "bash scripts/run-node.sh scripts/check-budget.mjs",
     "measure:performance": "bash scripts/run-node.sh scripts/measure-performance.mjs",
     "import:legacy": "bash scripts/run-node.sh scripts/import-legacy-json.mjs",
-    "check": "npm run build && npm run validate && bash scripts/run-node.sh scripts/check-finance.mjs && bash scripts/run-node.sh scripts/check-dev.mjs && npm run check:sqlite && npm run check:backup && npm run check:runtime",
+    "check": "npm run build && npm run validate && bash scripts/run-node.sh scripts/check-finance.mjs && npm run check:budget && bash scripts/run-node.sh scripts/check-dev.mjs && npm run check:sqlite && npm run check:backup && npm run check:runtime",
     "check:runtime": "bash scripts/run-node.sh scripts/check-runtime-status.mjs"
   },
   "dependencies": {

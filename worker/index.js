@@ -1,6 +1,6 @@
 // The loopback-only Node server supplies the local owner's identity.
 import { CATEGORIES, transactionMatchesCategory } from '../shared/categories.mjs';
-import { budgetMonthKey, resolveBudget, validMonth } from '../shared/budgets.mjs';
+import { budgetMonthKey, resolveBudget, resolveIncomePlan, validMonth } from '../shared/budgets.mjs';
 import { cents } from '../shared/money.mjs';
 import { accountRecord, investmentHoldings, providerAccountKey } from '../shared/investments.mjs';
 import { categoryFor, fromPlaid, totals } from '../shared/reporting.mjs';
@@ -247,7 +247,15 @@ async function publicState(state, env) {
   const goalSummary=summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,new Date());
   const propertySummary=summarizeProperties(state.properties||[],state.mortgages||[],state.accounts);
   const balanceSheet=summarizeBalanceSheet(state.accounts,state.items,propertySummary,new Date());
-  return { ...state, budgets, budgetTemplates: templates, monthlyBudgets: overrides, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], goalSummary, propertySummary, balanceSheet, owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null}, backup: typeof env.getBackupStatus==='function'?await env.getBackupStatus():{state:'unavailable',timer:{state:'unavailable',enabled:null,active:null}} } };
+  return { ...state, budgets, budgetTemplates: templates, monthlyBudgets: overrides, incomePlanTemplates:state.incomePlanTemplates||[], monthlyIncomePlans:state.monthlyIncomePlans||{}, monthlyBudgetOutlooks:state.monthlyBudgetOutlooks||{}, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], goalSummary, propertySummary, balanceSheet, owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null}, backup: typeof env.getBackupStatus==='function'?await env.getBackupStatus():{state:'unavailable',timer:{state:'unavailable',enabled:null,active:null}} } };
+}
+function budgetActuals(state,month){
+  const aliases=new Map(Object.entries(state.budgetCategoryIds||{}).map(([id,name])=>[name,id]));
+  let income=0;const categories={},activity={};
+  for(const row of state.transactions||[]){if(!row.date?.startsWith(month)||row.pending||row.currency!=='USD')continue;const overridden=typeof row.override==='string'&&row.override.length>0,name=overridden?row.override:row.category,id=(overridden?row.overrideCategoryId:row.categoryId)||aliases.get(name);activity[id||name]=(activity[id||name]||0)+1;
+    if(name==='Income'){income-=row.amount;continue;}if(name==='Transfers')continue;const key=id||name;categories[key]=(categories[key]||0)+row.amount;
+  }
+  return{income,categories,activity};
 }
 function scenarioFunding(state, linkedGoalId, asOf=new Date()) {
   const summary=summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,asOf);
@@ -275,6 +283,12 @@ export default {
       if (!user) return response({ error: 'Local owner access is required.' }, 401);
       if(['link-token','exchange-token','sync','scheduled-sync','sync-status','disconnect','delete-history'].some(action=>path===`/api/${action}`)&&!ready(env))return response({error:'Bank connections are disabled. Import CSV files for local-only operation.'},503);
       const repository=repositoryFor(env);
+      if(request.method==='GET'&&path==='/api/budget-summary'){
+        const month=url.searchParams.get('month')||monthInReportingZone();if(!validMonth(month))throw apiError('Choose a valid reporting month.');
+        const {state}=await repository.read();if(state.owner&&state.owner!==user)return response({error:'This dashboard belongs to another account.'},403);
+        const actuals=budgetActuals(state,month);
+        return response({month,revision:Number.isSafeInteger(state.revision)?state.revision:0,categories:categoryCatalog(state),budgetTemplates:budgetTemplates(state),monthlyBudgets:state.monthlyBudgets||{},budgetCategoryIds:state.budgetCategoryIds||{},incomePlanTemplates:state.incomePlanTemplates||[],monthlyIncomePlans:state.monthlyIncomePlans||{},monthlyBudgetOutlooks:state.monthlyBudgetOutlooks||{},budgetHistoryUnavailableBefore:state.budgetHistoryUnavailableBefore||null,actuals});
+      }
       if(request.method==='GET'&&typeof repository.readDashboard==='function'&&['/api/health','/api/state','/api/transactions','/api/month-summary','/api/scenarios','/api/sync-status'].includes(path)){
         const state=path==='/api/state'?(await repository.readDashboard()).state:await repository.readIdentity();
         if(state.owner&&state.owner!==user)return response({error:'This dashboard belongs to another account.'},403);
@@ -482,12 +496,12 @@ export default {
       }
       if (path === '/api/budget' && request.method === 'POST') {
         const input = await body(request);
-        const category = categoryCatalog(state).find(c => c.id === input.categoryId && !c.archivedAt) || categoryCatalog(state).find(c => c.name === input.category && !c.archivedAt);
+        const category = categoryCatalog(state).find(c => c.id === input.categoryId) || categoryCatalog(state).find(c => c.name === input.category);
         const mode=input.mode||'template', month=input.month||monthInReportingZone();
         if (!category || category.kind !== 'expense' || !['template','month'].includes(mode) || !validMonth(month) || input.amount!==null&&(!Number.isSafeInteger(input.amount)||input.amount<0||input.amount>100_000_000)) throw apiError('Enter a valid monthly budget.');
         const saved=await mutate(env, s => {
           checkRevision(s,input);
-          const live=categoryCatalog(s).find(c=>c.id===category.id&&!c.archivedAt); if(!live) throw apiError('That category is no longer available.',409);
+          const live=categoryCatalog(s).find(c=>c.id===category.id); if(!live) throw apiError('That category is no longer available.',409);
           s.owner=user; s.budgetHistoryUnavailableBefore ||= monthInReportingZone();
           s.budgetTemplates=budgetTemplates(s);
           if(mode==='template'){
@@ -503,10 +517,30 @@ export default {
         return response({ ok:true,revision:saved.revision,amount:resolveBudget(budgetTemplates(saved),saved.monthlyBudgets||{},category.id,month).amount });
       }
       if (path === '/api/budget-reset' && request.method === 'POST') {
-        const input=await body(request),category=categoryCatalog(state).find(c=>c.id===input.categoryId&&!c.archivedAt);
+        const input=await body(request),category=categoryCatalog(state).find(c=>c.id===input.categoryId);
         if(!category||category.kind!=='expense'||!validMonth(input.month))throw apiError('Choose a valid category and month.');
         const saved=await mutate(env,s=>{checkRevision(s,input);s.monthlyBudgets={...(s.monthlyBudgets||{})};delete s.monthlyBudgets[budgetMonthKey(input.month,category.id)];});
         return response({ok:true,revision:saved.revision,amount:resolveBudget(budgetTemplates(saved),saved.monthlyBudgets||{},category.id,input.month).amount});
+      }
+      if(path==='/api/income-plan'&&request.method==='POST'){
+        const input=await body(request),mode=input.mode||'month',month=input.month||monthInReportingZone();
+        if(!['template','month'].includes(mode)||!validMonth(month)||input.amount!==null&&(!Number.isSafeInteger(input.amount)||input.amount<0||input.amount>100_000_000))throw apiError('Enter a valid projected income amount.');
+        const saved=await mutate(env,s=>{checkRevision(s,input);if(mode==='template'){s.incomePlanTemplates=[...(s.incomePlanTemplates||[])];const index=s.incomePlanTemplates.findIndex(row=>row.effectiveFrom===month),template={effectiveFrom:month,amount:input.amount};if(index>=0)s.incomePlanTemplates[index]=template;else s.incomePlanTemplates.push(template);}else s.monthlyIncomePlans={...(s.monthlyIncomePlans||{}),[month]:input.amount};});
+        const plan=resolveIncomePlan(saved.incomePlanTemplates||[],saved.monthlyIncomePlans||{},month);return response({ok:true,revision:saved.revision,amount:plan.amount,source:plan.source});
+      }
+      if(path==='/api/income-plan-reset'&&request.method==='POST'){
+        const input=await body(request);if(!validMonth(input.month))throw apiError('Choose a valid reporting month.');
+        const saved=await mutate(env,s=>{checkRevision(s,input);s.monthlyIncomePlans={...(s.monthlyIncomePlans||{})};delete s.monthlyIncomePlans[input.month];});
+        return response({ok:true,revision:saved.revision,amount:resolveIncomePlan(saved.incomePlanTemplates||[],saved.monthlyIncomePlans||{},input.month).amount});
+      }
+      if(path==='/api/budget-outlook'&&request.method==='POST'){
+        const input=await body(request),month=input.month;if(!validMonth(month)||!input.changes||typeof input.changes!=='object'||Array.isArray(input.changes))throw apiError('Enter valid month-end expectations.');
+        const actuals=budgetActuals(state,month),incomeActual=actuals.income;if(input.changes.actualIncome!==incomeActual)throw apiError('Actual income changed while you were editing. Refresh and try again.',409);
+        const categories=categoryCatalog(state),saved=await mutate(env,s=>{checkRevision(s,input);s.monthlyBudgetOutlooks={...(s.monthlyBudgetOutlooks||{})};const prior={...(s.monthlyBudgetOutlooks[month]||{}),expenses:{...(s.monthlyBudgetOutlooks[month]?.expenses||{})}};const incomeRemaining=input.changes.income;
+          if(incomeRemaining===null)delete prior.income;else{if(!Number.isSafeInteger(incomeRemaining)||incomeRemaining<0||incomeRemaining>100_000_000)throw apiError('Enter a non-negative remaining income amount.');prior.income={expectedTotal:incomeActual+incomeRemaining,actualAtEdit:incomeActual,updatedAt:new Date().toISOString()};}
+          for(const [categoryId,remaining] of Object.entries(input.changes.expenses||{})){const category=categories.find(row=>row.id===categoryId&&row.kind==='expense');if(!category||remaining!==null&&(!Number.isSafeInteger(remaining)||remaining<0||remaining>100_000_000))throw apiError('Choose a valid bucket expectation.');if(remaining===null)delete prior.expenses[categoryId];else{const actual=actuals.categories[categoryId]||0;prior.expenses[categoryId]={expectedTotal:actual+remaining,actualAtEdit:actual,updatedAt:new Date().toISOString()};}}
+          if(!prior.income&&!Object.keys(prior.expenses).length)delete s.monthlyBudgetOutlooks[month];else s.monthlyBudgetOutlooks[month]=prior;});
+        return response({ok:true,revision:saved.revision});
       }
       if (path === '/api/category-create' && request.method === 'POST') {
         const input = await body(request), name = typeof input.name === 'string' ? input.name.trim().replace(/\s+/g, ' ') : '';

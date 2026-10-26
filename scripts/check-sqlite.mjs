@@ -24,6 +24,9 @@ try {
     state.budgets.Travel = 40000;
     state.budgetTemplates.push({categoryId:'category-travel',effectiveFrom:'2026-10',amount:40000});
     state.monthlyBudgets['2026-10:category-travel'] = 0;
+    state.incomePlanTemplates=[{effectiveFrom:'2026-10',amount:500000}];
+    state.monthlyIncomePlans={'2026-11':480000};
+    state.monthlyBudgetOutlooks={'2026-10':{income:{expectedTotal:470000,actualAtEdit:250000,updatedAt:'2026-10-25T00:00:00.000Z'},expenses:{'category-travel':{expectedTotal:25000,actualAtEdit:10000,updatedAt:'2026-10-25T00:00:00.000Z'}}}};
     state.goals = [{id:'goal-1',name:'Emergency fund',target:500000,allocationHistory:[{id:'allocation-1',amount:12500}]}];
     state.properties = [{id:'property-1',value:32000000,mortgageSnapshots:[{date:'2026-10-01',balance:24000000}]}];
     state.scenarios = [{id:'scenario-1',versions:[{id:'quote-1',inputs:{purchasePrice:40000000},funding:{goalId:'goal-1'}}]}];
@@ -38,6 +41,9 @@ try {
   assert.equal(read.budgets.Travel, 40000);
   assert.deepEqual(read.budgetTemplates,[{categoryId:'category-travel',effectiveFrom:'2026-10',amount:40000}]);
   assert.equal(read.monthlyBudgets['2026-10:category-travel'],0);
+  assert.deepEqual(read.incomePlanTemplates,[{effectiveFrom:'2026-10',amount:500000}]);
+  assert.deepEqual(read.monthlyIncomePlans,{'2026-11':480000});
+  assert.deepEqual(read.monthlyBudgetOutlooks['2026-10'].expenses['category-travel'],{expectedTotal:25000,actualAtEdit:10000,updatedAt:'2026-10-25T00:00:00.000Z'});
   assert.deepEqual(read.goals,[{id:'goal-1',name:'Emergency fund',target:500000,allocationHistory:[{id:'allocation-1',amount:12500}]}]);
   assert.deepEqual(read.properties,[{id:'property-1',value:32000000,mortgageSnapshots:[{date:'2026-10-01',balance:24000000}]}]);
   assert.deepEqual(read.scenarios,[{id:'scenario-1',versions:[{id:'quote-1',inputs:{purchasePrice:40000000},funding:{goalId:'goal-1'}}]}]);
@@ -67,6 +73,8 @@ try {
   const subsetRead=(await repository.read()).state;
   assert.equal(subsetRead.transactions[0].override,'Groceries','scoped transaction writes persist the selected row');
   assert.equal(subsetRead.revision,subsetRevision+1,'scoped transaction writes advance the shared revision');
+  assert.equal(subsetRead.incomePlanTemplates[0].amount,500000,'transaction subset writes preserve projected income plans');
+  assert.equal(subsetRead.monthlyBudgetOutlooks['2026-10'].income.expectedTotal,470000,'transaction subset writes preserve month-end outlook adjustments');
   await assert.rejects(repository.mutateTransactionSubset(['txn-1'],state=>{state.transactions[0].override='Must Roll Back';throw new Error('synthetic scoped rollback');}),/synthetic scoped rollback/);
   assert.equal((await repository.read()).state.transactions[0].override,'Groceries','failed scoped edits leave the row unchanged');
   assert.equal((await repository.read()).state.revision,subsetRevision+1,'failed scoped edits leave the revision unchanged');

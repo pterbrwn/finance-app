@@ -120,6 +120,10 @@ Plaid sync collects pagination before committing, restarts after pagination muta
 
 ## Checks and source control
 
+For the current testing handoff, use the [automated testing execution plan](docs/AUTOMATED_TESTING_PLAN.md) and [browser acceptance playbook](docs/AGENT_BROWSER_REPAIR_PLAN.md). The transaction-save repair and budget plan-versus-actual implementation are in the current release candidate, with the verified coverage and remaining acceptance gaps recorded in [CURRENT_STATE_REPORT.md](docs/CURRENT_STATE_REPORT.md).
+
+The [budget plan-versus-actual update plan](docs/BUDGET_PLAN_VS_ACTUAL_PLAN.md) records the original requirements and acceptance cases for compact rows, projected income, running bucket deductions, actual results, and month-end outlook. The implementation is now available in Budgets; the plan's remaining test cases are still useful for manual acceptance.
+
 ```sh
 npm run check
 npm run check:local-http

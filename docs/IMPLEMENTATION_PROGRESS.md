@@ -480,3 +480,43 @@ Code-only log. No production records, account names, credentials, private origin
 - Source docs contain no account names, balances, private address, credentials, or record identifiers. The live operational service now uses SQLite; the retained JSON file is a pre-cutover recovery snapshot and does not receive new writes.
 
 **Remaining:** Verify the actual environment of existing provider records before any sync; no bank timer or real sync is enabled. Owner accessibility acceptance was given for this deployment, while headless tests cannot independently measure actual zoom or screen-reader output.
+
+## R08 — Expanded automated and agent-browser testing plan
+
+**Status:** Planning complete; new test cases and repairs are not executed by this entry.
+
+- Added `docs/AUTOMATED_TESTING_PLAN.md` and rewrote `docs/AGENT_BROWSER_REPAIR_PLAN.md` as a serial execution handoff with explicit fixtures, expected amounts, case IDs, failure/recovery checks, evidence requirements, and completion gates.
+- Owner reported that changing all transactions did not fully save and stopped testing. B01 individual/rapid row edits and B02 bulk edits are the first P1 acceptance blocker. The agent owns reproduction and verification; further owner QA is not required.
+- Source review identified a possible row-editor lookup mismatch between cleared `data.transactions` and paged rows, plus missing multi-page/100-row bulk coverage. These are investigation leads, not runtime-confirmed root causes.
+- The plan requires per-record persistence checks after reload, fresh context, and synthetic server restart; exact selected/requested/saved scope; failed-save recovery; and independent money/CSV oracles.
+- Harness improvements cover explicit SQLite versus JSON, date stability, unexpected browser error gates, deliberate confirmation accept/cancel, isolated cases, failure artifacts, and accurate viewport/zoom claims.
+- R06/R07 history remains intact. No application source, running service, provider configuration, private records, or deployed build changed. Documentation checks do not establish product acceptance.
+
+**Next:** Execute TST-00 and the minimum TST-01 harness work, reproduce/repair B01/B02, then complete the remaining automated and exploratory cases. Do not close the reported save defect from the old green suite alone.
+
+## R09 — Budget plan-versus-actual update plan
+
+**Status:** Planning complete; feature implementation and acceptance are not executed by this entry.
+
+- Added `docs/BUDGET_PLAN_VS_ACTUAL_PLAN.md` for the requested compact budget rows: projected take-home income, planned bucket deductions and running balance, actual income/spending, and clear monthly surplus/deficit.
+- Defined saved plan, actual-to-date, and expected month-end values separately. Remaining expectations consume incoming actuals instead of counting a full income plan plus received deposits. Explicit adjustments handle reduced income or completed spending without overwriting the saved plan.
+- Specified monthly versus recurring edits, unknown/zero/null behavior, unplanned spending, refunds, stable category identity and archived history, future/past months, and consistent JSON/SQLite persistence.
+- Added serial BUD-00–BUD-05 tasks, exact arithmetic examples, BP01–BP12 acceptance cases, source boundaries and an execution prompt. Linked the plan from the existing testing/browser plans and README.
+- The transaction-save issue remains the first acceptance blocker. This documentation does not change application source, private records, services, or deployment, and does not claim that the feature or new tests pass.
+
+**Next:** When feature implementation is requested, execute BUD-00–BUD-05 using the existing isolated synthetic testing procedure and record per-case evidence.
+
+## R10 — Transaction-save repair, budget plan/actual implementation, and verification
+
+**Status:** Implementation landed in the worktree; integrated test gates pass in a disposable source copy. B01/B02 and BP-F1–BP12 acceptance matrices remain partial; this entry does not close every planned case.
+
+- Fixed the paged row category save path by resolving edits from the currently displayed transaction page, serializing writes, retaining the latest row selection, exposing save failures, and refreshing after pending writes complete. Added browser coverage for one imported row's edit/readback/reload/month-total path.
+- Added the 121-row, three-page bulk case: select 100 across pages, show a visible refusal for the 101st row, save the remaining 21 as a second batch, compare the exact intended IDs to persisted rows, and verify all 121 after reload. This establishes these two supported batch sizes and reload persistence; it does not cover every B02 boundary/failure/restart variant.
+- Implemented compact budget rows and pure projected-income, bucket allocation, actual-to-date, and expected month-end calculations. Added income template/month override APIs, selected-month actual aggregates, outlook adjustments with stale-actual rejection, integer-cent overflow checks, and persisted state/SQLite checks. The first browser run found that calculated rows overwrote plan metadata with a number; preserving metadata fixed the missing template/Reset UI, and the recurring/zero/reset browser path now passes.
+- Updated the existing finance render harness for ES module imports and new browser bindings. Added calculation/API cases for source precedence, zero/unknown, actuals exclusions, expected totals, closed months, optimistic revisions, outlook basis conflicts, overflow, and net-zero purchase/refund activity. Added visible incomplete wording for unplanned actual spending.
+- Final checks passed using Node 24.22.1 in `/tmp/ledger-verify.3LRdhC`: `npm run check`, `npm run check:local-http`, `npm run check:browser`, plus `npm run check:source`, `git diff --check`, and syntax checks. Browser acceptance reports zero serious/critical Axe violations across the tested views.
+- Agent-browser version 0.27.0 explored the isolated local-only app in a named session. It saved a synthetic $5,000 recurring income plan through the UI; the budget showed the plan and surplus. Browser `errors` and `console` were empty. Screenshot: `/tmp/ledger-agent-browser-budget-final.png`. On Linux ARM64 its default Chrome install is unavailable; the local Playwright Chromium executable worked with `--executable-path`.
+- Full case gaps and exact run state are recorded in [CURRENT_STATE_REPORT.md](CURRENT_STATE_REPORT.md). Not run: all rapid/delayed transaction-write variants, failed transaction writes, full fresh-context/server-restart ID comparison, 49/50/51/99 bulk boundaries, invalid >100 API, bulk undo after a later row edit, all cross-view reconciliation variants, exact five-bucket BP-F1 arithmetic as one browser fixture, full outlook arrival/edit flows, BP10–BP12 failures/cross-tab/screen-reader/actual zoom.
+- An early command was launched from the main checkout by mistake and regenerated the ignored `dist/` directory before stopping at a stale render-harness assertion. Subsequent builds and all final gates ran in the disposable source copy; no service, owner data, preview, or provider sync was touched. The checkout's ignored `dist/` is not final verification evidence and predates the last source edits.
+
+**Next:** Continue B01/B02 and BP-F1/BP01–BP12 from [CURRENT_STATE_REPORT.md](CURRENT_STATE_REPORT.md), update one case at a time, and do not claim full QA completion until the remaining P1 save and plan/actual coverage is closed.
