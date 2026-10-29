@@ -7,7 +7,7 @@ import { createServer } from 'node:net';
 import { chromium } from '@playwright/test';
 
 const appRoot = resolve(import.meta.dirname, '..');
-export const availableBrowserCases = Object.freeze(['sample-isolation', 'budget-recurring', 'budget-frequency-history', 'budget-two-tab', 'budget-empty-onboarding', 'budget-create-month', 'budget-archive-history', 'budget-history-controls', 'transaction-splits-commitments', 'form-drafts', 'form-cancel', 'refresh-edit', 'snapshot-races', 'operation-restart', 'operation-reload-recovery', 'accessibility-tree', '__self-check-pageerror', '__self-check-assertion']);
+export const availableBrowserCases = Object.freeze(['sample-isolation', 'sample-transaction-filters', 'budget-recurring', 'budget-frequency-history', 'budget-two-tab', 'budget-empty-onboarding', 'budget-create-month', 'budget-archive-history', 'budget-history-controls', 'transaction-splits-commitments', 'form-drafts', 'form-cancel', 'refresh-edit', 'snapshot-races', 'operation-restart', 'operation-reload-recovery', 'accessibility-tree', '__self-check-pageerror', '__self-check-assertion']);
 
 function monthInChicago(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit' }).formatToParts(date);
@@ -108,6 +108,50 @@ export async function runBrowserCase(name) {
       assert.deepEqual(browserErrors, [], 'browser case completes without uncaught errors');
       assert.deepEqual(consoleErrors, [], 'browser case completes without console errors');
       return;
+    }
+
+    if (name === 'sample-transaction-filters') {
+      const month=monthInChicago(),start=month+'-20',end=month+'-25',rows=()=>page.locator('#transaction-table tbody tr').count();
+      await page.getByRole('button',{name:'Explore sample data'}).click();
+      await page.locator('[data-view="transactions"]').first().click();
+      await page.waitForFunction(()=>document.querySelectorAll('#transaction-table tbody tr').length===22);
+      await page.locator('#category-filter').selectOption({label:'Dining'});
+      await page.waitForFunction(()=>document.querySelectorAll('#transaction-table tbody tr').length===4);
+      await page.locator('#account-filter').selectOption('credit');
+      assert.equal(await rows(),4,'category and account filters combine');
+      assert.ok((await page.locator('#transaction-table').innerText()).includes('Rewards Credit'),'all matching rows retain the selected account');
+      await page.locator('#clear-transaction-filters').click();
+      await page.waitForFunction(()=>document.querySelectorAll('#transaction-table tbody tr').length===22);
+      await page.locator('#search').fill('Meijer');
+      await page.waitForFunction(()=>document.querySelectorAll('#transaction-table tbody tr').length===2);
+      await page.locator('#clear-transaction-filters').click();
+      await page.locator('#date-from').fill(start);await page.locator('#date-from').dispatchEvent('change');
+      await page.locator('#date-to').fill(end);await page.locator('#date-to').dispatchEvent('change');
+      await page.waitForFunction(()=>document.querySelectorAll('#transaction-table tbody tr').length===6);
+      await page.locator('#clear-transaction-filters').click();
+      await page.locator('#date-from').fill(month+'-30');await page.locator('#date-from').dispatchEvent('change');await page.locator('#date-to').fill(month+'-25');await page.locator('#date-to').dispatchEvent('change');
+      await page.getByRole('status').filter({hasText:'Start date must be on or before end date'}).waitFor();assert.equal(await rows(),0,'inverted ranges are empty and explained');await page.locator('#clear-transaction-filters').click();
+      await page.locator('#review-only').check();
+      await page.waitForFunction(()=>document.querySelectorAll('#transaction-table tbody tr').length===0);
+      const reviewDownload=page.waitForEvent('download');await page.locator('#export').click();
+      const reviewText=await readFile(await (await reviewDownload).path(),'utf8');
+      assert.equal(reviewText.trim().split(/\r?\n/).length,1,'export applies active date and needs-review filters');
+      assert.match(reviewText.split(/\r?\n/,1)[0],/Account$/,'export preserves account attribution in its CSV header');
+      await page.locator('#clear-transaction-filters').click();
+      const sampleDownload=page.waitForEvent('download');await page.locator('#export').click();const sampleText=await readFile(await (await sampleDownload).path(),'utf8');assert.match(sampleText,/^Date,Merchant,Category,Amount,Currency,Status,Account/m);assert.match(sampleText,/Everyday Checking/);assert.match(sampleText,/Rewards Credit/,'sample CSV export retains the account for each source row');
+      await page.locator('[data-view="budgets"]').first().click();
+      const stop=page.getByRole('button',{name:/Stop future funding/}).first();
+      assert.equal(await stop.isDisabled(),true,'sample preview marks stop-funding as unavailable');
+      assert.equal(await page.locator('[data-budget-stop]').count(),0,'read-only sample cannot start a live mutation');
+      assert.deepEqual(sampleWrites,[],'filtering, export, and read-only budget controls do not mutate saved data');
+      await page.locator('[data-exit-demo]').first().click();await page.locator('[data-view="transactions"]').first().click();await page.locator('#import').click();
+      const importDialog=page.getByRole('dialog');await importDialog.locator('#csv-file').setInputFiles({name:'account-roundtrip.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category,Currency,Status,Account\n'+month+'-02,Synthetic checking,12.34,Groceries,USD,Posted,Everyday Checking\n'+month+'-03,Synthetic card,5.67,Dining,USD,Posted,Rewards Credit\n')});
+      assert.equal(await importDialog.locator('[name="accountColumn"]').inputValue(),'Account','the Account column is detected automatically');assert.equal(await importDialog.locator('[name="account"]').evaluate(element=>element.required),false,'per-row Account data removes the default-account requirement');
+      await importDialog.getByRole('button',{name:'Preview file'}).click();await importDialog.getByText('2 rows · 2 account(s)').waitFor();await importDialog.getByRole('button',{name:'Commit 2 rows'}).click();await importDialog.getByText('2 transactions imported').waitFor();
+      const importedAccounts=await page.evaluate(async()=>{const [state,result]=await Promise.all([fetch('/api/state').then(response=>response.json()),fetch('/api/transactions?search=Synthetic').then(response=>response.json())]);return result.transactions.filter(row=>row.merchant.startsWith('Synthetic checking')||row.merchant.startsWith('Synthetic card')).map(row=>({merchant:row.merchant,account:state.accounts.find(account=>account.id===row.accountId)?.name})).sort((a,b)=>a.merchant.localeCompare(b.merchant));});assert.deepEqual(importedAccounts,[{merchant:'Synthetic card',account:'Rewards Credit'},{merchant:'Synthetic checking',account:'Everyday Checking'}],'CSV import preserves each row’s account attribution');
+      await importDialog.getByRole('button',{name:'Undo this import'}).click();await importDialog.getByText('This import batch was undone.').waitFor();
+      assert.deepEqual(browserErrors,[]);assert.deepEqual(consoleErrors,[]);
+      console.log('Browser case passed: sample-transaction-filters (search, category, account, date, review, filtered export, and read-only sample budget action).');return;
     }
 
     if(name==='operation-reload-recovery'){
@@ -708,7 +752,7 @@ export async function runBrowserCase(name) {
       await importDialog.locator('#import-account').fill('Synthetic restart import account');
       await importDialog.locator('#csv-file').setInputFiles({name:'synthetic-restart-import.csv',mimeType:'text/csv',buffer:Buffer.from(importCsv)});
       await importDialog.getByRole('button',{name:'Preview file'}).click();
-      await importDialog.getByText('1 rows for Synthetic restart import account').waitFor();
+      await importDialog.getByText('1 rows · 1 account(s)').waitFor();
       const revisionBeforeImport=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>state.revision));
       let importAttempts=0,committedImportResult=null;const importOperationIds=[];
       await page.route('**/api/import',async route=>{

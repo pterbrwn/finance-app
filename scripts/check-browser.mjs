@@ -50,6 +50,7 @@ try{
   const observationParts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()),observationDate=observationParts.find(part=>part.type==='year').value+'-'+observationParts.find(part=>part.type==='month').value+'-'+observationParts.find(part=>part.type==='day').value;
   await audit('overview');
   for(const view of ['transactions','budgets','commitments','accounts','investments','goals','home','settings'])await visit(view);
+  const settingsText=await page.locator('body').innerText();assert.match(settingsText,/Sync timer[\s\S]*bank data sync timer/i,'Settings explains that sync scheduling refers to bank data sync');assert.match(settingsText,/Backup timer[\s\S]*Next backup run|Backup timer[\s\S]*No backup run is scheduled/i,'Settings labels the separate local backup timer and its next run');
 
   await page.locator('[data-view="overview"]').first().click();
   const beforeSample=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,snapshots:state.balanceSheetSnapshots.length})));
@@ -77,7 +78,7 @@ try{
   await importDialog.locator('#import-account').fill('Synthetic browser account');
   await importDialog.locator('#csv-file').setInputFiles({name:'browser.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category\n'+testDate+',Synthetic Market,24.50,Groceries\n')});
   await importDialog.getByRole('button',{name:'Preview file'}).click();
-  await importDialog.getByText('1 rows for Synthetic browser account').waitFor();
+  await importDialog.getByText('1 rows · 1 account(s)').waitFor();
   await importDialog.getByRole('button',{name:'Commit 1 rows'}).click();
   await importDialog.getByText('1 transactions imported').waitFor();
   await importDialog.getByRole('button',{name:'Undo this import'}).click();
@@ -90,7 +91,7 @@ try{
   await bulkImportDialog.locator('#import-account').fill('Synthetic bulk account');
   await bulkImportDialog.locator('#csv-file').setInputFiles({name:'bulk.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category\n'+selectedMonth+'-13,Synthetic bulk market,18.75,Groceries\n'+selectedMonth+'-14,Synthetic source market,12.50,Groceries\n')});
   await bulkImportDialog.getByRole('button',{name:'Preview file'}).click();
-  await bulkImportDialog.getByText('2 rows for Synthetic bulk account').waitFor();
+  await bulkImportDialog.getByText('2 rows · 1 account(s)').waitFor();
   const bulkCommitResponse=page.waitForResponse(response=>response.url().endsWith('/api/import')&&response.request().method()==='POST');
   await bulkImportDialog.getByRole('button',{name:'Commit 2 rows'}).click();
   const bulkImportBatch=await(await bulkCommitResponse).json();
@@ -161,7 +162,7 @@ try{
   await acceptanceImport.locator('#import-account').fill('Synthetic full-save account');
   await acceptanceImport.locator('#csv-file').setInputFiles({name:'bulk-acceptance.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category\n'+bulkAcceptanceRows+'\n')});
   await acceptanceImport.getByRole('button',{name:'Preview file'}).click();
-  await acceptanceImport.getByText('121 rows for Synthetic full-save account').waitFor();
+  await acceptanceImport.getByText('121 rows · 1 account(s)').waitFor();
   await acceptanceImport.getByRole('button',{name:'Commit 121 rows'}).click();
   await acceptanceImport.getByText('121 transactions imported').waitFor();
   await page.keyboard.press('Escape');
@@ -433,6 +434,7 @@ try{
   const scenarioDialog=page.getByRole('dialog');
   await scenarioDialog.locator('[name="name"]').fill('Browser purchase estimate');
   await scenarioDialog.locator('[name="purchasePrice"]').fill('250000');
+  assert.equal(await scenarioDialog.getByRole('spinbutton',{name:'Down payment amount (USD)'}).count(),1,'down-payment amount input has a specific accessible name');await scenarioDialog.locator('[name="downPaymentMode"]').selectOption('percent');assert.equal(await scenarioDialog.getByRole('spinbutton',{name:'Down payment percent of purchase price'}).count(),1,'the accessible name follows the selected percent unit');await scenarioDialog.locator('[name="downPaymentMode"]').selectOption('amount');
   await scenarioDialog.locator('[name="downPayment"]').fill('25000');
   await scenarioDialog.locator('[name="termMonths"]').fill('360');
   await scenarioDialog.locator('[name="noteRatePercent"]').fill('6.5');
@@ -548,6 +550,7 @@ try{
     await page.setViewportSize({width,height:900});
     const overflow=await page.evaluate(()=>({viewport:innerWidth,document:document.documentElement.scrollWidth,body:document.body.scrollWidth}));
     assert.ok(overflow.document<=overflow.viewport+1&&overflow.body<=overflow.viewport+1,`horizontal overflow at ${width}px: ${JSON.stringify(overflow)}`);
+    await page.locator('[data-view="commitments"]').first().click();const commitmentLayout=await page.evaluate(()=>{const labels=[...document.querySelectorAll('.commitment-form>label')].map(label=>{const r=label.getBoundingClientRect(),input=label.querySelector('input,select')?.getBoundingClientRect();return{label:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},input:input&&{left:input.left,right:input.right,top:input.top,bottom:input.bottom}};});let overlaps=false;for(let i=0;i<labels.length;i++)for(let j=i+1;j<labels.length;j++){const a=labels[i].label,b=labels[j].label;if(a.left<b.right&&a.right>b.left&&a.top<b.bottom&&a.bottom>b.top)overlaps=true;}return{labels,overlaps};});assert.equal(commitmentLayout.overlaps,false,`commitment fields do not overlap at ${width}px`);assert.ok(commitmentLayout.labels.every(row=>!row.input||row.input.left>=row.label.left&&row.input.right<=row.label.right),`commitment inputs stay inside their labels at ${width}px`);
     await audit(`category-${width}px`);
   }
   await page.setViewportSize({width:720,height:900});
