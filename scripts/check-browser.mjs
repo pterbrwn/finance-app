@@ -232,7 +232,10 @@ try{
   assert.ok(await page.locator('.category-manage-row input[value="Browser test category"]').count(),'the created recurring bucket appears in the editable category list');
   await page.waitForLoadState('networkidle');
   const categoryName=page.locator('.category-manage-row input').first();
+  const categoryRenameResponse=page.waitForResponse(response=>response.url().endsWith('/api/category-update')&&response.request().method()==='POST');
   await categoryName.fill('Browser renamed category');await categoryName.press('Tab');await page.keyboard.press('Enter');
+  assert.equal((await categoryRenameResponse).status(),200,'category rename is saved before the next revisioned edit');
+  await page.locator('.budget-message').filter({hasText:'Category renamed.'}).waitFor();
   await page.waitForFunction(()=>document.querySelector('.category-manage-row input')?.value==='Browser renamed category');
   assert.equal(await page.locator('.category-manage-row input').first().inputValue(),'Browser renamed category','keyboard submission renames a category');
   const incomeForm=page.locator('[data-income-plan]');
