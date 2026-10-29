@@ -1,18 +1,26 @@
 // The loopback-only Node server supplies the local owner's identity.
 import { CATEGORIES, transactionMatchesCategory } from '../shared/categories.mjs';
 import { budgetMonthKey, resolveBudget, resolveIncomePlan, validMonth } from '../shared/budgets.mjs';
+import { canonicalOperationPayload, operationPayloadDigest } from '../shared/operation-identity.mjs';
+import { monthlyBudgetAmount, validateBudgetSchedule } from '../shared/budget-frequency.mjs';
+import { reportingDate } from '../shared/dates.mjs';
 import { cents } from '../shared/money.mjs';
 import { accountRecord, investmentHoldings, providerAccountKey } from '../shared/investments.mjs';
-import { categoryFor, fromPlaid, totals } from '../shared/reporting.mjs';
+import { addSafeCents, categoryFor, fromPlaid, totals } from '../shared/reporting.mjs';
 import { applyChanges, applySyncPages } from '../shared/reconciliation.mjs';
 import { eligibleCashAccounts, summarizeGoals } from '../shared/goals.mjs';
 import { amortizeFixedRate, compareAmortization, summarizeProperties } from '../shared/mortgages.mjs';
 import { calculateHomeScenario, SCENARIO_CALCULATION_VERSION, validateScenarioInput } from '../shared/scenarios.mjs';
 import { makeBalanceSheetSnapshot, summarizeBalanceSheet } from '../shared/net-worth.mjs';
+import { calculateStatementReconciliation, statementTransactionFingerprint } from '../shared/statement-reconciliation.mjs';
+import { validateTransactionSplit, transactionReportingRows } from '../shared/transaction-splits.mjs';
+import { commitmentForecast, confirmCommitmentMatch, enumerateCommitmentDates, validateCommitment } from '../shared/commitments.mjs';
 import { BUILD_ID, UI_ASSETS } from './generated.mjs';
 import { repositoryFor } from '../server/repository.mjs';
+import { handleBudgetMutationRoute, handleBudgetSummaryRoute } from './budget-routes.mjs';
 
-export { categoryFor, fromPlaid, totals, applyChanges, applySyncPages, investmentHoldings, eligibleCashAccounts, summarizeGoals, amortizeFixedRate, compareAmortization, summarizeProperties, calculateHomeScenario, validateScenarioInput, summarizeBalanceSheet, makeBalanceSheetSnapshot };
+export { categoryFor, fromPlaid, totals, applyChanges, applySyncPages, investmentHoldings, eligibleCashAccounts, summarizeGoals, amortizeFixedRate, compareAmortization, summarizeProperties, calculateHomeScenario, validateScenarioInput, summarizeBalanceSheet, makeBalanceSheetSnapshot, budgetActuals, budgetRollovers };
+export { canonicalOperationPayload, operationPayloadDigest };
 
 const normalizeCategory = value => String(value || '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 const validDateOnly = value => typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value+'T12:00:00Z').toISOString().slice(0,10)===value;
@@ -38,7 +46,14 @@ const apiError = (message, status = 400) => Object.assign(new Error(message), { 
 function response(data, status = 200) { return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' } }); }
 function ready(env) { return !env.LOCAL_ONLY && !!(env.PLAID_CLIENT_ID && env.PLAID_SECRET && env.TOKEN_ENCRYPTION_KEY && ['sandbox', 'production'].includes(env.PLAID_ENV)); }
 function monthInReportingZone(date = new Date()) { const parts = new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit'}).formatToParts(date); return `${parts.find(p=>p.type==='year').value}-${parts.find(p=>p.type==='month').value}`; }
-function dateInReportingZone(date = new Date()) { const parts = new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(date); return `${parts.find(p=>p.type==='year').value}-${parts.find(p=>p.type==='month').value}-${parts.find(p=>p.type==='day').value}`; }
+function reimbursementReview(state,link){
+  if(link.status==='unlinked')return'unlinked';
+  const refund=(state.transactions||[]).find(row=>row.id===link.transactionId),purchase=(state.transactions||[]).find(row=>row.id===link.reimbursesTransactionId);
+  if(!refund||!purchase||refund.pending||purchase.pending||refund.amount>=0||purchase.amount<=0||refund.currency!=='USD'||purchase.currency!=='USD'||!link.observedRefund||!link.observedPurchase)return'needs-review';
+  for(const [transaction,observed] of [[refund,link.observedRefund],[purchase,link.observedPurchase]])if(transaction.amount!==observed.amount||transaction.date!==observed.date||transaction.accountId!==observed.accountId||transaction.currency!==observed.currency)return'needs-review';
+  return link.amount<=Math.min(-refund.amount,purchase.amount)?'user-confirmed':'needs-review';
+}
+function dateInReportingZone(date = new Date()) { return reportingDate(date); }
 function budgetTemplates(state) {
   const templates = [...(Array.isArray(state.budgetTemplates) ? state.budgetTemplates : [])];
   const effectiveFrom = state.budgetHistoryUnavailableBefore || monthInReportingZone();
@@ -58,12 +73,69 @@ async function mutate(env, update) {
     state.revision = (Number.isSafeInteger(state.revision) ? state.revision : 0) + 1;
   });
 }
+async function mutateBudget(env, update) {
+  const repository=repositoryFor(env);
+  if(typeof repository.mutateBudgetState==='function')return repository.mutateBudgetState(async state=>{await update(state);state.revision=(Number.isSafeInteger(state.revision)?state.revision:0)+1;});
+  return mutate(env,update);
+}
+async function mutateOwner(env, update) {
+  const repository=repositoryFor(env);
+  if(typeof repository.mutateOwnerState==='function')return repository.mutateOwnerState(async state=>{await update(state);state.revision=(Number.isSafeInteger(state.revision)?state.revision:0)+1;});
+  return mutate(env,update);
+}
 async function mutateTransactions(env, ids, update) {
   const repository=repositoryFor(env);
   if(typeof repository.mutateTransactionSubset==='function')return repository.mutateTransactionSubset(ids,async state=>{await update(state);});
   return mutate(env,update);
 }
-function checkRevision(state,input) { const revision=Number.isSafeInteger(state.revision)?state.revision:0;if (input.revision !== undefined && input.revision !== revision) throw apiError('This data changed in another tab. Reload it and try again.', 409); }
+class OperationReplay extends Error { constructor(){super('Stored operation result replay.');this.operationReplay=true;} }
+const BUDGET_HISTORY_SCOPES=new Set(['budget','budget-reset','income-plan','income-plan-reset','budget-outlook','category-create','budget-history-revert','budget-stop-future']);
+function budgetHistorySnapshot(state){
+  const keyed=(rows,keyOf,valueOf)=>Object.fromEntries((rows||[]).map(row=>[keyOf(row),valueOf(row)]));
+  return{budgets:keyed(state.budgetTemplates,row=>`${row.categoryId}:${row.effectiveFrom}`,row=>({amount:row.amount,schedule:state.budgetTemplateSchedules?.[`${row.categoryId}:${row.effectiveFrom}`]||null})),monthBudgets:Object.fromEntries(Object.entries(state.monthlyBudgets||{}).map(([key,amount])=>[key,{amount,schedule:state.monthlyBudgetSchedules?.[key]||null}])),incomeTemplates:keyed(state.incomePlanTemplates,row=>row.effectiveFrom,row=>row.amount),incomeMonths:{...(state.monthlyIncomePlans||{})},outlooks:{...(state.monthlyBudgetOutlooks||{})}};
+}
+function budgetHistoryEntries(before,after,{scope,operationId,revision,createdAt}){
+  if(!BUDGET_HISTORY_SCOPES.has(scope))return[];
+  const entries=[];
+  const compare=(recordType,left,right,parseKey)=>{for(const key of new Set([...Object.keys(left),...Object.keys(right)])){const previous=left[key]??null,next=right[key]??null;if(JSON.stringify(previous)===JSON.stringify(next))continue;const parts=parseKey(key);entries.push({id:crypto.randomUUID(),recordType,categoryId:parts.categoryId||null,month:parts.month||null,scope:parts.scope||null,action:scope,before:previous,after:next,revision,operationId:operationId||null,createdAt});}};
+  compare('budget',before.budgets,after.budgets,key=>{const index=key.lastIndexOf(':');return{categoryId:key.slice(0,index),month:key.slice(index+1),scope:'recurring'};});
+  compare('budget',before.monthBudgets,after.monthBudgets,key=>({categoryId:key.slice(8),month:key.slice(0,7),scope:'month'}));
+  compare('income',before.incomeTemplates,after.incomeTemplates,key=>({month:key,scope:'recurring'}));
+  compare('income',before.incomeMonths,after.incomeMonths,key=>({month:key,scope:'month'}));
+  compare('outlook',before.outlooks,after.outlooks,key=>({month:key,scope:'month'}));
+  return entries;
+}
+async function operationFingerprint(scope,input){
+  const operationId=input?.clientOperationId;
+  if(operationId===undefined)return null;
+  if(typeof operationId!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operationId))throw apiError('Invalid save operation identifier.');
+  const payload={...input};delete payload.clientOperationId;
+  return{operationId,payloadDigest:await operationPayloadDigest(scope,payload)};
+}
+async function findOperationReplay(env,state,scope,input){
+  const operation=await operationFingerprint(scope,input);if(!operation)return{found:false};
+  const repository=repositoryFor(env),existing=await repository.readOperationResult?.(operation.operationId)||(state.operationResults||[]).find(record=>record.id===operation.operationId);
+  if(!existing)return{found:false};
+  const digest=existing.payloadDigest??(typeof existing.fingerprint==='string'?await crypto.subtle.digest('SHA-256',new TextEncoder().encode(existing.fingerprint)).then(bytes=>[...new Uint8Array(bytes)].map(byte=>byte.toString(16).padStart(2,'0')).join('')):null);
+  if(existing.scope!==undefined&&existing.scope!==scope||digest!==operation.payloadDigest)throw apiError('This save identifier was already used for different values. Start a new save.',409);
+  return{found:true,response:existing.response};
+}
+async function mutateWithReplay(env,scope,input,update,buildResult,transactionIds=null,strategy='default'){
+  const operation=await operationFingerprint(scope,input),repository=repositoryFor(env);let result;
+  const trackedUpdate=async state=>{const before=BUDGET_HISTORY_SCOPES.has(scope)?budgetHistorySnapshot(state):null;await update(state);if(before){const revision=(Number.isSafeInteger(state.revision)?state.revision:0)+1,createdAt=new Date().toISOString();state._pendingBudgetHistory=budgetHistoryEntries(before,budgetHistorySnapshot(state),{scope,operationId:operation?.operationId,revision,createdAt});}};
+  if(!operation){const state=strategy==='owner'?await mutateOwner(env,trackedUpdate):strategy==='budget'?await mutateBudget(env,trackedUpdate):transactionIds?await mutateTransactions(env,transactionIds,trackedUpdate):await mutate(env,trackedUpdate);return{state,result:buildResult(state,state.revision),replayed:false};}
+  const{operationId,payloadDigest}=operation;
+  const apply=async state=>{
+    const before=BUDGET_HISTORY_SCOPES.has(scope)?budgetHistorySnapshot(state):null;await update(state);
+    const revision=(Number.isSafeInteger(state.revision)?state.revision:0)+1;
+    state.revision=revision;
+    if(before)state._pendingBudgetHistory=budgetHistoryEntries(before,budgetHistorySnapshot(state),{scope,operationId,revision,createdAt:new Date().toISOString()});
+    result=buildResult(state,revision);
+  };
+  const outcome=await repository.mutateWithOperation({id:operationId,scope,payloadDigest},async state=>{await apply(state);return{id:operationId,scope,payloadDigest,response:result,revision:state.revision,createdAt:new Date().toISOString()};},{strategy:transactionIds?'transactions':strategy,transactionIds:transactionIds||[]});
+  return{state:outcome.state,result:outcome.result,replayed:outcome.replayed};
+}
+function checkRevision(state,input) { const revision=Number.isSafeInteger(state.revision)?state.revision:0;if(!Number.isSafeInteger(input?.revision)||input.revision<0)throw apiError('Refresh this dashboard before saving changes.',409);if(input.revision!==revision)throw apiError('This data changed in another tab. Reload it and try again.',409); }
 async function body(request) {
   const text = await request.text();
   if (text.length > 2_000_000) throw apiError('This upload is too large.', 413);
@@ -147,7 +219,8 @@ async function prepareCsvImport(input,state){
   if(typeof input.csv!=='string'||input.csv.length>1_000_000||typeof input.account!=='string'||!input.account.trim()||input.account.trim().length>100)throw apiError('Choose a CSV under 1 MB and enter an account name.');
   const name=input.account.trim(),accountId='csv:'+await hash(name.normalize('NFKC').toLocaleLowerCase('en-US')),fileId=await hash(accountId+'\n'+input.csv);
   const options={columnMapping:input.columnMapping||{},dateFormat:input.dateFormat||'YYYY-MM-DD',amountMode:input.amountMode||'positive-spending',categoryMapping:input.categoryMapping||{},allowUnknownCategories:true};
-  const rows=parseCSV(input.csv,categories(state),options),unknownCategories=[...new Set(rows.map(row=>row.unknownCategory).filter(Boolean))];
+  const importCategories=categoryCatalog(state).filter(category=>['expense','income','transfer'].includes(category.kind)&&state.budgetItemSettings?.[category.id]?.itemType!=='allocation').map(category=>category.name);
+  const rows=parseCSV(input.csv,importCategories,options),unknownCategories=[...new Set(rows.map(row=>row.unknownCategory).filter(Boolean))];
   const existingBatch=(state.importBatches||[]).find(batch=>batch.id===fileId);
   const fingerprints=new Map();for(const transaction of state.transactions){const key=transactionFingerprint(transaction);if(!fingerprints.has(key))fingerprints.set(key,[]);fingerprints.get(key).push(transaction);}
   const overlaps=existingBatch?[]:rows.flatMap((row,index)=>{const candidates=fingerprints.get(transactionFingerprint(row))||[];return candidates.length?[{row:index+1,date:row.date,merchant:row.merchant,amount:row.amount,existingIds:candidates.slice(0,3).map(t=>t.id)}]:[];});
@@ -228,6 +301,7 @@ async function runSyncJob(env,jobId){
   }finally{if(syncRunners.get(env)?.id===jobId)syncRunners.delete(env);}
 }
 async function startSync(env,source='manual'){
+  if(env.shutdownRequested)throw apiError('The local server is shutting down. Try again after it restarts.',503);
   const {state:current}=await readState(env),active=current.items.filter(item=>item.lifecycle!=='unlinked');
   if(!active.length)return{job:{id:null,status:'skipped',failures:[],completed:0,total:0}};
   const running=current.syncJob?.status==='running';
@@ -239,21 +313,34 @@ async function startSync(env,source='manual'){
   return{job:saved.syncJob,joined:false};
 }
 async function syncStatus(env){const repository=repositoryFor(env);let state=typeof repository.readSyncJob==='function'?{syncJob:await repository.readSyncJob()}:(await readState(env)).state;if(state.syncJob?.status==='running'&&!syncRunners.has(env)){const id=state.syncJob.id;state=await mutate(env,s=>{if(s.syncJob?.id===id&&s.syncJob.status==='running'){s.syncJob.status='interrupted';s.syncJob.finishedAt=new Date().toISOString();s.syncJob.failures=[...(s.syncJob.failures||[]),{bank:'Sync',message:'The previous sync stopped before it completed.'}];}});}return state.syncJob||null;}
+async function drainSync(env,timeoutMs=10_000){env.shutdownRequested=true;const active=syncRunners.get(env);if(!active)return true;let timer;const finished=await Promise.race([active.promise.then(()=>true,()=>true),new Promise(resolve=>{timer=setTimeout(()=>resolve(false),Math.max(0,timeoutMs));})]);clearTimeout(timer);return finished&&!syncRunners.has(env);}
 
 async function publicState(state, env) {
   const currentBudgetMonth = monthInReportingZone();
   const templates = budgetTemplates(state), overrides = state.monthlyBudgets || {};
-  const budgets = Object.fromEntries(categoryCatalog(state).filter(c=>c.kind==='expense'&&!c.archivedAt).map(c=>[c.name,resolveBudget(templates,overrides,c.id,currentBudgetMonth).amount]).filter(([,amount])=>amount!==null));
+  const budgets = Object.fromEntries(categoryCatalog(state).filter(c=>c.kind==='expense'&&!c.archivedAt&&state.budgetItemSettings?.[c.id]?.itemType!=='allocation').map(c=>[c.name,resolveBudget(templates,overrides,c.id,currentBudgetMonth).amount]).filter(([,amount])=>amount!==null));
   const goalSummary=summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,new Date());
-  const propertySummary=summarizeProperties(state.properties||[],state.mortgages||[],state.accounts);
+  const propertySummary=summarizeProperties(state.properties||[],state.mortgages||[],state.accounts,state.items||[]);
   const balanceSheet=summarizeBalanceSheet(state.accounts,state.items,propertySummary,new Date());
-  return { ...state, budgets, budgetTemplates: templates, monthlyBudgets: overrides, incomePlanTemplates:state.incomePlanTemplates||[], monthlyIncomePlans:state.monthlyIncomePlans||{}, monthlyBudgetOutlooks:state.monthlyBudgetOutlooks||{}, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], goalSummary, propertySummary, balanceSheet, owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null}, backup: typeof env.getBackupStatus==='function'?await env.getBackupStatus():{state:'unavailable',timer:{state:'unavailable',enabled:null,active:null}} } };
+  const {operationResults,budgetChangeHistory,...privateSafeState}=state;return { ...privateSafeState, revision:Number.isSafeInteger(state.revision)?state.revision:0, budgets, budgetTemplates: templates, monthlyBudgets: overrides, monthlyBudgetSchedules:state.monthlyBudgetSchedules||{}, budgetTemplateSchedules:state.budgetTemplateSchedules||{}, incomePlanTemplates:state.incomePlanTemplates||[], monthlyIncomePlans:state.monthlyIncomePlans||{}, monthlyBudgetOutlooks:state.monthlyBudgetOutlooks||{}, budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], goalSummary, propertySummary, balanceSheet, owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null}, backup: typeof env.getBackupStatus==='function'?await env.getBackupStatus():{state:'unavailable',timer:{state:'unavailable',enabled:null,active:null}} } };
 }
 function budgetActuals(state,month){
   const aliases=new Map(Object.entries(state.budgetCategoryIds||{}).map(([id,name])=>[name,id]));
+  const allocationIds=new Set(categoryCatalog(state).filter(category=>category.kind==='allocation').map(category=>category.id));
   let income=0;const categories={},activity={};
-  for(const row of state.transactions||[]){if(!row.date?.startsWith(month)||row.pending||row.currency!=='USD')continue;const overridden=typeof row.override==='string'&&row.override.length>0,name=overridden?row.override:row.category,id=(overridden?row.overrideCategoryId:row.categoryId)||aliases.get(name);activity[id||name]=(activity[id||name]||0)+1;
-    if(name==='Income'){income-=row.amount;continue;}if(name==='Transfers')continue;const key=id||name;categories[key]=(categories[key]||0)+row.amount;
+  for(const original of state.transactions||[])for(const row of transactionReportingRows(state,original)){if(!row.date?.startsWith(month)||row.pending||row.currency!=='USD')continue;const overridden=typeof row.override==='string'&&row.override.length>0,name=overridden?row.override:row.category,id=(overridden?row.overrideCategoryId:row.categoryId)||aliases.get(name);activity[id||name]=(activity[id||name]||0)+1;
+    if(id&&(state.budgetItemSettings?.[id]?.itemType==='allocation'||allocationIds.has(id)))continue;
+    if(name==='Income'){income=addSafeCents(income,-row.amount,'Monthly income');continue;}if(name==='Transfers')continue;const key=id||name;categories[key]=addSafeCents(categories[key]||0,row.amount,'Monthly category spending');
+  }
+  return{income,categories,activity};
+}
+function budgetActualsFromRows(state,rows){
+  const aliases=new Map(Object.entries(state.budgetCategoryIds||{}).map(([id,name])=>[name,id]));
+  const allocationIds=new Set(categoryCatalog(state).filter(category=>category.kind==='allocation').map(category=>category.id));
+  let income=0;const categories={},activity={};
+  for(const row of rows){const name=row.category,id=row.categoryId||aliases.get(name),key=id||name;activity[key]=(activity[key]||0)+row.activity;
+    if(id&&(state.budgetItemSettings?.[id]?.itemType==='allocation'||allocationIds.has(id)))continue;
+    if(name==='Income'){income=addSafeCents(income,-row.amount,'Monthly income');continue;}if(name==='Transfers')continue;categories[key]=addSafeCents(categories[key]||0,row.amount,'Monthly category spending');
   }
   return{income,categories,activity};
 }
@@ -261,9 +348,18 @@ function budgetRollovers(state,month){
   const boundary=state.budgetHistoryUnavailableBefore, start=validMonth(boundary)&&boundary<=month?boundary:month;
   const months=[];for(let cursor=start;;){months.push(cursor);if(cursor===month)break;const[year,number]=cursor.split('-').map(Number);cursor=number===12?`${String(year+1).padStart(4,'0')}-01`:`${String(year).padStart(4,'0')}-${String(number+1).padStart(2,'0')}`;}
   const aliases=new Map(Object.entries(state.budgetCategoryIds||{}).map(([id,name])=>[name,id])),actuals=new Map();
-  for(const row of state.transactions||[]){const rowMonth=row.date?.slice(0,7);if(!validMonth(rowMonth)||rowMonth<start||rowMonth>=month||row.pending||row.currency!=='USD')continue;const overridden=typeof row.override==='string'&&row.override.length>0,name=overridden?row.override:row.category;if(name==='Income'||name==='Transfers')continue;const id=(overridden?row.overrideCategoryId:row.categoryId)||aliases.get(name);if(!id)continue;const key=`${rowMonth}:${id}`,amount=(actuals.get(key)||0)+row.amount;if(!Number.isSafeInteger(amount))throw new TypeError('Historical bucket spending exceeds the safe integer-cent range.');actuals.set(key,amount);}
+  for(const original of state.transactions||[])for(const row of transactionReportingRows(state,original)){const rowMonth=row.date?.slice(0,7);if(!validMonth(rowMonth)||rowMonth<start||rowMonth>=month||row.pending||row.currency!=='USD')continue;const overridden=typeof row.override==='string'&&row.override.length>0,name=overridden?row.override:row.category;if(name==='Income'||name==='Transfers')continue;const id=(overridden?row.overrideCategoryId:row.categoryId)||aliases.get(name);if(!id)continue;const groupedIds=Object.entries(state.budgetItemSettings||{}).filter(([,settings])=>settings.itemType!=='allocation'&&(settings.actualCategoryIds||[]).includes(id)).map(([bucketId])=>bucketId);for(const bucketId of new Set([id,...groupedIds])){const key=`${rowMonth}:${bucketId}`,amount=(actuals.get(key)||0)+row.amount;if(!Number.isSafeInteger(amount))throw new TypeError('Historical bucket spending exceeds the safe integer-cent range.');actuals.set(key,amount);}}
   const templates=budgetTemplates(state),overrides=state.monthlyBudgets||{},result={};
   for(const category of categoryCatalog(state).filter(row=>row.kind==='expense')){let balance=0;for(const historicalMonth of months){const plan=resolveBudget(templates,overrides,category.id,historicalMonth).amount;if(plan===null){balance=0;continue;}if(historicalMonth===month){result[category.id]=balance;break;}const assigned=plan+balance;if(!Number.isSafeInteger(assigned))throw new TypeError('Bucket rollover exceeds the safe integer-cent range.');balance=assigned-(actuals.get(`${historicalMonth}:${category.id}`)||0);if(!Number.isSafeInteger(balance))throw new TypeError('Bucket rollover exceeds the safe integer-cent range.');}}
+  return result;
+}
+function budgetRolloversFromRows(state,month,rows){
+  const boundary=state.budgetHistoryUnavailableBefore,start=validMonth(boundary)&&boundary<=month?boundary:month;
+  const months=[];for(let cursor=start;;){months.push(cursor);if(cursor===month)break;const[year,number]=cursor.split('-').map(Number);cursor=number===12?`${String(year+1).padStart(4,'0')}-01`:`${String(year).padStart(4,'0')}-${String(number+1).padStart(2,'0')}`;}
+  const aliases=new Map(Object.entries(state.budgetCategoryIds||{}).map(([id,name])=>[name,id])),actuals=new Map();
+  for(const row of rows){const rowMonth=row.month,name=row.category;if(!validMonth(rowMonth)||rowMonth<start||rowMonth>=month||name==='Income'||name==='Transfers')continue;const id=row.categoryId||aliases.get(name);if(!id)continue;const groupedIds=Object.entries(state.budgetItemSettings||{}).filter(([,settings])=>settings.itemType!=='allocation'&&(settings.actualCategoryIds||[]).includes(id)).map(([bucketId])=>bucketId);for(const bucketId of new Set([id,...groupedIds])){const key=`${rowMonth}:${bucketId}`,amount=addSafeCents(actuals.get(key)||0,row.amount,'Historical bucket spending');actuals.set(key,amount);}}
+  const templates=budgetTemplates(state),overrides=state.monthlyBudgets||{},result={};
+  for(const category of categoryCatalog(state).filter(row=>row.kind==='expense')){let balance=0;for(const historicalMonth of months){const plan=resolveBudget(templates,overrides,category.id,historicalMonth).amount;if(plan===null){balance=0;continue;}if(historicalMonth===month){result[category.id]=balance;break;}const assigned=addSafeCents(plan,balance,'Bucket rollover');balance=addSafeCents(assigned,-(actuals.get(`${historicalMonth}:${category.id}`)||0),'Bucket rollover');}}
   return result;
 }
 function scenarioFunding(state, linkedGoalId, asOf=new Date()) {
@@ -277,6 +373,7 @@ function requireCompleteSavedScenario(scenario){
   if(validation)throw apiError('This saved estimate needs input review before it can create a goal or budget: '+validation);
 }
 export default {
+  drain: drainSync,
   async fetch(request, env) {
     try {
       const url = new URL(request.url), path = url.pathname;
@@ -292,12 +389,43 @@ export default {
       if (!user) return response({ error: 'Local owner access is required.' }, 401);
       if(['link-token','exchange-token','sync','scheduled-sync','sync-status','disconnect','delete-history'].some(action=>path===`/api/${action}`)&&!ready(env))return response({error:'Bank connections are disabled. Import CSV files for local-only operation.'},503);
       const repository=repositoryFor(env);
-      if(request.method==='GET'&&path==='/api/budget-summary'){
-        const month=url.searchParams.get('month')||monthInReportingZone();if(!validMonth(month))throw apiError('Choose a valid reporting month.');
-        const {state}=await repository.read();if(state.owner&&state.owner!==user)return response({error:'This dashboard belongs to another account.'},403);
-        const actuals=budgetActuals(state,month);
-        return response({month,revision:Number.isSafeInteger(state.revision)?state.revision:0,categories:categoryCatalog(state),budgetTemplates:budgetTemplates(state),monthlyBudgets:state.monthlyBudgets||{},budgetCategoryIds:state.budgetCategoryIds||{},incomePlanTemplates:state.incomePlanTemplates||[],monthlyIncomePlans:state.monthlyIncomePlans||{},monthlyBudgetOutlooks:state.monthlyBudgetOutlooks||{},budgetHistoryUnavailableBefore:state.budgetHistoryUnavailableBefore||null,actuals,budgetRollovers:budgetRollovers(state,month)});
+      if(path==='/api/statement-reconciliation'&&request.method==='GET'){
+        const identity=typeof repository.readIdentity==='function'?await repository.readIdentity():(await repository.read()).state;
+        if(identity.owner&&identity.owner!==user)return response({error:'This dashboard belongs to another account.'},403);
+        const accountId=url.searchParams.get('accountId'),state=(await repository.read()).state;
+        if(!accountId)throw apiError('Choose an account.');
+        const account=state.accounts.find(row=>row.id===accountId);if(!account)throw apiError('Account not found.',404);
+        const records=(state.statementReconciliations||[]).filter(row=>row.accountId===accountId).sort((a,b)=>b.reviewedAt.localeCompare(a.reviewedAt));
+        const latest=records[0]||null;
+        if(!latest)return response({accountId,review:null,status:'not-reviewed'});
+        const current=statementTransactionFingerprint(state.transactions||[],accountId,latest.opening.date,latest.closing.date);
+        return response({accountId,review:latest,status:current!==latest.transactionFingerprint?'needs-review':latest.result.complete?'current':'incomplete'});
       }
+      if(path==='/api/statement-reconciliation'&&request.method==='POST'){
+        const input=await body(request),state=(await repository.read()).state;if(!Number.isSafeInteger(input.revision))throw apiError('Refresh the dashboard before reconciling an account.',409);
+        const account=state.accounts.find(row=>row.id===input.accountId);if(!account)throw apiError('Account not found.',404);
+        if(!input.opening||!input.closing||!Number.isSafeInteger(input.opening.balance)||!Number.isSafeInteger(input.closing.balance)||!validDateOnly(input.opening.date)||!validDateOnly(input.closing.date))throw apiError('Enter valid statement dates and balances.');
+        const result=calculateStatementReconciliation({account,opening:input.opening,closing:input.closing,transactions:state.transactions||[],historyComplete:input.historyComplete===true});
+        if(!result.supported)throw apiError(result.reason||'This account cannot be reconciled with this workflow.');
+        const transactionFingerprint=statementTransactionFingerprint(state.transactions||[],input.accountId,input.opening.date,input.closing.date),record={id:crypto.randomUUID(),accountId:input.accountId,opening:result.opening,closing:result.closing,result,transactionFingerprint,transactionRevision:Number.isSafeInteger(state.revision)?state.revision:0,calculationVersion:result.calculationVersion,reviewedAt:new Date().toISOString()};
+        const mutation=await mutateWithReplay(env,'statement-reconciliation',input,s=>{checkRevision(s,input);s.statementReconciliations||=[];s.statementReconciliations.push(record);s.owner=user;},(s,revision)=>({ok:true,revision,review:record}),null,'owner');return response(mutation.result);
+      }
+      if(path==='/api/budget-history'&&request.method==='GET'){
+        const identity=typeof repository.readIdentity==='function'?await repository.readIdentity():(await repository.read()).state;
+        if(identity.owner&&identity.owner!==user)return response({error:'This dashboard belongs to another account.'},403);
+        const query=url.searchParams,month=query.get('month')||'',categoryId=query.get('categoryId')||'',limit=Number(query.get('limit')||100);if(month&&!validMonth(month)||!Number.isSafeInteger(limit)||limit<1||limit>500)throw apiError('Choose a valid budget history filter.');
+        const entries=typeof repository.readBudgetHistory==='function'?await repository.readBudgetHistory({month:month||undefined,categoryId:categoryId||undefined,limit}):(await repository.read()).state.budgetChangeHistory||[];
+        return response({entries:month||categoryId?entries.filter(row=>(!month||row.month===month)&&(!categoryId||row.categoryId===categoryId)):entries.slice(0,limit)});
+      }
+      if(path==='/api/operation-status'&&request.method==='GET'){
+        const operationId=url.searchParams.get('operationId');if(!operationId||!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(operationId))throw apiError('Choose a valid operation identifier.');
+        const identity=typeof repository.readIdentity==='function'?await repository.readIdentity():(await repository.read()).state;
+        if(identity.owner&&identity.owner!==user)return response({error:'This dashboard belongs to another account.'},403);
+        const record=await repository.readOperationResult?.(operationId)||(await repository.read()).state.operationResults?.find(row=>row.id===operationId);
+        return response(record?{status:'committed',operationId,revision:record.revision??record.response?.revision??null,result:record.response}:{status:'unknown',operationId});
+      }
+      const budgetSummaryResponse=await handleBudgetSummaryRoute({request,path,url,repository,user,response,apiError,monthInReportingZone,validMonth,budgetActualsFromRows,budgetActuals,budgetRolloversFromRows,budgetRollovers,categoryCatalog,budgetTemplates});
+      if(budgetSummaryResponse)return budgetSummaryResponse;
       if(request.method==='GET'&&typeof repository.readDashboard==='function'&&['/api/health','/api/state','/api/transactions','/api/month-summary','/api/scenarios','/api/sync-status'].includes(path)){
         const state=path==='/api/state'?(await repository.readDashboard()).state:await repository.readIdentity();
         if(state.owner&&state.owner!==user)return response({error:'This dashboard belongs to another account.'},403);
@@ -309,16 +437,73 @@ export default {
           return response(await repository.queryTransactions({page,limit,search,category,accountId,from,to,review}));
         }
         if(path==='/api/month-summary'){
-          const month=url.searchParams.get('month')||monthInReportingZone();if(!/^\d{4}-(0[1-9]|1[0-2])$/.test(month))throw apiError('Choose a valid reporting month.');
+          const month=url.searchParams.get('month')||monthInReportingZone();if(!validMonth(month))throw apiError('Choose a valid reporting month.');
           return response(await repository.queryMonthSummary(month));
         }
         if(path==='/api/sync-status')return response({job:await syncStatus(env)});
         return response({scenarios:await repository.readScenarios()});
       }
-      const { state, storageSchemaVersion } = await readState(env);
+      const budgetEdit=['/api/budget','/api/budget-reset','/api/income-plan','/api/income-plan-reset','/api/budget-outlook','/api/category-create','/api/category-update','/api/budget-history-revert','/api/budget-stop-future'].includes(path)&&request.method==='POST'&&typeof repository.readBudgetState==='function',ownerEdit=['/api/manual-account','/api/account-update','/api/goal','/api/goal-projection','/api/goal-allocations','/api/goal-allocation-undo','/api/scenario-calculate','/api/scenario','/api/scenario-goal','/api/scenario-budget','/api/property','/api/mortgage','/api/mortgage-projection','/api/balance-snapshot'].includes(path)&&typeof repository.readOwnerState==='function';
+      const { state, storageSchemaVersion } = budgetEdit?{state:(await repository.readBudgetState()).state,storageSchemaVersion:repository.schemaVersion}:ownerEdit?{state:(await repository.readOwnerState()).state,storageSchemaVersion:repository.schemaVersion}:await readState(env);
       if (state.owner && state.owner !== user) return response({ error: 'This dashboard belongs to another account.' }, 403);
       if (path === '/api/health' && request.method === 'GET') return response({ codeVersion: typeof BUILD_ID === 'string' ? BUILD_ID : 'unversioned', schemaVersion: Number.isInteger(storageSchemaVersion) ? storageSchemaVersion : Number.isInteger(state.version) ? state.version : null, configurationReady: ready(env), localOnly: !!env.LOCAL_ONLY, lastSync: state.lastSync || null });
       if (['/api/link-token', '/api/exchange-token', '/api/sync', '/api/scheduled-sync', '/api/sync-status', '/api/disconnect', '/api/delete-history'].includes(path) && !ready(env)) return response({ error: 'Bank connections are disabled. Import CSV files for local-only operation.' }, 503);
+      const budgetMutationResponse=await handleBudgetMutationRoute({request,path,env,user,state,repository,response,apiError,body,categoryCatalog,budgetTemplates,monthInReportingZone,budgetActualsFromRows,budgetActuals,mutateBudget,mutateTransactions,mutateWithReplay,findOperationReplay,checkRevision,budgetMonthKey,resolveBudget,resolveIncomePlan,validMonth,validateBudgetSchedule,monthlyBudgetAmount,normalizeCategory,CATEGORIES});
+      if(budgetMutationResponse)return budgetMutationResponse;
+      if(path==='/api/transaction-split'&&request.method==='GET'){
+        const transactionId=url.searchParams.get('transactionId'),parent=state.transactions.find(row=>row.id===transactionId);if(!parent)throw apiError('Transaction not found.',404);
+        const split=(state.transactionSplits||[]).find(row=>row.transactionId===transactionId)||null,history=[...(state.transactionSplitHistory||[])].reverse().find(row=>row.transactionId===transactionId)||null;return response({transactionId,split,history,status:split&&(split.parentAmount!==parent.amount||split.parentDate!==parent.date||split.parentAccountId!==parent.accountId||split.parentCurrency!==parent.currency)?'needs-review':split?'current':'unsplit'});
+      }
+      if(path==='/api/transaction-split'&&request.method==='POST'){
+        const input=await body(request),replay=await findOperationReplay(env,state,'transaction-split',input);if(replay.found)return response(replay.response);
+        const parent=state.transactions.find(row=>row.id===input.transactionId);if(!parent)throw apiError('Transaction not found.',404);
+        const existing=(state.transactionSplits||[]).find(row=>row.transactionId===parent.id)||null;let next=null;
+        if(input.action==='undo'){
+          const history=(state.transactionSplitHistory||[]).find(row=>row.id===input.historyId&&row.transactionId===parent.id);if(!history)throw apiError('Split history entry not found.',404);
+          if(JSON.stringify(existing)!==JSON.stringify(history.after))throw apiError('This split changed after that edit. Review the current split before undoing it.',409);next=history.before;
+        }else{
+          if(parent.pending)throw apiError('Wait until this transaction is posted before splitting it.');
+          try{next={id:crypto.randomUUID(),transactionId:parent.id,parentAmount:parent.amount,parentDate:parent.date,parentAccountId:parent.accountId,parentCurrency:parent.currency,allocations:validateTransactionSplit(parent,input.allocations,categoryCatalog(state).filter(row=>['expense','income','transfer'].includes(row.kind))),updatedAt:new Date().toISOString(),needsReview:false};}catch(error){throw apiError(error.message);}
+        }
+        const mutation=await mutateWithReplay(env,'transaction-split',input,s=>{checkRevision(s,input);s.transactionSplits||=[];s.transactionSplitHistory||=[];const current=s.transactionSplits.findIndex(row=>row.transactionId===parent.id),before=current>=0?structuredClone(s.transactionSplits[current]):null;if(current>=0)s.transactionSplits.splice(current,1);if(next)s.transactionSplits.push(next);s.transactionSplitHistory.push({id:crypto.randomUUID(),transactionId:parent.id,before,after:next?structuredClone(next):null,revision:(s.revision||0)+1,createdAt:new Date().toISOString()});s.owner=user;},(s,revision)=>({ok:true,revision,split:next}),null,'owner');return response(mutation.result);
+      }
+      if(path==='/api/transaction-reimbursement-candidates'&&request.method==='GET'){
+        const purchase=state.transactions.find(row=>row.id===url.searchParams.get('purchaseId'));if(!purchase||purchase.pending||purchase.amount<=0||purchase.currency!=='USD')throw apiError('Choose a posted USD purchase.',404);
+        const search=String(url.searchParams.get('search')||'').trim().toLocaleLowerCase('en-US').slice(0,100),page=Number(url.searchParams.get('page')||1);if(!Number.isSafeInteger(page)||page<1||page>10000)throw apiError('Choose a valid reimbursement page.');
+        const rows=state.transactions.filter(row=>row.id!==purchase.id&&!row.pending&&row.currency==='USD'&&row.amount<0&&(!search||String(row.merchant||'').toLocaleLowerCase('en-US').includes(search)||String(row.date||'').includes(search))).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
+        return response({transactions:rows.slice((page-1)*50,page*50).map(row=>({id:row.id,merchant:row.merchant,date:row.date,amount:row.amount})),total:rows.length,page,limit:50});
+      }
+      if(path==='/api/transaction-reimbursement'&&request.method==='GET'){
+        const purchaseId=url.searchParams.get('purchaseId');if(!purchaseId)throw apiError('Choose a purchase.');
+        const links=(state.transactionReimbursements||[]).filter(row=>row.reimbursesTransactionId===purchaseId).map(row=>{const refund=state.transactions.find(value=>value.id===row.transactionId);return{...row,status:reimbursementReview(state,row),refund:refund?{merchant:refund.merchant,date:refund.date,amount:refund.amount}:null};});return response({links});
+      }
+      if(path==='/api/transaction-reimbursement'&&request.method==='POST'){
+        const input=await body(request),replay=await findOperationReplay(env,state,'transaction-reimbursement',input);if(replay.found)return response(replay.response);
+        if(input.action==='unlink'){
+          if(input.confirmed!==true||typeof input.id!=='string')throw apiError('Confirm the reimbursement link to remove.');
+          const mutation=await mutateWithReplay(env,'transaction-reimbursement',input,s=>{checkRevision(s,input);const link=(s.transactionReimbursements||[]).find(row=>row.id===input.id&&row.status!=='unlinked');if(!link)throw apiError('Active reimbursement link not found.',404);link.status='unlinked';link.unlinkedAt=new Date().toISOString();s.owner=user;},(s,revision)=>({ok:true,revision,unlinked:input.id}),null,'owner');return response(mutation.result);
+        }
+        const refund=state.transactions.find(row=>row.id===input.transactionId),purchase=state.transactions.find(row=>row.id===input.reimbursesTransactionId);if(!refund||!purchase||refund.id===purchase.id||refund.pending||purchase.pending||input.confirmed!==true||!Number.isSafeInteger(input.amount)||input.amount<=0||refund.amount>=0||purchase.amount<=0||refund.currency!=='USD'||purchase.currency!=='USD')throw apiError('Choose and confirm a posted negative USD reimbursement and positive USD purchase.');
+        const observed=row=>({amount:row.amount,date:row.date,accountId:row.accountId,currency:row.currency});
+        const relation={id:crypto.randomUUID(),transactionId:refund.id,reimbursesTransactionId:purchase.id,amount:input.amount,observedRefund:observed(refund),observedPurchase:observed(purchase),confirmedAt:new Date().toISOString(),status:'user-confirmed'};
+        const mutation=await mutateWithReplay(env,'transaction-reimbursement',input,s=>{checkRevision(s,input);s.transactionReimbursements||=[];const active=s.transactionReimbursements.filter(row=>row.status!=='unlinked');if(active.some(row=>row.transactionId===refund.id&&row.reimbursesTransactionId===purchase.id))throw apiError('This reimbursement is already linked to that purchase.',409);const refundUsed=active.filter(row=>row.transactionId===refund.id).reduce((sum,row)=>sum+row.amount,0),purchaseUsed=active.filter(row=>row.reimbursesTransactionId===purchase.id).reduce((sum,row)=>sum+row.amount,0);if(input.amount>Math.min(-refund.amount-refundUsed,purchase.amount-purchaseUsed))throw apiError('The reimbursement amount exceeds the unlinked balance of the refund or purchase.',409);s.transactionReimbursements.push(relation);s.owner=user;},(s,revision)=>({ok:true,revision,reimbursement:relation}),null,'owner');return response(mutation.result);
+      }
+      if(path==='/api/commitments'&&request.method==='GET'){
+        const from=url.searchParams.get('from')||new Date().toISOString().slice(0,10),to=url.searchParams.get('to')||new Date(Date.now()+90*86400000).toISOString().slice(0,10);if(!validDateOnly(from)||!validDateOnly(to)||from>to)throw apiError('Choose a valid commitment calendar range.');
+        return response({commitments:state.commitments||[],forecast:commitmentForecast(state.commitments||[],from,to,state.commitmentMatches||[],state.transactions||[]),matches:state.commitmentMatches||[],from,to,revision:state.revision||0});
+      }
+      if(path==='/api/commitments'&&request.method==='POST'){
+        const input=await body(request),replay=await findOperationReplay(env,state,'commitments',input);if(replay.found)return response(replay.response);let saved;
+        if(input.action==='cancel'){
+          if(typeof input.id!=='string')throw apiError('Choose a commitment to cancel.');
+        }else{try{saved=validateCommitment(input.commitment);}catch(error){throw apiError(error.message);}if(saved.accountId&&!state.accounts.some(row=>row.id===saved.accountId))throw apiError('Choose an existing account or leave the account unassigned.');}
+        const mutation=await mutateWithReplay(env,'commitments',input,s=>{checkRevision(s,input);s.commitments||=[];if(input.action==='cancel'){const row=s.commitments.find(value=>value.id===input.id);if(!row)throw apiError('Commitment not found.',404);if(row.status==='cancelled')throw apiError('This commitment is already cancelled.',409);row.status='cancelled';row.cancelledAt=new Date().toISOString();row.cancelledFrom=dateInReportingZone();saved=row;}else{const index=s.commitments.findIndex(row=>row.id===input.commitment?.id);if(input.commitment?.id&&index<0)throw apiError('Commitment not found.',404);saved={...saved,id:input.commitment.id||crypto.randomUUID(),createdAt:input.commitment.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),status:'active'};if(index>=0)s.commitments[index]=saved;else s.commitments.push(saved);}s.owner=user;},(s,revision)=>({ok:true,revision,commitment:saved}),null,'owner');return response(mutation.result);
+      }
+      if(path==='/api/commitment-match'&&request.method==='POST'){
+        const input=await body(request),replay=await findOperationReplay(env,state,'commitment-match',input);if(replay.found)return response(replay.response);
+        const commitment=(state.commitments||[]).find(row=>row.id===input.commitmentId&&row.status==='active'),transaction=state.transactions.find(row=>row.id===input.transactionId);if(!commitment)throw apiError('Active commitment not found.',404);let match;try{match=confirmCommitmentMatch(commitment,transaction,{confirmed:input.confirmed===true,dueDate:input.dueDate});}catch(error){throw apiError(error.message);}
+        const mutation=await mutateWithReplay(env,'commitment-match',input,s=>{checkRevision(s,input);s.commitmentMatches||=[];if(s.commitmentMatches.some(row=>row.commitmentId===match.commitmentId&&row.dueDate===match.dueDate||row.transactionId===match.transactionId))throw apiError('This payment or commitment date is already matched. Review the existing match first.',409);s.commitmentMatches.push(match);s.owner=user;},(s,revision)=>({ok:true,revision,match}),null,'owner');return response(mutation.result);
+      }
       if (path === '/api/state' && request.method === 'GET') return response(await publicState(state, env));
       if(path==='/api/sync-status'&&request.method==='GET')return response({job:await syncStatus(env)});
       if(path==='/api/transactions'&&request.method==='GET'){
@@ -330,8 +515,8 @@ export default {
       if(path==='/api/balance-snapshot'&&request.method==='POST'){
         const input=await body(request),date=dateInReportingZone(new Date());if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before recording a balance snapshot.',409);
         const existing=(state.balanceSheetSnapshots||[]).find(snapshot=>snapshot.date===date);if(existing)return response({ok:true,existing:true,snapshot:existing,revision:state.revision||0});
-        const summary=summarizeBalanceSheet(state.accounts,state.items,summarizeProperties(state.properties||[],state.mortgages||[],state.accounts),new Date()),snapshot=makeBalanceSheetSnapshot(summary,date);
-        const saved=await mutate(env,s=>{checkRevision(s,input);s.balanceSheetSnapshots||=[];if(!s.balanceSheetSnapshots.some(row=>row.date===date))s.balanceSheetSnapshots.push(snapshot);});return response({ok:true,existing:false,snapshot,revision:saved.revision});
+        const summary=summarizeBalanceSheet(state.accounts,state.items,summarizeProperties(state.properties||[],state.mortgages||[],state.accounts,state.items||[]),new Date()),snapshot=makeBalanceSheetSnapshot(summary,date);
+        const saved=await mutateOwner(env,s=>{checkRevision(s,input);s.balanceSheetSnapshots||=[];if(!s.balanceSheetSnapshots.some(row=>row.date===date))s.balanceSheetSnapshots.push(snapshot);});return response({ok:true,existing:false,snapshot,revision:saved.revision});
       }
       if(path==='/api/scenario-calculate'&&request.method==='POST'){
         const input=await body(request),scenarioInput=input.input||{},linkedGoalId=input.linkedGoalId||scenarioInput.linkedGoalId||null,asOf=new Date(),{snapshot}=scenarioFunding(state,linkedGoalId,asOf),result=calculateHomeScenario(scenarioInput,snapshot);
@@ -340,59 +525,59 @@ export default {
       if(path==='/api/scenario'&&request.method==='POST'){
         const input=await body(request);if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before saving a scenario.',409);
         if(input.action==='archive'||input.action==='restore'||input.action==='rename'||input.action==='duplicate'){
-          let scenario;const saved=await mutate(env,s=>{checkRevision(s,input);s.scenarios||=[];const existing=s.scenarios.find(row=>row.id===input.id);if(!existing)throw apiError('Scenario not found.',404);if(input.action==='rename'){const name=typeof input.name==='string'?input.name.trim():'';if(!name||name.length>100)throw apiError('Enter a scenario name up to 100 characters.');existing.name=name;existing.updatedAt=new Date().toISOString();scenario=existing;}else if(input.action==='archive'||input.action==='restore'){existing.archivedAt=input.action==='archive'?existing.archivedAt||new Date().toISOString():null;existing.updatedAt=new Date().toISOString();scenario=existing;}else{scenario={...existing,id:crypto.randomUUID(),name:(typeof input.name==='string'&&input.name.trim()?input.name.trim():existing.name+' copy').slice(0,100),createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),version:1,versions:[],archivedAt:null};s.scenarios.push(scenario);}});return response({ok:true,revision:saved.revision,scenario});
+          let scenario;const mutation=await mutateWithReplay(env,'scenario',input,s=>{checkRevision(s,input);s.scenarios||=[];const existing=s.scenarios.find(row=>row.id===input.id);if(!existing)throw apiError('Scenario not found.',404);if(input.action==='rename'){const name=typeof input.name==='string'?input.name.trim():'';if(!name||name.length>100)throw apiError('Enter a scenario name up to 100 characters.');existing.name=name;existing.updatedAt=new Date().toISOString();scenario=existing;}else if(input.action==='archive'||input.action==='restore'){existing.archivedAt=input.action==='archive'?existing.archivedAt||new Date().toISOString():null;existing.updatedAt=new Date().toISOString();scenario=existing;}else{scenario={...existing,id:crypto.randomUUID(),name:(typeof input.name==='string'&&input.name.trim()?input.name.trim():existing.name+' copy').slice(0,100),createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),version:1,versions:[],archivedAt:null};s.scenarios.push(scenario);}},(s,revision)=>({ok:true,revision,scenario}),null,'owner');return response(mutation.result);
         }
         const scenarioInput=input.input||{},validation=validateScenarioInput(scenarioInput);if(validation)throw apiError(validation);const goalId=input.linkedGoalId||scenarioInput.linkedGoalId||null,asOf=new Date(),{snapshot:fundingSnapshot}=scenarioFunding(state,goalId,asOf),result=calculateHomeScenario(scenarioInput,fundingSnapshot);if(!result.available)throw apiError(result.error||'Scenario inputs are incomplete.');
-        let savedScenario;const saved=await mutate(env,s=>{checkRevision(s,input);s.scenarios||=[];const existing=input.id?s.scenarios.find(row=>row.id===input.id):null;if(input.id&&!existing)throw apiError('Scenario not found.',404);const now=new Date().toISOString(),versions=[...(existing?.versions||[])];if(existing)versions.push({version:existing.version||1,inputs:existing.inputs,fundingSnapshot:existing.fundingSnapshot,result:existing.result,calculationVersion:existing.calculationVersion,savedAt:existing.updatedAt});savedScenario={...(existing||{}),id:existing?.id||crypto.randomUUID(),name:scenarioInput.name.trim(),inputs:{...scenarioInput,linkedGoalId:goalId},linkedGoalId:goalId,fundingSnapshot,result,inputVersion:1,version:(existing?.version||0)+1,versions,calculationVersion:SCENARIO_CALCULATION_VERSION,createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};if(existing)Object.assign(existing,savedScenario);else s.scenarios.push(savedScenario);s.owner=user;});return response({ok:true,revision:saved.revision,scenario:savedScenario});
+        let savedScenario;const mutation=await mutateWithReplay(env,'scenario',input,s=>{checkRevision(s,input);s.scenarios||=[];const existing=input.id?s.scenarios.find(row=>row.id===input.id):null;if(input.id&&!existing)throw apiError('Scenario not found.',404);const now=new Date().toISOString(),versions=[...(existing?.versions||[])];if(existing)versions.push({version:existing.version||1,inputs:existing.inputs,fundingSnapshot:existing.fundingSnapshot,result:existing.result,calculationVersion:existing.calculationVersion,savedAt:existing.updatedAt});savedScenario={...(existing||{}),id:existing?.id||crypto.randomUUID(),name:scenarioInput.name.trim(),inputs:{...scenarioInput,linkedGoalId:goalId},linkedGoalId:goalId,fundingSnapshot,result,inputVersion:1,version:(existing?.version||0)+1,versions,calculationVersion:SCENARIO_CALCULATION_VERSION,createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};if(existing)Object.assign(existing,savedScenario);else s.scenarios.push(savedScenario);s.owner=user;},(s,revision)=>({ok:true,revision,scenario:savedScenario}),null,'owner');return response(mutation.result);
       }
       if(path==='/api/scenario-goal'&&request.method==='POST'){
         const input=await body(request);if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before linking a goal.',409);const scenario=(state.scenarios||[]).find(row=>row.id===input.scenarioId&&!row.archivedAt);if(!scenario)throw apiError('Scenario not found.',404);
         requireCompleteSavedScenario(scenario);
         if(!validDateOnly(scenario.inputs.targetDate))throw apiError('Add a target date to the scenario before creating a savings goal.');if(!Number.isSafeInteger(scenario.result.allInAcquisitionFunding)||scenario.result.allInAcquisitionFunding>100_000_000_000)throw apiError('The scenario target is above the supported savings-goal limit.');let goalId;
-        const saved=await mutate(env,s=>{checkRevision(s,input);const live=s.scenarios.find(row=>row.id===scenario.id&&!row.archivedAt);if(!live)throw apiError('Scenario is no longer active.',409);s.goals||=[];const goal=live.linkedGoalId?s.goals.find(row=>row.id===live.linkedGoalId&&!row.archivedAt):null;if(input.action==='update'){if(!goal)throw apiError('This scenario has no active linked goal.',409);goal.target=live.result.allInAcquisitionFunding;goal.targetDate=live.inputs.targetDate;goal.updatedAt=new Date().toISOString();goalId=goal.id;}else{if(goal)throw apiError('This scenario already has a linked goal. Use update to propose its new target.',409);const now=new Date().toISOString();const created={id:crypto.randomUUID(),name:(live.name+' down payment').slice(0,100),target:live.result.allInAcquisitionFunding,targetDate:live.inputs.targetDate,priority:100,monthlyContribution:0,apyBps:0,apyAsOf:null,createdAt:now,updatedAt:now,archivedAt:null};s.goals.push(created);live.linkedGoalId=created.id;live.inputs.linkedGoalId=created.id;goalId=created.id;}live.updatedAt=new Date().toISOString();});return response({ok:true,revision:saved.revision,goalId});
+        const mutation=await mutateWithReplay(env,'scenario-goal',input,s=>{checkRevision(s,input);const live=s.scenarios.find(row=>row.id===scenario.id&&!row.archivedAt);if(!live)throw apiError('Scenario is no longer active.',409);s.goals||=[];const goal=live.linkedGoalId?s.goals.find(row=>row.id===live.linkedGoalId&&!row.archivedAt):null;if(input.action==='update'){if(!goal)throw apiError('This scenario has no active linked goal.',409);goal.target=live.result.allInAcquisitionFunding;goal.targetDate=live.inputs.targetDate;goal.updatedAt=new Date().toISOString();goalId=goal.id;}else{if(goal)throw apiError('This scenario already has a linked goal. Use update to propose its new target.',409);const now=new Date().toISOString();const created={id:crypto.randomUUID(),name:(live.name+' down payment').slice(0,100),target:live.result.allInAcquisitionFunding,targetDate:live.inputs.targetDate,priority:100,monthlyContribution:0,apyBps:0,apyAsOf:null,createdAt:now,updatedAt:now,archivedAt:null};s.goals.push(created);live.linkedGoalId=created.id;live.inputs.linkedGoalId=created.id;goalId=created.id;}live.updatedAt=new Date().toISOString();},(s,revision)=>({ok:true,revision,goalId}),null,'owner');return response(mutation.result);
       }
       if(path==='/api/scenario-budget'&&request.method==='POST'){
-        const input=await body(request);if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before creating a budget.',409);const scenario=(state.scenarios||[]).find(row=>row.id===input.scenarioId&&!row.archivedAt);if(!scenario)throw apiError('Scenario not found.',404);requireCompleteSavedScenario(scenario);const amount=scenario.result.ownershipOutflow;if(!Number.isSafeInteger(amount)||amount<0||amount>100_000_000)throw apiError('The projected housing outflow is outside the monthly budget limit.');const month=monthInReportingZone(),housing=categoryCatalog(state).find(category=>category.name==='Housing'&&category.kind==='expense'&&!category.archivedAt);if(!housing)throw apiError('Housing budget category is unavailable.');const saved=await mutate(env,s=>{checkRevision(s,input);s.budgetTemplates=budgetTemplates(s);const index=s.budgetTemplates.findIndex(entry=>entry.categoryId===housing.id&&entry.effectiveFrom===month),template={categoryId:housing.id,amount,effectiveFrom:month};if(index>=0)s.budgetTemplates[index]=template;else s.budgetTemplates.push(template);s.budgets={...(s.budgets||{}),Housing:amount};});return response({ok:true,revision:saved.revision,amount,month});
+        const input=await body(request);if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before creating a budget.',409);const scenario=(state.scenarios||[]).find(row=>row.id===input.scenarioId&&!row.archivedAt);if(!scenario)throw apiError('Scenario not found.',404);requireCompleteSavedScenario(scenario);const amount=scenario.result.ownershipOutflow;if(!Number.isSafeInteger(amount)||amount<0||amount>100_000_000)throw apiError('The projected housing outflow is outside the monthly budget limit.');const month=monthInReportingZone(),housing=categoryCatalog(state).find(category=>category.name==='Housing'&&category.kind==='expense'&&!category.archivedAt);if(!housing)throw apiError('Housing budget category is unavailable.');const mutation=await mutateWithReplay(env,'scenario-budget',input,s=>{checkRevision(s,input);s.budgetTemplates=budgetTemplates(s);const index=s.budgetTemplates.findIndex(entry=>entry.categoryId===housing.id&&entry.effectiveFrom===month),template={categoryId:housing.id,amount,effectiveFrom:month};if(index>=0)s.budgetTemplates[index]=template;else s.budgetTemplates.push(template);s.budgets={...(s.budgets||{}),Housing:amount};},(s,revision)=>({ok:true,revision,amount,month}),null,'budget');return response(mutation.result);
       }
       if(path==='/api/property'&&request.method==='POST'){
         const input=await body(request);if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before saving a property.',409);
         if(input.action==='archive'||input.action==='restore'){
-          const saved=await mutate(env,s=>{checkRevision(s,input);const property=s.properties?.find(row=>row.id===input.id);if(!property)throw apiError('Property not found.',404);property.archivedAt=input.action==='archive'?property.archivedAt||new Date().toISOString():null;property.updatedAt=new Date().toISOString();});
-          return response({ok:true,revision:saved.revision});
+          const mutation=await mutateWithReplay(env,'property',input,s=>{checkRevision(s,input);const property=s.properties?.find(row=>row.id===input.id);if(!property)throw apiError('Property not found.',404);property.archivedAt=input.action==='archive'?property.archivedAt||new Date().toISOString():null;property.updatedAt=new Date().toISOString();},(s,revision)=>({ok:true,revision}),null,'owner');
+          return response(mutation.result);
         }
         const name=typeof input.name==='string'?input.name.trim():'';
-        if(!name||name.length>100||input.address!==undefined&&(typeof input.address!=='string'||input.address.length>300)||input.ownershipBps!==undefined&&(!Number.isSafeInteger(input.ownershipBps)||input.ownershipBps<1||input.ownershipBps>10000)||input.valuation!==null&&input.valuation!==undefined&&(!Number.isSafeInteger(input.valuation)||input.valuation<0||input.valuation>100_000_000_000_000)||input.valuation!==null&&input.valuation!==undefined&&!validDateOnly(input.valuationAsOf)||input.valuationSource!==undefined&&!['owner_estimate','appraisal','statement','other'].includes(input.valuationSource))throw apiError('Enter a valid property name, ownership share, and observed valuation.');
-        let property;const saved=await mutate(env,s=>{checkRevision(s,input);s.properties||=[];const existing=input.id?s.properties.find(row=>row.id===input.id):null;if(input.id&&!existing)throw apiError('Property not found.',404);const now=new Date().toISOString();property={...(existing||{}),id:existing?.id||crypto.randomUUID(),name,address:input.address?.trim()||'',ownershipBps:input.ownershipBps??10000,valuation:input.valuation??null,valuationAsOf:input.valuation==null?null:input.valuationAsOf,valuationSource:input.valuation==null?null:input.valuationSource||'owner_estimate',createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};if(existing)Object.assign(existing,property);else s.properties.push(property);s.owner=user;});return response({ok:true,revision:saved.revision,property});
+        if(!name||name.length>100||input.address!==undefined&&(typeof input.address!=='string'||input.address.length>300)||input.ownershipBps!==undefined&&(!Number.isSafeInteger(input.ownershipBps)||input.ownershipBps<1||input.ownershipBps>10000)||input.valuation!==null&&input.valuation!==undefined&&(!Number.isSafeInteger(input.valuation)||input.valuation<0||input.valuation>100_000_000_000_000)||input.valuation!==null&&input.valuation!==undefined&&(!validDateOnly(input.valuationAsOf)||input.valuationAsOf>dateInReportingZone())||input.valuationSource!==undefined&&!['owner_estimate','appraisal','statement','other'].includes(input.valuationSource))throw apiError('Enter a valid property name, ownership share, and observed valuation.');
+        let property;const mutation=await mutateWithReplay(env,'property',input,s=>{checkRevision(s,input);s.properties||=[];const existing=input.id?s.properties.find(row=>row.id===input.id):null;if(input.id&&!existing)throw apiError('Property not found.',404);const now=new Date().toISOString();property={...(existing||{}),id:existing?.id||crypto.randomUUID(),name,address:input.address?.trim()||'',ownershipBps:input.ownershipBps??10000,valuation:input.valuation??null,valuationAsOf:input.valuation==null?null:input.valuationAsOf,valuationSource:input.valuation==null?null:input.valuationSource||'owner_estimate',createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};if(existing)Object.assign(existing,property);else s.properties.push(property);s.owner=user;},(s,revision)=>({ok:true,revision,property}),null,'owner');return response(mutation.result);
       }
       if(path==='/api/mortgage'&&request.method==='POST'){
         const input=await body(request);if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before saving a mortgage.',409);
         if(input.action==='archive'||input.action==='restore'){
-          const saved=await mutate(env,s=>{checkRevision(s,input);const mortgage=s.mortgages?.find(row=>row.id===input.id);if(!mortgage)throw apiError('Mortgage not found.',404);mortgage.archivedAt=input.action==='archive'?mortgage.archivedAt||new Date().toISOString():null;mortgage.updatedAt=new Date().toISOString();});return response({ok:true,revision:saved.revision});
+          const mutation=await mutateWithReplay(env,'mortgage',input,s=>{checkRevision(s,input);const mortgage=s.mortgages?.find(row=>row.id===input.id);if(!mortgage)throw apiError('Mortgage not found.',404);mortgage.archivedAt=input.action==='archive'?mortgage.archivedAt||new Date().toISOString():null;mortgage.updatedAt=new Date().toISOString();},(s,revision)=>({ok:true,revision}),null,'owner');return response(mutation.result);
         }
         const property=(state.properties||[]).find(row=>row.id===input.propertyId&&!row.archivedAt),loanTypes=['fixed','adjustable','interest_only','balloon','heloc','other'],loanType=input.loanType||'fixed',lender=typeof input.lender==='string'?input.lender.trim():'';
         const rate=String(input.annualRatePercent??'');const components=input.components||{};const componentNames=['principalInterest','propertyTax','homeownersInsurance','mortgageInsurance','hoa','otherRequired','extraPrincipal'];
-        if(!property||lender.length>100||!loanTypes.includes(loanType)||input.statementBalance!==null&&input.statementBalance!==undefined&&(!Number.isSafeInteger(input.statementBalance)||input.statementBalance<0||input.statementBalance>100_000_000_000_000)||input.statementBalance!==null&&input.statementBalance!==undefined&&!validDateOnly(input.balanceAsOf)||input.originalPrincipal!==null&&input.originalPrincipal!==undefined&&(!Number.isSafeInteger(input.originalPrincipal)||input.originalPrincipal<=0)||input.originationDate!==null&&input.originationDate!==undefined&&!validDateOnly(input.originationDate)||rate.length>16||rate!==''&&(!/^\d{1,3}(?:\.\d{1,8})?$/.test(rate)||Number(rate)>100)||input.termMonths!==null&&input.termMonths!==undefined&&(!Number.isSafeInteger(input.termMonths)||input.termMonths<1||input.termMonths>1200)||componentNames.some(key=>components[key]!==undefined&&components[key]!==null&&(!Number.isSafeInteger(components[key])||components[key]<0))||input.linkedAccountId!==null&&input.linkedAccountId!==undefined&&!state.accounts.some(account=>account.id===input.linkedAccountId&&!account.archivedAt&&['credit','loan','liability','mortgage'].includes(String(account.type||'').toLowerCase()))||input.ownerDebtShareBps!==null&&input.ownerDebtShareBps!==undefined&&(!Number.isSafeInteger(input.ownerDebtShareBps)||input.ownerDebtShareBps<0||input.ownerDebtShareBps>10000))throw apiError('Enter a valid property, loan type, observed balance, terms, payment components, and liability link.');
+        if(!property||lender.length>100||!loanTypes.includes(loanType)||input.statementBalance!==null&&input.statementBalance!==undefined&&(!Number.isSafeInteger(input.statementBalance)||input.statementBalance<0||input.statementBalance>100_000_000_000_000)||input.statementBalance!==null&&input.statementBalance!==undefined&&(!validDateOnly(input.balanceAsOf)||input.balanceAsOf>dateInReportingZone())||input.originalPrincipal!==null&&input.originalPrincipal!==undefined&&(!Number.isSafeInteger(input.originalPrincipal)||input.originalPrincipal<=0)||input.originationDate!==null&&input.originationDate!==undefined&&!validDateOnly(input.originationDate)||rate.length>16||rate!==''&&(!/^\d{1,3}(?:\.\d{1,8})?$/.test(rate)||Number(rate)>100)||input.termMonths!==null&&input.termMonths!==undefined&&(!Number.isSafeInteger(input.termMonths)||input.termMonths<1||input.termMonths>1200)||componentNames.some(key=>components[key]!==undefined&&components[key]!==null&&(!Number.isSafeInteger(components[key])||components[key]<0))||input.linkedAccountId!==null&&input.linkedAccountId!==undefined&&!state.accounts.some(account=>account.id===input.linkedAccountId&&!account.archivedAt&&['credit','loan','liability','mortgage'].includes(String(account.type||'').toLowerCase()))||input.ownerDebtShareBps!==null&&input.ownerDebtShareBps!==undefined&&(!Number.isSafeInteger(input.ownerDebtShareBps)||input.ownerDebtShareBps<0||input.ownerDebtShareBps>10000))throw apiError('Enter a valid property, loan type, observed balance, terms, payment components, and liability link.');
         if(property.ownershipBps<10000&&input.ownerDebtShareBps==null)throw apiError('For a partially owned property, enter your explicit share of this loan.');
         if(input.linkedAccountId&&(state.mortgages||[]).some(mortgage=>mortgage.id!==input.id&&!mortgage.archivedAt&&mortgage.linkedAccountId===input.linkedAccountId))throw apiError('That liability is already linked to another mortgage record.');
-        let mortgage,statementChanged=false;const now=new Date().toISOString();const saved=await mutate(env,s=>{checkRevision(s,input);s.mortgages||=[];s.mortgageSnapshots||=[];const existing=input.id?s.mortgages.find(row=>row.id===input.id):null;if(input.id&&!existing)throw apiError('Mortgage not found.',404);statementChanged=!existing||existing.statementBalance!==(input.statementBalance??null)||existing.balanceAsOf!==(input.statementBalance==null?null:input.balanceAsOf);mortgage={...(existing||{}),id:existing?.id||crypto.randomUUID(),propertyId:property.id,lender,loanType,linkedAccountId:input.linkedAccountId||null,ownerDebtShareBps:input.ownerDebtShareBps??(property.ownershipBps===10000?10000:null),statementBalance:input.statementBalance??null,balanceAsOf:input.statementBalance==null?null:input.balanceAsOf,originalPrincipal:input.originalPrincipal??null,originationDate:input.originationDate||null,annualRatePercent:rate||null,termMonths:input.termMonths??null,components:Object.fromEntries(componentNames.map(key=>[key,components[key]??null])),taxInsuranceEscrowed:input.taxInsuranceEscrowed===true,createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};if(existing)Object.assign(existing,mortgage);else s.mortgages.push(mortgage);if(mortgage.statementBalance!==null&&statementChanged)s.mortgageSnapshots.push({id:crypto.randomUUID(),mortgageId:mortgage.id,balance:mortgage.statementBalance,asOf:mortgage.balanceAsOf,recordedAt:now,source:'manual'});s.owner=user;});return response({ok:true,revision:saved.revision,mortgage});
+        let mortgage,statementChanged=false;const now=new Date().toISOString();const mutation=await mutateWithReplay(env,'mortgage',input,s=>{checkRevision(s,input);s.mortgages||=[];s.mortgageSnapshots||=[];const existing=input.id?s.mortgages.find(row=>row.id===input.id):null;if(input.id&&!existing)throw apiError('Mortgage not found.',404);statementChanged=!existing||existing.statementBalance!==(input.statementBalance??null)||existing.balanceAsOf!==(input.statementBalance==null?null:input.balanceAsOf);mortgage={...(existing||{}),id:existing?.id||crypto.randomUUID(),propertyId:property.id,lender,loanType,linkedAccountId:input.linkedAccountId||null,ownerDebtShareBps:input.ownerDebtShareBps??(property.ownershipBps===10000?10000:null),statementBalance:input.statementBalance??null,balanceAsOf:input.statementBalance==null?null:input.balanceAsOf,originalPrincipal:input.originalPrincipal??null,originationDate:input.originationDate||null,annualRatePercent:rate||null,termMonths:input.termMonths??null,components:Object.fromEntries(componentNames.map(key=>[key,components[key]??null])),taxInsuranceEscrowed:input.taxInsuranceEscrowed===true,createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};if(existing)Object.assign(existing,mortgage);else s.mortgages.push(mortgage);if(mortgage.statementBalance!==null&&statementChanged)s.mortgageSnapshots.push({id:crypto.randomUUID(),mortgageId:mortgage.id,balance:mortgage.statementBalance,asOf:mortgage.balanceAsOf,recordedAt:now,source:'manual'});s.owner=user;},(s,revision)=>({ok:true,revision,mortgage}),null,'owner');return response(mutation.result);
       }
       if(path==='/api/mortgage-projection'&&request.method==='POST'){
         const input=await body(request),mortgage=(state.mortgages||[]).find(row=>row.id===input.id&&!row.archivedAt);if(!mortgage)throw apiError('Mortgage not found.',404);
         const base=mortgage.loanType==='fixed'&&mortgage.originalPrincipal!==null&&mortgage.annualRatePercent!==null&&mortgage.termMonths!==null?compareAmortization({principal:mortgage.originalPrincipal,annualRatePercent:mortgage.annualRatePercent,termMonths:mortgage.termMonths,extraPrincipal:input.extraPrincipal??mortgage.components?.extraPrincipal??0}):{available:false,reason:'Projection unavailable for this loan type or incomplete original terms.'};
-        const mortgageSummary=summarizeProperties(state.properties||[],state.mortgages||[],state.accounts).properties.find(property=>property.id===mortgage.propertyId)?.mortgages.find(row=>row.id===mortgage.id);return response({projection:base,statementBalance:mortgage.statementBalance,balanceAsOf:mortgage.balanceAsOf,projectedBalanceAtStatement:mortgageSummary?.projectedBalanceAtStatement??null,balanceVariance:mortgageSummary?.balanceVariance??null,calculationVersion:'fixed-monthly-v1'});
+        const mortgageSummary=summarizeProperties(state.properties||[],state.mortgages||[],state.accounts,state.items||[]).properties.find(property=>property.id===mortgage.propertyId)?.mortgages.find(row=>row.id===mortgage.id);return response({projection:base,statementBalance:mortgage.statementBalance,balanceAsOf:mortgage.balanceAsOf,projectedBalanceAtStatement:mortgageSummary?.projectedBalanceAtStatement??null,balanceVariance:mortgageSummary?.balanceVariance??null,calculationVersion:'fixed-monthly-v1'});
       }
       if(path==='/api/goal'&&request.method==='POST'){
         const input=await body(request),name=typeof input.name==='string'?input.name.trim():'';
         if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before saving a goal.',409);
         if(input.action==='archive'){
-          const saved=await mutate(env,s=>{checkRevision(s,input);const goal=s.goals?.find(value=>value.id===input.id);if(!goal)throw apiError('Savings goal not found.',404);goal.archivedAt=goal.archivedAt||new Date().toISOString();goal.updatedAt=goal.archivedAt;for(const allocation of s.goalAllocations||[])if(allocation.goalId===goal.id&&allocation.active!==false)allocation.active=false;});
-          return response({ok:true,revision:saved.revision});
+          const mutation=await mutateWithReplay(env,'goal',input,s=>{checkRevision(s,input);const goal=s.goals?.find(value=>value.id===input.id);if(!goal)throw apiError('Savings goal not found.',404);goal.archivedAt=goal.archivedAt||new Date().toISOString();goal.updatedAt=goal.archivedAt;for(const allocation of s.goalAllocations||[])if(allocation.goalId===goal.id&&allocation.active!==false)allocation.active=false;},(s,revision)=>({ok:true,revision}),null,'owner');
+          return response(mutation.result);
         }
         const target=input.target,priority=input.priority??100,monthlyContribution=input.monthlyContribution??0,apyBps=input.apyBps??0;
         if(!name||name.length>100||Object.hasOwn(Object.prototype,name)||!Number.isSafeInteger(target)||target<0||target>100_000_000_000||!validDateOnly(input.targetDate)||!Number.isSafeInteger(priority)||priority<0||priority>1000||!Number.isSafeInteger(monthlyContribution)||monthlyContribution<0||monthlyContribution>100_000_000||!Number.isSafeInteger(apyBps)||apyBps<0||apyBps>3000||apyBps>0&&!validDateOnly(input.apyAsOf))throw apiError('Enter a goal name, target, target date, priority, and valid projection assumptions.');
         let savedGoal;
-        const saved=await mutate(env,s=>{checkRevision(s,input);s.goals||=[];const existing=input.id?s.goals.find(goal=>goal.id===input.id):null;if(input.id&&!existing)throw apiError('Savings goal not found.',404);const now=new Date().toISOString();savedGoal={...(existing||{}),id:existing?.id||crypto.randomUUID(),name,target,targetDate:input.targetDate,priority,monthlyContribution,apyBps,apyAsOf:apyBps?input.apyAsOf:null,createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};if(existing)Object.assign(existing,savedGoal);else s.goals.push(savedGoal);s.owner=user;});
-        return response({ok:true,revision:saved.revision,goal:savedGoal,summary:summarizeGoals(saved.goals||[],saved.goalAllocations||[],saved.accounts,saved.items,new Date()).goals.find(goal=>goal.id===savedGoal.id)});
+        const mutation=await mutateWithReplay(env,'goal',input,s=>{checkRevision(s,input);s.goals||=[];const existing=input.id?s.goals.find(goal=>goal.id===input.id):null;if(input.id&&!existing)throw apiError('Savings goal not found.',404);const now=new Date().toISOString();savedGoal={...(existing||{}),id:existing?.id||crypto.randomUUID(),name,target,targetDate:input.targetDate,priority,monthlyContribution,apyBps,apyAsOf:apyBps?input.apyAsOf:null,createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};if(existing)Object.assign(existing,savedGoal);else s.goals.push(savedGoal);s.owner=user;},(s,revision)=>({ok:true,revision,goal:savedGoal,summary:summarizeGoals(s.goals||[],s.goalAllocations||[],s.accounts,s.items,new Date()).goals.find(goal=>goal.id===savedGoal.id)}),null,'owner');
+        return response(mutation.result);
       }
       if(path==='/api/goal-projection'&&request.method==='POST'){
         const input=await body(request),goal=(state.goals||[]).find(value=>value.id===input.id&&!value.archivedAt);if(!goal)throw apiError('Savings goal not found.',404);
@@ -406,17 +591,18 @@ export default {
         const otherReservations=new Map();for(const allocation of state.goalAllocations||[]){if(allocation.active===false||allocation.goalId===goal.id)continue;const reserved=otherReservations.get(allocation.accountId)||0;otherReservations.set(allocation.accountId,reserved+allocation.amount);}
         for(const row of requested){if(!eligible.has(row.accountId))throw apiError('Goals can use only fresh, included USD cash accounts. Investment, retirement, HSA, credit, archived, stale, and unknown-balance accounts are not eligible.');const available=eligible.get(row.accountId)-(otherReservations.get(row.accountId)||0);if(row.amount>available)throw apiError('This allocation exceeds the account’s fresh unallocated cash balance.',409);}
         const batchId=crypto.randomUUID(),now=new Date().toISOString();let newIds=[];
-        const saved=await mutate(env,s=>{checkRevision(s,input);const live=s.goals.find(value=>value.id===goal.id&&!value.archivedAt);if(!live)throw apiError('Savings goal is no longer active.',409);s.goalAllocations||=[];s.goalAllocationLedger||=[];const before=s.goalAllocations.filter(value=>value.goalId===goal.id&&value.active!==false).map(value=>({...value}));for(const value of s.goalAllocations)if(value.goalId===goal.id&&value.active!==false)value.active=false;const after=requested.map(row=>({id:crypto.randomUUID(),goalId:goal.id,accountId:row.accountId,amount:row.amount,createdAt:now,active:true}));s.goalAllocations.push(...after);newIds=after.map(value=>value.id);s.goalAllocationLedger.push({id:batchId,goalId:goal.id,createdAt:now,before,afterIds:newIds,undoneAt:null});});
-        return response({ok:true,batchId,revision:saved.revision,summary:summarizeGoals(saved.goals||[],saved.goalAllocations||[],saved.accounts,saved.items,new Date()).goals.find(value=>value.id===goal.id)});
+        const mutation=await mutateWithReplay(env,'goal-allocations',input,s=>{checkRevision(s,input);const live=s.goals.find(value=>value.id===goal.id&&!value.archivedAt);if(!live)throw apiError('Savings goal is no longer active.',409);s.goalAllocations||=[];s.goalAllocationLedger||=[];const before=s.goalAllocations.filter(value=>value.goalId===goal.id&&value.active!==false).map(value=>({...value}));for(const value of s.goalAllocations)if(value.goalId===goal.id&&value.active!==false)value.active=false;const after=requested.map(row=>({id:crypto.randomUUID(),goalId:goal.id,accountId:row.accountId,amount:row.amount,createdAt:now,active:true}));s.goalAllocations.push(...after);newIds=after.map(value=>value.id);s.goalAllocationLedger.push({id:batchId,goalId:goal.id,createdAt:now,before,afterIds:newIds,undoneAt:null});},(s,revision)=>({ok:true,batchId,revision,summary:summarizeGoals(s.goals||[],s.goalAllocations||[],s.accounts,s.items,new Date()).goals.find(value=>value.id===goal.id)}),null,'owner');
+        return response(mutation.result);
       }
       if(path==='/api/goal-allocation-undo'&&request.method==='POST'){
-        const input=await body(request),batch=state.goalAllocationLedger?.find(value=>value.id===input.batchId&&!value.undoneAt);
+        const input=await body(request),replay=await findOperationReplay(env,state,'goal-allocation-undo',input);if(replay.found)return response(replay.response);
+        const batch=state.goalAllocationLedger?.find(value=>value.id===input.batchId&&!value.undoneAt);
         if(!Number.isSafeInteger(input.revision))throw apiError('Refresh this dashboard before undoing goal allocations.',409);if(!batch)throw apiError('Goal allocation undo record not found.',404);
         const current=(state.goalAllocations||[]).filter(value=>value.goalId===batch.goalId&&value.active!==false).map(value=>value.id).sort(),expected=[...batch.afterIds].sort();if(JSON.stringify(current)!==JSON.stringify(expected))throw apiError('This goal’s allocations changed after that edit. Review the current allocations before changing them.',409);
         const eligible=new Map(eligibleCashAccounts(state.accounts,state.items,new Date()).filter(account=>account.eligible).map(account=>[account.accountId,account.balance])),other=new Map();for(const allocation of state.goalAllocations||[])if(allocation.active!==false&&allocation.goalId!==batch.goalId)other.set(allocation.accountId,(other.get(allocation.accountId)||0)+allocation.amount);
         for(const allocation of batch.before){if(!eligible.has(allocation.accountId)||allocation.amount>eligible.get(allocation.accountId)-(other.get(allocation.accountId)||0))throw apiError('The previous allocation no longer fits verified cash balances. Refresh the accounts before undoing.',409);}
-        const saved=await mutate(env,s=>{checkRevision(s,input);for(const allocation of s.goalAllocations)if(batch.afterIds.includes(allocation.id))allocation.active=false;for(const prior of batch.before){const live=s.goalAllocations.find(value=>value.id===prior.id);if(live)live.active=true;else s.goalAllocations.push({...prior,active:true});}const entry=s.goalAllocationLedger.find(value=>value.id===batch.id);entry.undoneAt=new Date().toISOString();});
-        return response({ok:true,revision:saved.revision,undone:batch.afterIds.length});
+        const saved=await mutateWithReplay(env,'goal-allocation-undo',input,s=>{checkRevision(s,input);for(const allocation of s.goalAllocations)if(batch.afterIds.includes(allocation.id))allocation.active=false;for(const prior of batch.before){const live=s.goalAllocations.find(value=>value.id===prior.id);if(live)live.active=true;else s.goalAllocations.push({...prior,active:true});}const entry=s.goalAllocationLedger.find(value=>value.id===batch.id);entry.undoneAt=new Date().toISOString();},(s,revision)=>({ok:true,revision,undone:batch.afterIds.length}),null,'owner');
+        return response(saved.result);
       }
       if (path === '/api/link-token' && request.method === 'POST') {
         const input = await body(request);
@@ -438,6 +624,7 @@ export default {
       }
       if (path === '/api/exchange-token' && request.method === 'POST') {
         const input = await body(request);
+        if(state.owner&&state.owner!==user)throw apiError('Access denied.',403);
         if (typeof input.public_token !== 'string' || input.public_token.length > 500) throw apiError('Invalid bank authorization.');
         const product = input.product || 'transactions';
         if (!['transactions', 'investments'].includes(product)) throw apiError('Choose bank or investment accounts.');
@@ -459,27 +646,29 @@ export default {
       if (path === '/api/category' && request.method === 'POST') {
         const input = await body(request);
         const category = categoryCatalog(state).find(c => c.id === input.categoryId && !c.archivedAt) || categoryCatalog(state).find(c => c.name === input.category && !c.archivedAt);
-        if (!category) throw apiError('Choose a valid category.');
-        const saved = await mutateTransactions(env,[input.id],s => { checkRevision(s,input); const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); const live = categoryCatalog(s).find(c => c.id === category.id && !c.archivedAt); if (!live) throw apiError('That category is no longer available.', 409); t.override = live.name; t.overrideCategoryId = live.id; });
-        return response({ ok: true, revision: saved.revision });
+        if (!category || !['expense','income','transfer'].includes(category.kind) || state.budgetItemSettings?.[category.id]?.itemType === 'allocation') throw apiError('Choose a valid transaction category.');
+        const saved = await mutateWithReplay(env,'category',input,s => { checkRevision(s,input); const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); const live = categoryCatalog(s).find(c => c.id === category.id && !c.archivedAt); if (!live) throw apiError('That category is no longer available.', 409); t.override = live.name; t.overrideCategoryId = live.id;t.categoryEditVersion=(Number.isSafeInteger(t.categoryEditVersion)?t.categoryEditVersion:0)+1; },(s,revision)=>({ok:true,revision}),[input.id]);
+        return response(saved.result);
       }
       if(path==='/api/category-bulk'&&request.method==='POST'){
         const input=await body(request),ids=Array.isArray(input.ids)?[...new Set(input.ids)]:[],category=categoryCatalog(state).find(c=>c.id===input.categoryId&&!c.archivedAt);
-        if(!ids.length||ids.length>100||ids.some(id=>typeof id!=='string')||!category)throw apiError('Choose up to 100 transactions and a valid category.');
-        const id=crypto.randomUUID();const saved=await mutateTransactions(env,ids,s=>{checkRevision(s,input);const selected=s.transactions.filter(t=>ids.includes(t.id));if(selected.length!==ids.length)throw apiError('One or more selected transactions are no longer available.',409);s.categoryEditBatches||=[];const changes=selected.map(t=>({id:t.id,override:t.override,overrideCategoryId:t.overrideCategoryId}));for(const t of selected){t.override=category.name;t.overrideCategoryId=category.id;}s.categoryEditBatches.push({id,categoryId:category.id,createdAt:new Date().toISOString(),changes});});
-        return response({ok:true,batchId:id,count:ids.length,revision:saved.revision});
+        if(!ids.length||ids.length>100||ids.some(id=>typeof id!=='string')||!category||!['expense','income','transfer'].includes(category.kind)||state.budgetItemSettings?.[category.id]?.itemType==='allocation')throw apiError('Choose up to 100 transactions and a valid transaction category.');
+        const id=crypto.randomUUID(),mutation=await mutateWithReplay(env,'category-bulk',input,s=>{checkRevision(s,input);const selected=s.transactions.filter(t=>ids.includes(t.id));if(selected.length!==ids.length)throw apiError('One or more selected transactions are no longer available.',409);s.categoryEditBatches||=[];const changes=selected.map(t=>({id:t.id,override:t.override,overrideCategoryId:t.overrideCategoryId}));for(const [index,t] of selected.entries()){t.override=category.name;t.overrideCategoryId=category.id;t.categoryEditVersion=(Number.isSafeInteger(t.categoryEditVersion)?t.categoryEditVersion:0)+1;changes[index].afterVersion=t.categoryEditVersion;}s.categoryEditBatches.push({id,categoryId:category.id,createdAt:new Date().toISOString(),changes});},(s,revision)=>({ok:true,batchId:id,count:ids.length,revision}),ids);
+        return response(mutation.result);
       }
       if(path==='/api/category-bulk-undo'&&request.method==='POST'){
-        const input=await body(request),batch=state.categoryEditBatches?.find(item=>item.id===input.batchId);if(!batch)throw apiError('Bulk edit undo record not found.',404);
-        let undone=0;const saved=await mutateTransactions(env,batch.changes.map(change=>change.id),s=>{checkRevision(s,input);const index=s.categoryEditBatches.findIndex(item=>item.id===input.batchId);if(index<0)throw apiError('Bulk edit undo record not found.',404);const [record]=s.categoryEditBatches.splice(index,1);for(const prior of record.changes){const transaction=s.transactions.find(t=>t.id===prior.id);if(!transaction||transaction.overrideCategoryId!==record.categoryId)continue;if(prior.override===undefined)delete transaction.override;else transaction.override=prior.override;if(prior.overrideCategoryId===undefined)delete transaction.overrideCategoryId;else transaction.overrideCategoryId=prior.overrideCategoryId;undone++;}});
-        return response({ok:true,revision:saved.revision,undone,skipped:batch.changes.length-undone});
+        const input=await body(request),replay=await findOperationReplay(env,state,'category-bulk-undo',input);if(replay.found)return response(replay.response);
+        const batch=state.categoryEditBatches?.find(item=>item.id===input.batchId);if(!batch)throw apiError('Bulk edit undo record not found.',404);
+        let undone=0;const saved=await mutateWithReplay(env,'category-bulk-undo',input,s=>{checkRevision(s,input);const index=s.categoryEditBatches.findIndex(item=>item.id===input.batchId);if(index<0)throw apiError('Bulk edit undo record not found.',404);const [record]=s.categoryEditBatches.splice(index,1);for(const prior of record.changes){const transaction=s.transactions.find(t=>t.id===prior.id);if(!transaction||transaction.overrideCategoryId!==record.categoryId||prior.afterVersion!==undefined&&transaction.categoryEditVersion!==prior.afterVersion)continue;if(prior.override===undefined)delete transaction.override;else transaction.override=prior.override;if(prior.overrideCategoryId===undefined)delete transaction.overrideCategoryId;else transaction.overrideCategoryId=prior.overrideCategoryId;transaction.categoryEditVersion=(Number.isSafeInteger(transaction.categoryEditVersion)?transaction.categoryEditVersion:0)+1;undone++;}},(s,revision)=>({ok:true,revision,undone,skipped:batch.changes.length-undone}),batch.changes.map(change=>change.id));
+        return response(saved.result);
       }
       if(path==='/api/import-preview'&&request.method==='POST'){
         const input=await body(request),preview=await prepareCsvImport(input,state);
         return response({account:preview.name,revision:preview.revision,headers:preview.headers,rows:preview.rows.length,alreadyImported:!!preview.existingBatch,unknownCategories:preview.unknownCategories,overlapCount:preview.overlaps.length,overlaps:preview.overlaps.slice(0,20),sample:preview.rows.slice(0,10).map(({date,merchant,amount,category,unknownCategory})=>({date,merchant,amount,category,unknownCategory:unknownCategory||null}))});
       }
       if(path==='/api/import'&&request.method==='POST'){
-        const input=await body(request),preview=await prepareCsvImport(input,state);
+        const input=await body(request),replay=await findOperationReplay(env,state,'import',input);if(replay.found)return response(replay.response);
+        const preview=await prepareCsvImport(input,state);
         if(!Number.isSafeInteger(input.revision))throw apiError('Reload the import preview before committing.',409);
         checkRevision(state,input);
         if(preview.existingBatch)return response({imported:0,skipped:preview.rows.length,batchId:preview.fileId,alreadyImported:true,revision:state.revision});
@@ -487,154 +676,50 @@ export default {
         if(preview.overlaps.length&&input.confirmOverlaps!==true)throw apiError('Review matching transactions and explicitly confirm whether to keep these rows.',409);
         let imported=0,skipped=0;
         const plannedIds=preview.rows.map((row,index)=>'csv:'+preview.fileId+':'+index);
-        const saved=await mutateTransactions(env,plannedIds,s=>{
+        const saved=await mutateWithReplay(env,'import',input,s=>{
           checkRevision(s,input);s.owner=user;s.importBatches||=[];
           if(s.importBatches.some(batch=>batch.id===preview.fileId)){skipped=preview.rows.length;return;}
           if(!s.accounts.some(a=>a.id===preview.accountId))s.accounts.push({id:preview.accountId,itemId:null,name:preview.name,mask:null,type:'manual',subtype:'CSV import',balance:null,currency:'USD',source:'csv'});
           const ids=new Set(s.transactions.map(t=>t.id)),transactionIds=[];
           preview.rows.forEach((row,index)=>{const id='csv:'+preview.fileId+':'+index;if(ids.has(id)){skipped++;return;}const {unknownCategory,sourceRow,...transaction}=row;s.transactions.push({...transaction,...(sourceRow?{sourceRow}:{}),id,accountId:preview.accountId,itemId:null,source:'csv',importBatchId:preview.fileId});transactionIds.push(id);imported++;});
           s.importBatches.push({id:preview.fileId,accountId:preview.accountId,createdAt:new Date().toISOString(),transactionIds,imported,skipped});
-        });
-        return response({imported,skipped,batchId:preview.fileId,revision:saved.revision,month:preview.rows.map(t=>t.date.slice(0,7)).sort().at(-1)});
+        },(s,revision)=>({imported,skipped,batchId:preview.fileId,revision,month:preview.rows.map(t=>t.date.slice(0,7)).sort().at(-1)}),plannedIds);
+        return response(saved.result);
       }
       if(path==='/api/import-undo'&&request.method==='POST'){
-        const input=await body(request),batch=state.importBatches?.find(value=>value.id===input.batchId);
+        const input=await body(request),replay=await findOperationReplay(env,state,'import-undo',input);if(replay.found)return response(replay.response);
+        const batch=state.importBatches?.find(value=>value.id===input.batchId);
         if(!batch)throw apiError('Import batch not found.',404);
-        const saved=await mutateTransactions(env,batch.transactionIds,s=>{checkRevision(s,input);const index=s.importBatches.findIndex(value=>value.id===input.batchId);if(index<0)throw apiError('Import batch not found.',404);s.importBatches.splice(index,1);const ids=new Set(batch.transactionIds);s.transactions=s.transactions.filter(t=>!ids.has(t.id));});
-        return response({ok:true,revision:saved.revision,undone:batch.transactionIds.length});
-      }
-      if (path === '/api/budget' && request.method === 'POST') {
-        const input = await body(request);
-        const category = categoryCatalog(state).find(c => c.id === input.categoryId) || categoryCatalog(state).find(c => c.name === input.category);
-        const mode=input.mode||'template', month=input.month||monthInReportingZone();
-        if (!category || category.kind !== 'expense' || !['template','month'].includes(mode) || !validMonth(month) || input.amount!==null&&(!Number.isSafeInteger(input.amount)||input.amount<0||input.amount>100_000_000)) throw apiError('Enter a valid monthly budget.');
-        const saved=await mutate(env, s => {
-          checkRevision(s,input);
-          const live=categoryCatalog(s).find(c=>c.id===category.id); if(!live) throw apiError('That category is no longer available.',409);
-          s.owner=user; s.budgetHistoryUnavailableBefore ||= monthInReportingZone();
-          s.budgetTemplates=budgetTemplates(s);
-          if(mode==='template'){
-            const index=s.budgetTemplates.findIndex(entry=>entry.categoryId===live.id&&entry.effectiveFrom===month);
-            const template={categoryId:live.id,amount:input.amount,effectiveFrom:month};
-            if(index>=0)s.budgetTemplates[index]=template;else s.budgetTemplates.push(template);
-            if(month<=monthInReportingZone()){if(input.amount===null)delete s.budgets[live.name];else s.budgets[live.name]=input.amount;}
-          }else{
-            s.monthlyBudgets={...(s.monthlyBudgets||{}),[budgetMonthKey(month,live.id)]:input.amount};
-          }
-          s.budgetCategoryIds={...(s.budgetCategoryIds||{}),[live.id]:live.name};
-        });
-        return response({ ok:true,revision:saved.revision,amount:resolveBudget(budgetTemplates(saved),saved.monthlyBudgets||{},category.id,month).amount });
-      }
-      if (path === '/api/budget-reset' && request.method === 'POST') {
-        const input=await body(request),category=categoryCatalog(state).find(c=>c.id===input.categoryId);
-        if(!category||category.kind!=='expense'||!validMonth(input.month))throw apiError('Choose a valid category and month.');
-        const saved=await mutate(env,s=>{checkRevision(s,input);s.monthlyBudgets={...(s.monthlyBudgets||{})};delete s.monthlyBudgets[budgetMonthKey(input.month,category.id)];});
-        return response({ok:true,revision:saved.revision,amount:resolveBudget(budgetTemplates(saved),saved.monthlyBudgets||{},category.id,input.month).amount});
-      }
-      if(path==='/api/income-plan'&&request.method==='POST'){
-        const input=await body(request),mode=input.mode||'month',month=input.month||monthInReportingZone();
-        if(!['template','month'].includes(mode)||!validMonth(month)||input.amount!==null&&(!Number.isSafeInteger(input.amount)||input.amount<0||input.amount>100_000_000))throw apiError('Enter a valid projected income amount.');
-        const saved=await mutate(env,s=>{checkRevision(s,input);if(mode==='template'){s.incomePlanTemplates=[...(s.incomePlanTemplates||[])];const index=s.incomePlanTemplates.findIndex(row=>row.effectiveFrom===month),template={effectiveFrom:month,amount:input.amount};if(index>=0)s.incomePlanTemplates[index]=template;else s.incomePlanTemplates.push(template);}else s.monthlyIncomePlans={...(s.monthlyIncomePlans||{}),[month]:input.amount};});
-        const plan=resolveIncomePlan(saved.incomePlanTemplates||[],saved.monthlyIncomePlans||{},month);return response({ok:true,revision:saved.revision,amount:plan.amount,source:plan.source});
-      }
-      if(path==='/api/income-plan-reset'&&request.method==='POST'){
-        const input=await body(request);if(!validMonth(input.month))throw apiError('Choose a valid reporting month.');
-        const saved=await mutate(env,s=>{checkRevision(s,input);s.monthlyIncomePlans={...(s.monthlyIncomePlans||{})};delete s.monthlyIncomePlans[input.month];});
-        return response({ok:true,revision:saved.revision,amount:resolveIncomePlan(saved.incomePlanTemplates||[],saved.monthlyIncomePlans||{},input.month).amount});
-      }
-      if(path==='/api/budget-outlook'&&request.method==='POST'){
-        const input=await body(request),month=input.month;if(!validMonth(month)||!input.changes||typeof input.changes!=='object'||Array.isArray(input.changes))throw apiError('Enter valid month-end expectations.');
-        const actuals=budgetActuals(state,month),incomeActual=actuals.income;if(input.changes.actualIncome!==incomeActual)throw apiError('Actual income changed while you were editing. Refresh and try again.',409);
-        const categories=categoryCatalog(state),saved=await mutate(env,s=>{checkRevision(s,input);s.monthlyBudgetOutlooks={...(s.monthlyBudgetOutlooks||{})};const prior={...(s.monthlyBudgetOutlooks[month]||{}),expenses:{...(s.monthlyBudgetOutlooks[month]?.expenses||{})}};const incomeRemaining=input.changes.income;
-          if(incomeRemaining===null)delete prior.income;else{if(!Number.isSafeInteger(incomeRemaining)||incomeRemaining<0||incomeRemaining>100_000_000)throw apiError('Enter a non-negative remaining income amount.');prior.income={expectedTotal:incomeActual+incomeRemaining,actualAtEdit:incomeActual,updatedAt:new Date().toISOString()};}
-          for(const [categoryId,remaining] of Object.entries(input.changes.expenses||{})){const category=categories.find(row=>row.id===categoryId&&row.kind==='expense');if(!category||remaining!==null&&(!Number.isSafeInteger(remaining)||remaining<0||remaining>100_000_000))throw apiError('Choose a valid bucket expectation.');if(remaining===null)delete prior.expenses[categoryId];else{const actual=actuals.categories[categoryId]||0;prior.expenses[categoryId]={expectedTotal:actual+remaining,actualAtEdit:actual,updatedAt:new Date().toISOString()};}}
-          if(!prior.income&&!Object.keys(prior.expenses).length)delete s.monthlyBudgetOutlooks[month];else s.monthlyBudgetOutlooks[month]=prior;});
-        return response({ok:true,revision:saved.revision});
-      }
-      if (path === '/api/category-create' && request.method === 'POST') {
-        const input = await body(request), name = typeof input.name === 'string' ? input.name.trim().replace(/\s+/g, ' ') : '';
-        if (!name || name.length > 80 || !/^[\p{L}\p{N}][\p{L}\p{N} .&'’()/_-]*$/u.test(name) || Object.hasOwn(Object.prototype, name)) throw apiError('Use a bucket name up to 80 characters, starting with a letter or number.');
-        if (input.amount !== undefined && input.amount !== null && (!Number.isSafeInteger(input.amount) || input.amount < 0 || input.amount > 100_000_000)) throw apiError('Enter a valid monthly budget.');
-        const saved=await mutate(env, s => {
-          checkRevision(s,input);
-          if (categoryCatalog(s).some(c => c.normalizedName === normalizeCategory(name))) throw apiError('A bucket with this name already exists.', 409);
-          if ((s.customCategories || []).length >= 50) throw apiError('Use up to 50 custom budget buckets.');
-          if (input.amount !== undefined && input.amount !== null) s.budgetTemplates=budgetTemplates(s);
-          const catalog = categoryCatalog(s), records = s.categoryRecords || catalog.filter(c => !c.system);
-          const category = { id: crypto.randomUUID(), name, normalizedName: normalizeCategory(name), kind: 'expense', system: false, order: Math.max(CATEGORIES.length-1,...catalog.map(c=>c.order))+1, archivedAt: null };
-          s.owner = user; s.categoryRecords = [...records, category]; s.customCategories = [...(s.customCategories || []), name];
-          if (input.amount !== undefined && input.amount !== null) {
-            s.budgets[name] = input.amount;
-            s.budgetTemplates.push({ categoryId:category.id, amount:input.amount, effectiveFrom:monthInReportingZone() });
-          }
-          s.budgetCategoryIds = { ...(s.budgetCategoryIds || {}), [category.id]: name };
-        });
-        return response({ ok: true, revision:saved.revision, category: categoryCatalog(saved).find(c => c.name === name && !c.system) });
-      }
-      if (path === '/api/category-update' && request.method === 'POST') {
-        const input = await body(request);
-        let result;
-        const saved=await mutate(env, s => {
-          checkRevision(s,input);
-          const records = s.categoryRecords || categoryCatalog(s).filter(c => !c.system), index = records.findIndex(c => c.id === input.id);
-          if (index < 0) throw apiError('Custom category not found.', 404);
-          const category = records[index];
-          if (category.system || category.kind !== 'expense') throw apiError('System categories cannot be changed here.', 400);
-          if (input.action === 'rename') {
-            const name = typeof input.name === 'string' ? input.name.trim().replace(/\s+/g, ' ') : '';
-            if (!name || name.length > 80 || !/^[\p{L}\p{N}][\p{L}\p{N} .&'’()/_-]*$/u.test(name)) throw apiError('Use a bucket name up to 80 characters, starting with a letter or number.');
-            const normalizedName = normalizeCategory(name);
-            if (categoryCatalog(s).some(c => c.id !== category.id && c.normalizedName === normalizedName)) throw apiError('A bucket with this name already exists.', 409);
-            const oldName = category.name;
-            records[index] = { ...category, name, normalizedName };
-            if (Object.hasOwn(s.budgets || {}, oldName)) { s.budgets[name] = s.budgets[oldName]; delete s.budgets[oldName]; s.budgetCategoryIds = { ...(s.budgetCategoryIds || {}), [category.id]: name }; }
-            s.transactions.forEach(t => { if (t.overrideCategoryId === category.id || (!t.overrideCategoryId && t.override === oldName)) { t.overrideCategoryId = category.id; t.override = name; } if (t.category === oldName) { t.sourceCategory ??= oldName; t.categoryId = category.id; t.category = name; } });
-            s.customCategories = (s.customCategories || []).map(value => value === oldName ? name : value);
-            if (s.budgetCategoryIds?.[category.id]) s.budgetCategoryIds[category.id] = name;
-          } else if (input.action === 'archive') {
-            if (category.archivedAt) throw apiError('Category is already archived.',409);
-            records[index] = { ...category, archivedAt: new Date().toISOString() };
-          } else if (input.action === 'restore') {
-            if (!category.archivedAt) throw apiError('Category is already active.',409);
-            records[index] = { ...category, archivedAt: null };
-          } else if (input.action === 'move') {
-            if (!['up','down'].includes(input.direction)) throw apiError('Choose a valid category order.');
-            const ordered = records.map((c,i)=>({c,i})).sort((a,b)=>a.c.order-b.c.order);
-            const position = ordered.findIndex(entry=>entry.c.id===category.id), otherPosition = position + (input.direction === 'up' ? -1 : 1);
-            if (otherPosition >= 0 && otherPosition < ordered.length) {
-              const first=ordered[position], second=ordered[otherPosition], order=first.c.order;
-              records[first.i]={...first.c,order:second.c.order}; records[second.i]={...second.c,order};
-            }
-          } else throw apiError('Choose rename, archive, or move.');
-          s.owner = user; s.categoryRecords = records; result = records[index];
-        });
-        return response({ ok: true, revision:saved.revision, category: result });
+        const saved=await mutateWithReplay(env,'import-undo',input,s=>{checkRevision(s,input);const index=s.importBatches.findIndex(value=>value.id===input.batchId);if(index<0)throw apiError('Import batch not found.',404);s.importBatches.splice(index,1);const ids=new Set(batch.transactionIds);s.transactions=s.transactions.filter(t=>!ids.has(t.id));},(s,revision)=>({ok:true,revision,undone:batch.transactionIds.length}),batch.transactionIds);
+        return response(saved.result);
       }
       if (path === '/api/manual-account' && request.method === 'POST') {
         const input=await body(request),name=typeof input.name==='string'?input.name.trim():'';
         if(input.action==='archive'||input.action==='restore'||input.action==='include'){
           if(input.action==='include'&&typeof input.value!=='boolean')throw apiError('Choose whether to include this account in reports.');
-          const saved=await mutate(env,s=>{checkRevision(s,input);const account=s.accounts.find(a=>a.id===input.id&&a.manual);if(!account)throw apiError('Manual account not found.',404);if(input.action==='include')account.includeInReporting=input.value;else account.archivedAt=input.action==='archive'?new Date().toISOString():null;account.updatedAt=new Date().toISOString();});
-          return response({ok:true,revision:saved.revision});
+          const mutation=await mutateWithReplay(env,'manual-account',input,s=>{checkRevision(s,input);const account=s.accounts.find(a=>a.id===input.id&&a.manual);if(!account)throw apiError('Manual account not found.',404);if(input.action==='include')account.includeInReporting=input.value;else account.archivedAt=input.action==='archive'?new Date().toISOString():null;account.updatedAt=new Date().toISOString();},(s,revision)=>({ok:true,revision}),null,'owner');
+          return response(mutation.result);
         }
         const allowedTypes=['depository','credit','investment','retirement','hsa','asset','liability','other'];
         const currency=typeof input.currency==='string'?input.currency.toUpperCase():'USD';
-        if(!name||name.length>100||typeof input.type!=='string'||!allowedTypes.includes(input.type)||!/^[A-Z]{3}$/.test(currency)||input.balance!==null&&(!Number.isSafeInteger(input.balance)||Math.abs(input.balance)>1_000_000_000_000)||input.balance!==null&&!validDateOnly(input.asOf)||input.institution!==undefined&&(typeof input.institution!=='string'||input.institution.length>100)||input.notes!==undefined&&(typeof input.notes!=='string'||input.notes.length>500)||input.includeInReporting!==undefined&&typeof input.includeInReporting!=='boolean')throw apiError('Enter a valid manual account name, type, currency, and observed balance.');
+        if(!name||name.length>100||typeof input.type!=='string'||!allowedTypes.includes(input.type)||!/^[A-Z]{3}$/.test(currency)||input.balance!==null&&(!Number.isSafeInteger(input.balance)||Math.abs(input.balance)>1_000_000_000_000)||input.balance!==null&&(!validDateOnly(input.asOf)||input.asOf>dateInReportingZone())||input.institution!==undefined&&(typeof input.institution!=='string'||input.institution.length>100)||input.notes!==undefined&&(typeof input.notes!=='string'||input.notes.length>500)||input.subtype!==undefined&&typeof input.subtype!=='string'||input.includeInReporting!==undefined&&typeof input.includeInReporting!=='boolean')throw apiError('Enter a valid manual account name, type, currency, and observed balance.');
         let savedAccount;
-        const saved=await mutate(env,s=>{
+        const mutation=await mutateWithReplay(env,'manual-account',input,s=>{
           checkRevision(s,input);
           const existing=input.id?s.accounts.find(a=>a.id===input.id&&a.manual):null;
           if(input.id&&!existing)throw apiError('Manual account not found.',404);
           const now=new Date().toISOString();
-          savedAccount={...(existing||{}),id:existing?.id||crypto.randomUUID(),itemId:null,connectionId:null,source:'manual',manual:true,name,institution:input.institution?.trim()||null,type:input.type,subtype:typeof input.subtype==='string'?input.subtype.trim().slice(0,60)||null:null,balance:input.balance,currency,balanceAsOf:input.balance===null?null:input.asOf,balanceSource:input.balance===null?null:'manual',includeInReporting:input.includeInReporting!==false,notes:input.notes?.trim()||'',createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:null};
+          savedAccount={...(existing||{}),id:existing?.id||crypto.randomUUID(),itemId:null,connectionId:null,source:'manual',manual:true,name,institution:input.institution===undefined?existing?.institution||null:input.institution.trim()||null,type:input.type,subtype:input.subtype===undefined?existing?.subtype||null:input.subtype.trim().slice(0,60)||null,balance:input.balance,currency,balanceAsOf:input.balance===null?null:input.asOf,balanceSource:input.balance===null?null:'manual',includeInReporting:input.includeInReporting===undefined?existing?.includeInReporting!==false:input.includeInReporting,notes:input.notes===undefined?existing?.notes||'':input.notes.trim(),createdAt:existing?.createdAt||now,updatedAt:now,archivedAt:existing?.archivedAt||null};
           if(existing)Object.assign(existing,savedAccount);else s.accounts.push(savedAccount);
           s.owner=user;
-        });
-        return response({ok:true,revision:saved.revision,account:savedAccount});
+        },(s,revision)=>({ok:true,revision,account:savedAccount}),null,'owner');
+        return response(mutation.result);
       }
       if (path === '/api/account-update' && request.method === 'POST') {
         const input=await body(request);
-        const saved=await mutate(env,s=>{
+        const replay=await findOperationReplay(env,state,'account-update',input);if(replay.found)return response(replay.response);
+        if(input.action==='include'&&typeof input.value!=='boolean')throw apiError('Choose whether to include this account in reports.');
+        const saved=await mutateWithReplay(env,'account-update',input,s=>{
           checkRevision(s,input);
           const account=s.accounts.find(a=>a.id===input.id&&!a.manual);
           if(!account)throw apiError('Connected account not found.',404);
@@ -642,27 +727,28 @@ export default {
           else if(input.action==='restore')account.archivedAt=null;
           else if(input.action==='include')account.includeInReporting=input.value===true;
           else throw apiError('Choose archive, restore, or include.');
-        });
-        return response({ok:true,revision:saved.revision});
+        },(s,revision)=>({ok:true,revision}),null,'owner');
+        return response(saved.result);
       }
       if (path === '/api/disconnect' && request.method === 'POST') {
-        const input = await body(request), item = state.items.find(i => i.id === input.itemId);
-        if (!item) throw apiError('Bank connection not found.', 404);
-        if (state.syncJob?.status === 'running') throw apiError('Wait for the current sync to finish before disconnecting.', 409);
-        if(item.lifecycle!=='unlinked'&&item.token){if(!item.environment||item.environment!==env.PLAID_ENV)throw apiError('Saved connection environment must be verified before unlinking; no token was sent.');await plaid(env, '/item/remove', { access_token: await decryptToken(env, item.token) });}
-        const saved=await mutate(env, s => { const link=s.items.find(i=>i.id===item.id); if(!link)return; link.token=null;link.lifecycle='unlinked';link.error=null;link.unlinkedAt=new Date().toISOString(); });
+        const input = await body(request),item=state.items.find(i=>i.id===input.itemId);checkRevision(state,input);if(!item)throw apiError('Bank connection not found.',404);if(state.syncJob?.status==='running')throw apiError('Wait for the current sync to finish before disconnecting.',409);
+        if(item.lifecycle!=='unlinked'&&item.token){if(!item.environment||item.environment!==env.PLAID_ENV)throw apiError('Saved connection environment must be verified before unlinking; no token was sent.');await plaid(env,'/item/remove',{access_token:await decryptToken(env,item.token)});}
+        const saved=await mutate(env,s=>{const link=s.items.find(i=>i.id===item.id),sameToken=JSON.stringify(link?.token??null)===JSON.stringify(item.token??null);if(!link||!sameToken||link.lifecycle!==item.lifecycle)throw apiError('This connection changed while unlinking. Refresh and check its status.',409);if(s.syncJob?.status==='running')throw apiError('Wait for the current sync to finish before disconnecting.',409);link.token=null;link.lifecycle='unlinked';link.error=null;link.unlinkedAt=new Date().toISOString();});
         return response({ ok: true, historyRetained:true, revision:saved.revision });
       }
       if (path === '/api/delete-history' && request.method === 'POST') {
-        const input=await body(request),item=state.items.find(i=>i.id===input.itemId);
-        if(!item)throw apiError('Connection history not found.',404);
-        if(state.syncJob?.status==='running')throw apiError('Wait for the current sync to finish before deleting history.',409);
-        if(item.lifecycle!=='unlinked'&&item.token){if(!item.environment||item.environment!==env.PLAID_ENV)throw apiError('Saved connection environment must be verified before deleting history; no token was sent.');await plaid(env,'/item/remove',{access_token:await decryptToken(env,item.token)});}
-        await mutate(env,s=>{s.items=s.items.filter(i=>i.id!==item.id);s.accounts=s.accounts.filter(a=>a.itemId!==item.id);s.transactions=s.transactions.filter(t=>t.itemId!==item.id);s.holdings=(s.holdings||[]).filter(h=>h.itemId!==item.id);});
-        return response({ok:true,historyDeleted:true});
+        const input=await body(request),item=state.items.find(i=>i.id===input.itemId);checkRevision(state,input);if(!item)throw apiError('Connection history not found.',404);if(state.syncJob?.status==='running')throw apiError('Wait for the current sync to finish before deleting history.',409);if(item.lifecycle!=='unlinked'&&item.token){if(!item.environment||item.environment!==env.PLAID_ENV)throw apiError('Saved connection environment must be verified before deleting history; no token was sent.');await plaid(env,'/item/remove',{access_token:await decryptToken(env,item.token)});}
+        const saved=await mutate(env,s=>{const link=s.items.find(i=>i.id===item.id),sameToken=JSON.stringify(link?.token??null)===JSON.stringify(item.token??null);if(!link||!sameToken||link.lifecycle!==item.lifecycle)throw apiError('This connection changed while deleting history. Refresh and check its status.',409);if(s.syncJob?.status==='running')throw apiError('Wait for the current sync to finish before deleting history.',409);s.items=s.items.filter(i=>i.id!==item.id);s.accounts=s.accounts.filter(a=>a.itemId!==item.id);s.transactions=s.transactions.filter(t=>t.itemId!==item.id);s.holdings=(s.holdings||[]).filter(h=>h.itemId!==item.id);});
+        return response({ok:true,historyDeleted:true,revision:saved.revision});
       }
       return response({ error: 'Not found' }, 404);
-    } catch (e) { return response({ error: e.status ? e.message : 'Something went wrong. Please try again.' }, e.status || 500); }
+    } catch (e) {
+      if(!e.status&&typeof env.logError==='function'){
+        const requestId=request.headers.get('x-request-id'),rawRoute=new URL(request.url).pathname,route=/^\/api\/[a-z0-9-]+$/i.test(rawRoute)?rawRoute:'other',errorClass=String(e?.name||'Error').slice(0,64),rawCode=String(e?.code||'');
+        env.logError({requestId,method:request.method,route,errorClass,...(/^[A-Z0-9_]{1,64}$/.test(rawCode)?{errorCode:rawCode}:{})});
+      }
+      return response({ error: e.status ? e.message : 'Something went wrong. Please try again.' }, e.status || 500);
+    }
   }
 };
 

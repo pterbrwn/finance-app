@@ -1,16 +1,19 @@
 import { createServer } from 'node:http';
-import { webcrypto } from 'node:crypto';
+import { randomUUID, webcrypto } from 'node:crypto';
 import { localRuntime } from './runtime.mjs';
 import worker from '../dist/server/index.js';
 
 if (process.env.LEDGER_WRITER_LOCKED !== '1') throw new Error('Start Ledger through scripts/start-ledger.sh to acquire the data-directory lock.');
 globalThis.crypto ||= webcrypto;
 const env = await localRuntime();
+env.logError=record=>console.error(JSON.stringify({event:'request_error',...record}));
 
 const port = Number(process.env.PORT ?? 3000);
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('PORT must be an integer between 0 and 65535.');
 let origin;
 const server = createServer(async (incoming, outgoing) => {
+  const requestId=randomUUID(),started=performance.now(),rawPath=String(incoming.url||'').split('?')[0],route=/^\/api\/[a-z0-9-]+$/i.test(rawPath)?rawPath:/^\/assets\/[a-z0-9._-]+$/i.test(rawPath)?rawPath:rawPath==='/'?'/':'other';
+  outgoing.once('finish',()=>console.log(JSON.stringify({event:'request',requestId,method:String(incoming.method||'').slice(0,12),route,status:outgoing.statusCode,durationMs:Math.max(0,Math.round(performance.now()-started))})));
   const reject = (status, message) => {
     outgoing.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     outgoing.end(JSON.stringify({ error: message }));
@@ -58,6 +61,7 @@ const server = createServer(async (incoming, outgoing) => {
       if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(', ') : value);
     }
     headers.set('oai-authenticated-user-id', 'local-owner');
+    headers.set('x-request-id',requestId);
     const method = incoming.method;
     const request = new Request((proxied ? env.publicOrigin : origin) + incoming.url, {
       method, headers,
@@ -66,7 +70,8 @@ const server = createServer(async (incoming, outgoing) => {
     const response = await worker.fetch(request, env);
     outgoing.writeHead(response.status, Object.fromEntries(response.headers));
     outgoing.end(Buffer.from(await response.arrayBuffer()));
-  } catch {
+  } catch (error) {
+    env.logError({requestId,method:String(incoming.method||'').slice(0,12),route,errorClass:String(error?.name||'Error').slice(0,64),...(typeof error?.code==='string'&&/^[A-Z0-9_]{1,64}$/.test(error.code)?{errorCode:error.code}:{})});
     if (!outgoing.headersSent) reject(500, 'The local server could not handle this request.');
     else outgoing.end();
   }
@@ -80,4 +85,17 @@ server.listen(port, '127.0.0.1', () => {
   console.log('Ledger: ' + origin);
   console.log(env.LOCAL_ONLY ? 'Local-only mode. CSV imports are available; external bank connections are disabled.' : 'Bank integration enabled. Financial records are stored on this machine.');
 });
-for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => server.close());
+let shutdownStarted=false;
+async function shutdown(signal){
+  if(shutdownStarted)return;shutdownStarted=true;const started=Date.now();env.shutdownRequested=true;
+  console.log(JSON.stringify({event:'shutdown_started',signal,deadlineMs:12_000}));
+  const hardStop=setTimeout(()=>{console.error(JSON.stringify({event:'shutdown_deadline',signal,elapsedMs:Date.now()-started}));process.exit(1);},12_000);
+  const closed=new Promise(resolve=>server.close(resolve));server.closeIdleConnections?.();
+  const syncDrained=await worker.drain(env,10_000);
+  await closed;
+  if(!syncDrained){console.error(JSON.stringify({event:'shutdown_sync_pending',signal,elapsedMs:Date.now()-started}));process.exit(1);}
+  try{await env.REPOSITORY.close?.();console.log(JSON.stringify({event:'shutdown_complete',signal,elapsedMs:Date.now()-started}));}
+  catch(error){console.error(JSON.stringify({event:'shutdown_close_error',signal,errorClass:String(error?.name||'Error').slice(0,64)}));process.exitCode=1;}
+  clearTimeout(hardStop);
+}
+for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {void shutdown(signal);});

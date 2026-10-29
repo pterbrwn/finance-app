@@ -1,15 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { createCipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, randomBytes, createHash, randomUUID } from 'node:crypto';
 import { chmod, writeFile } from 'node:fs/promises';
 import Database from 'better-sqlite3';
+import worker from '../worker/index.js';
+import { webcrypto } from 'node:crypto';
+
+globalThis.crypto ||= webcrypto;
 import { createSqliteRepository, createSqliteRepositoryAt, openLedgerDatabase, SQLITE_SCHEMA_VERSION } from '../server/sqlite-repository.mjs';
 
 assert.match(process.version, /^v24\./);
-assert.equal(SQLITE_SCHEMA_VERSION, 3);
+assert.equal(SQLITE_SCHEMA_VERSION, 7);
 const directory = await mkdtemp(join(tmpdir(), 'ledger-sqlite-check-'));
 try {
   const databasePath = join(directory, 'ledger.sqlite');
@@ -39,6 +43,18 @@ try {
   assert.equal(read.items[0].token.data, 'synthetic-ciphertext');
   assert.equal(read.accounts[0].balance, 12345);
   assert.equal(read.budgets.Travel, 40000);
+  const operationId=randomUUID(),operation={id:operationId,scope:'manual-account',payloadDigest:createHash('sha256').update('synthetic-operation').digest('hex')};
+  const committed=await repository.mutateWithOperation(operation,async state=>{state.accounts[0].balance=12346;state.revision=(state.revision||0)+1;return{...operation,response:{ok:true,revision:state.revision},revision:state.revision,createdAt:'2026-10-29T12:00:00.000Z'};});
+  assert.deepEqual(committed.result,{ok:true,revision:1});assert.equal(committed.replayed,false);
+  const replayed=await repository.mutateWithOperation(operation,async()=>{throw new Error('a committed operation must not run its update twice');});assert.deepEqual(replayed.result,committed.result);assert.equal(replayed.replayed,true);
+  await assert.rejects(repository.mutateWithOperation({...operation,payloadDigest:createHash('sha256').update('changed-operation').digest('hex')},async()=>{}),/already used for different values/);
+  assert.equal((await repository.readOperationResult(operationId)).payloadDigest,operation.payloadDigest);
+  assert.equal(JSON.stringify((await repository.read()).state).includes('synthetic-operation'),false,'SQLite metadata does not retain raw operation payloads');
+  const operationIndexDb=new Database(databasePath,{readonly:true,fileMustExist:true});assert.match(operationIndexDb.prepare('EXPLAIN QUERY PLAN SELECT response_json FROM operation_results WHERE operation_id=?').all(operationId).map(row=>row.detail).join(' '),/PRIMARY KEY|sqlite_autoindex_operation_results/i,'operation replay lookup uses the primary-key index');operationIndexDb.close();
+  const atomicOperationId=randomUUID(),atomicGuardDb=new Database(databasePath);atomicGuardDb.exec(`CREATE TRIGGER reject_synthetic_operation BEFORE INSERT ON operation_results WHEN NEW.operation_id='${atomicOperationId}' BEGIN SELECT RAISE(ABORT,'synthetic operation commit interruption'); END;`);
+  const balanceBeforeFailedOperation=(await repository.read()).state.accounts[0].balance;
+  await assert.rejects(repository.mutateWithOperation({id:atomicOperationId,scope:'manual-account',payloadDigest:createHash('sha256').update('atomic').digest('hex')},async state=>{state.accounts[0].balance=999999;state.revision++;return{id:atomicOperationId,scope:'manual-account',payloadDigest:createHash('sha256').update('atomic').digest('hex'),response:{ok:true},revision:state.revision,createdAt:'2026-10-29T12:01:00.000Z'};}),/synthetic operation commit interruption/);
+  assert.equal((await repository.read()).state.accounts[0].balance,balanceBeforeFailedOperation,'failed operation-row insertion rolls back the domain mutation');assert.equal(await repository.readOperationResult(atomicOperationId),null);atomicGuardDb.close();
   assert.deepEqual(read.budgetTemplates,[{categoryId:'category-travel',effectiveFrom:'2026-10',amount:40000}]);
   assert.equal(read.monthlyBudgets['2026-10:category-travel'],0);
   assert.deepEqual(read.incomePlanTemplates,[{effectiveFrom:'2026-10',amount:500000}]);
@@ -63,6 +79,11 @@ try {
   assert.equal(januarySummary.current.categories.Travel,2500);
   assert.equal(januarySummary.current.purchases,1);
   assert.deepEqual(januarySummary.current.weeklySpend,[2500,0,0,0,0]);
+  await repository.mutate(state=>{state.categoryRecords=[{id:'allocation-savings',name:'Savings Allocation',kind:'allocation'}];state.budgetItemSettings={'allocation-savings':{itemType:'allocation'}};state.transactions.push({id:'txn-allocation',accountId:'account-1',date:'2026-01-04',merchant:'Synthetic allocation transfer',amount:90000,currency:'USD',category:'Savings Allocation',categoryId:'allocation-savings'});});
+  const allocationSummary=await repository.queryMonthSummary('2026-01');
+  assert.equal(allocationSummary.current.spend,2500,'SQLite monthly summary excludes explicitly classified allocation transactions from spending');
+  assert.deepEqual(allocationSummary.current.categories,{Travel:2500});assert.equal(allocationSummary.current.purchases,1,'allocation transfers do not count as purchases');
+  await repository.mutate(state=>{state.transactions=state.transactions.filter(row=>row.id!=='txn-allocation');delete state.categoryRecords;delete state.budgetItemSettings;});
   await Promise.all([
     repository.mutate(state => { state.budgets.Dining = 10000; }),
     repository.mutate(state => { state.budgets.Housing = 150000; })
@@ -75,9 +96,91 @@ try {
   assert.equal(subsetRead.revision,subsetRevision+1,'scoped transaction writes advance the shared revision');
   assert.equal(subsetRead.incomePlanTemplates[0].amount,500000,'transaction subset writes preserve projected income plans');
   assert.equal(subsetRead.monthlyBudgetOutlooks['2026-10'].income.expectedTotal,470000,'transaction subset writes preserve month-end outlook adjustments');
+  await repository.mutateTransactionSubset(['txn-1'],state=>{state.transactions[0].override='Travel';delete state.transactions[0].overrideCategoryId;});
+  const transactionGuardDb = new Database(databasePath);
+  transactionGuardDb.exec("CREATE TRIGGER forbid_budget_transaction_delete BEFORE DELETE ON transactions BEGIN SELECT RAISE(ABORT,'synthetic unrelated transaction delete'); END; CREATE TRIGGER forbid_budget_transaction_insert BEFORE INSERT ON transactions WHEN NOT EXISTS(SELECT 1 FROM transactions WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT,'synthetic unrelated transaction insert'); END; CREATE TRIGGER forbid_budget_transaction_update BEFORE UPDATE ON transactions BEGIN SELECT RAISE(ABORT,'synthetic unrelated transaction update'); END;");
+  const budgetSnapshot = await repository.readBudgetState();
+  const budgetSaveResponse = await worker.fetch(new Request('https://ledger.sqlite.test/api/budget', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'oai-authenticated-user-id': 'synthetic-owner' },
+    body: JSON.stringify({ category: 'Groceries', categoryId: 'system:groceries', amount: 73000, mode: 'template', month: '2026-10', revision: budgetSnapshot.state.revision })
+  }), { REPOSITORY: repository, LOCAL_ONLY: true });
+  assert.equal(budgetSaveResponse.status, 200, await budgetSaveResponse.text());
+  const guardedBudgetState = (await repository.read()).state;
+  assert.deepEqual(guardedBudgetState.transactions.map(row => row.id), ['txn-1'], 'budget edits never delete or reinsert unrelated transaction rows');
+  assert.equal(guardedBudgetState.transactions[0].override, 'Travel', 'budget edits preserve the existing transaction override');
+  assert.equal(guardedBudgetState.budgetTemplates.find(row => row.categoryId === 'system:groceries' && row.effectiveFrom === '2026-10').amount, 73000);
+  let scopedBudgetRevision=guardedBudgetState.revision;
+  async function scopedBudgetPost(path,input){const result=await worker.fetch(new Request('https://ledger.sqlite.test/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','oai-authenticated-user-id':'synthetic-owner'},body:JSON.stringify({...input,revision:scopedBudgetRevision})}),{REPOSITORY:repository,LOCAL_ONLY:true});const text=await result.text();assert.equal(result.status,200,`${path}: ${text}`);const payload=JSON.parse(text);scopedBudgetRevision=payload.revision;return payload;}
+  await scopedBudgetPost('budget-reset',{categoryId:'system:groceries',month:'2026-10'});
+  await scopedBudgetPost('income-plan',{mode:'template',month:'2026-10',amount:500000});
+  await scopedBudgetPost('income-plan-reset',{month:'2026-10'});
+  await scopedBudgetPost('budget-outlook',{month:'2026-10',changes:{actualIncome:0,income:12000,expenses:{'system:groceries':5000}}});
+  const createdScopedCategory=await scopedBudgetPost('category-create',{name:'Synthetic scoped category',amount:null,itemType:'expense',budgetGroup:'Other'});
+  assert.ok((await repository.read()).state.customCategories.includes('Synthetic scoped category'),'scoped category creation keeps the legacy SQL name projection consistent with canonical category records');
+  const categoryLimitPath=join(directory,'category-limit.sqlite'),categoryLimitRepository=await createSqliteRepositoryAt(categoryLimitPath);
+  await categoryLimitRepository.mutate(state=>{state.revision=0;state.categoryRecords=Array.from({length:50},(_,index)=>({id:`synthetic-category-${index}`,name:`Synthetic category ${index}`,normalizedName:`synthetic category ${index}`,kind:'expense',system:false,order:20+index,archivedAt:null}));state.customCategories=[];});
+  const categoryLimitState=(await categoryLimitRepository.read()).state,categoryLimitResponse=await worker.fetch(new Request('https://ledger.sqlite.test/api/category-create',{method:'POST',headers:{'Content-Type':'application/json','oai-authenticated-user-id':'synthetic-owner'},body:JSON.stringify({name:'Synthetic category 51',amount:null,itemType:'expense',budgetGroup:'Other',revision:categoryLimitState.revision})}),{REPOSITORY:categoryLimitRepository,LOCAL_ONLY:true});
+  assert.equal(categoryLimitResponse.status,400,`the custom category limit uses persisted canonical category records: ${await categoryLimitResponse.clone().text()}`);
+  assert.equal((await categoryLimitRepository.read()).state.categoryRecords.length,50,'rejected category does not alter canonical category storage');
+  await categoryLimitRepository.close();
+  await scopedBudgetPost('category-update',{id:createdScopedCategory.category.id,action:'archive'});
+  await scopedBudgetPost('category-update',{id:createdScopedCategory.category.id,action:'restore'});
+  await scopedBudgetPost('category-update',{id:createdScopedCategory.category.id,action:'move',direction:'up'});
+  const afterScopedBudgetFamily=(await repository.read()).state;
+  assert.deepEqual(afterScopedBudgetFamily.transactions.map(row=>row.id),['txn-1'],'budget reset, income, outlook, and category-create routes do not rewrite unrelated transaction rows');
+  assert.equal(afterScopedBudgetFamily.revision,scopedBudgetRevision,'scoped metadata routes each advance the shared revision once');
+  async function budgetAuditPost(path,input){const result=await worker.fetch(new Request('https://ledger.sqlite.test/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','oai-authenticated-user-id':'synthetic-owner'},body:JSON.stringify(input)}),{REPOSITORY:repository,LOCAL_ONLY:true});return{status:result.status,body:await result.json()};}
+  let auditState=(await repository.readBudgetState()).state;const auditedInput={categoryId:'system:groceries',amount:77000,mode:'template',month:'2026-10',revision:auditState.revision,clientOperationId:randomUUID()},auditedSave=await budgetAuditPost('budget',auditedInput);assert.equal(auditedSave.status,200);const auditRows=await repository.readBudgetHistory({month:'2026-10',categoryId:'system:groceries',limit:100}),auditedEntry=auditRows.find(row=>row.operationId===auditedInput.clientOperationId);assert.ok(auditedEntry);assert.equal(auditedEntry.before.amount,73000);assert.equal(auditedEntry.after.amount,77000);
+  const replayedAuditSave=await budgetAuditPost('budget',auditedInput);assert.deepEqual(replayedAuditSave.body,auditedSave.body);assert.equal((await repository.readBudgetHistory({month:'2026-10',categoryId:'system:groceries',limit:100})).filter(row=>row.operationId===auditedInput.clientOperationId).length,1,'an exact operation replay does not duplicate budget history');
+  auditState=(await repository.readBudgetState()).state;const auditRevert=await budgetAuditPost('budget-history-revert',{historyId:auditedEntry.id,revision:auditState.revision,clientOperationId:randomUUID()});assert.equal(auditRevert.status,200);assert.equal((await repository.readBudgetState()).state.budgetTemplates.find(row=>row.categoryId==='system:groceries'&&row.effectiveFrom==='2026-10').amount,73000,'history revert applies the before-value as a new saved change');assert.equal((await repository.readBudgetHistory({month:'2026-10',categoryId:'system:groceries',limit:100})).length,auditRows.length+1,'reverting appends a new history entry without removing the original');
+  const staleRevert=await budgetAuditPost('budget-history-revert',{historyId:auditedEntry.id,revision:auditState.revision,clientOperationId:randomUUID()});assert.equal(staleRevert.status,409,'history revert rejects a stale revision');
+  auditState=(await repository.readBudgetState()).state;const futureTemplate=await budgetAuditPost('budget',{categoryId:'system:groceries',amount:50000,mode:'template',month:'2027-01',revision:auditState.revision,clientOperationId:randomUUID()});assert.equal(futureTemplate.status,200);
+  auditState=(await repository.readBudgetState()).state;const futureOverride=await budgetAuditPost('budget',{categoryId:'system:groceries',amount:60000,mode:'month',month:'2027-03',revision:auditState.revision,clientOperationId:randomUUID()});assert.equal(futureOverride.status,200);
+  const stopPreview=await worker.fetch(new Request('https://ledger.sqlite.test/api/budget-stop-preview?categoryId=system%3Agroceries&month=2026-11',{headers:{'oai-authenticated-user-id':'synthetic-owner'}}),{REPOSITORY:repository,LOCAL_ONLY:true});const stopPreviewBody=await stopPreview.json();assert.equal(stopPreview.status,200);assert.equal(stopPreviewBody.laterTemplates.length,1);assert.equal(stopPreviewBody.laterOverrides.length,1);
+  auditState=(await repository.readBudgetState()).state;const stopped=await budgetAuditPost('budget-stop-future',{categoryId:'system:groceries',month:'2026-11',confirmFuture:true,revision:auditState.revision,clientOperationId:randomUUID()});assert.equal(stopped.status,200);
+  const stoppedState=(await repository.readBudgetState()).state;assert.equal(stoppedState.budgetTemplates.find(row=>row.categoryId==='system:groceries'&&row.effectiveFrom==='2026-10').amount,73000,'stopping future funding preserves the earlier plan');assert.equal(stoppedState.budgetTemplates.find(row=>row.categoryId==='system:groceries'&&row.effectiveFrom==='2026-11').amount,0,'stopping future funding establishes a known zero from the chosen month');assert.equal(stoppedState.budgetTemplates.some(row=>row.categoryId==='system:groceries'&&row.effectiveFrom==='2027-01'),false);assert.equal(stoppedState.monthlyBudgets['2027-03:system:groceries'],0,'later month overrides cannot restart funding');
+  const stoppedSummary=await(await worker.fetch(new Request('https://ledger.sqlite.test/api/budget-summary?month=2026-11',{headers:{'oai-authenticated-user-id':'synthetic-owner'}}),{REPOSITORY:repository,LOCAL_ONLY:true})).json();assert.equal(stoppedSummary.budgetRollovers['system:groceries'],73000,'zero future funding preserves the accrued bucket carryover');
+  scopedBudgetRevision=stoppedState.revision;
+  transactionGuardDb.exec('DROP TRIGGER forbid_budget_transaction_update;');
+  await scopedBudgetPost('category-update',{id:'legacy:travel',action:'rename',name:'Trip'});
+  const afterScopedCategoryRename=(await repository.read()).state;
+  assert.deepEqual(afterScopedCategoryRename.transactions.map(row=>row.id),['txn-1'],'category rename retains transaction identity through targeted persistence');
+  assert.equal(afterScopedCategoryRename.transactions[0].override,'Trip','category rename updates its matching legacy assignment');
+  assert.equal(afterScopedCategoryRename.transactions[0].overrideCategoryId,'legacy:travel','category rename assigns the stable category ID');
+  transactionGuardDb.exec("CREATE TRIGGER forbid_budget_transaction_update BEFORE UPDATE ON transactions BEGIN SELECT RAISE(ABORT,'synthetic unrelated transaction update'); END;");
+  const manualCreateResponse = await worker.fetch(new Request('https://ledger.sqlite.test/api/manual-account', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'oai-authenticated-user-id': 'synthetic-owner' },
+    body: JSON.stringify({ name: 'Synthetic manual cash', type: 'depository', balance: 8800, currency: 'USD', asOf: '2026-10-25', revision: scopedBudgetRevision })
+  }), { REPOSITORY: repository, LOCAL_ONLY: true });
+  assert.equal(manualCreateResponse.status, 200, await manualCreateResponse.text());
+  const manualCreated = await repository.read(), manualAccount = manualCreated.state.accounts.find(row => row.name === 'Synthetic manual cash');
+  assert.ok(manualAccount?.manual, 'manual account creation persists through the account-scoped writer');
+  const linkedAccount = manualCreated.state.accounts.find(row => row.id === 'account-1');
+  const accountUpdateResponse = await worker.fetch(new Request('https://ledger.sqlite.test/api/account-update', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'oai-authenticated-user-id': 'synthetic-owner' },
+    body: JSON.stringify({ id: linkedAccount.id, action: 'include', value: false, revision: manualCreated.state.revision })
+  }), { REPOSITORY: repository, LOCAL_ONLY: true });
+  assert.equal(accountUpdateResponse.status, 200, await accountUpdateResponse.text());
+  const afterAccountUpdates = (await repository.read()).state;
+  assert.equal(afterAccountUpdates.accounts.find(row => row.id === 'account-1').includeInReporting, false, 'provider-account metadata writes use the account-scoped path');
+  assert.deepEqual(afterAccountUpdates.transactions.map(row => row.id), ['txn-1'], 'manual and provider account edits do not rewrite transactions');
+  let ownerMetadataRevision=afterAccountUpdates.revision;
+  async function scopedOwnerPost(path,input){const result=await worker.fetch(new Request('https://ledger.sqlite.test/api/'+path,{method:'POST',headers:{'Content-Type':'application/json','oai-authenticated-user-id':'synthetic-owner'},body:JSON.stringify({...input,revision:ownerMetadataRevision})}),{REPOSITORY:repository,LOCAL_ONLY:true});const text=await result.text();assert.equal(result.status,200,`${path}: ${text}`);const payload=JSON.parse(text);ownerMetadataRevision=payload.revision;return payload;}
+  await scopedOwnerPost('goal',{name:'Synthetic scoped goal',target:100000,targetDate:'2027-12-31',priority:1,monthlyContribution:0,apyBps:0});
+  const scopedProperty=await scopedOwnerPost('property',{name:'Synthetic scoped property',address:'',ownershipBps:10000,valuation:null});
+  await scopedOwnerPost('mortgage',{propertyId:scopedProperty.property.id,lender:'Synthetic scoped lender',loanType:'other',statementBalance:null,originalPrincipal:null,originationDate:null,annualRatePercent:'',termMonths:null,components:{}});
+  const afterScopedOwnerFamily=(await repository.read()).state;
+  assert.deepEqual(afterScopedOwnerFamily.transactions.map(row=>row.id),['txn-1'],'manual account, provider account, goal, property, and mortgage writes preserve unrelated transaction rows');
+  assert.equal(afterScopedOwnerFamily.revision,ownerMetadataRevision,'owner metadata routes each advance the shared revision exactly once');
+  const revisionBeforeSubsetFailure = ownerMetadataRevision;
+  transactionGuardDb.exec('DROP TRIGGER forbid_budget_transaction_delete; DROP TRIGGER forbid_budget_transaction_insert; DROP TRIGGER forbid_budget_transaction_update;');
+  transactionGuardDb.close();
   await assert.rejects(repository.mutateTransactionSubset(['txn-1'],state=>{state.transactions[0].override='Must Roll Back';throw new Error('synthetic scoped rollback');}),/synthetic scoped rollback/);
-  assert.equal((await repository.read()).state.transactions[0].override,'Groceries','failed scoped edits leave the row unchanged');
-  assert.equal((await repository.read()).state.revision,subsetRevision+1,'failed scoped edits leave the revision unchanged');
+  assert.equal((await repository.read()).state.transactions[0].override,'Trip','failed scoped edits leave the row unchanged');
+  assert.equal((await repository.read()).state.revision,revisionBeforeSubsetFailure,'failed scoped edits leave the revision unchanged');
   await repository.mutateTransactionSubset(['txn-1'],state=>{state.transactions[0].override='Travel';});
   await repository.mutate(state=>{state.items.push({id:'sync-item',cursor:'cursor-before',lifecycle:'connected'});});
   const beforeSyncRevision=(await repository.read()).state.revision;
@@ -94,7 +197,7 @@ try {
   await assert.rejects(repository.mutate(state => {
     state.accounts.push({ id: 'orphan-account', itemId: 'missing-item' });
   }));
-  assert.equal((await repository.read()).state.accounts.length, 1, 'failed FK writes roll back as a unit');
+  assert.equal((await repository.read()).state.accounts.length, 2, 'failed FK writes roll back without removing the synthetic manual account');
   await repository.close();
 
   const db = new Database(databasePath, { readonly: true, fileMustExist: true });
@@ -102,14 +205,14 @@ try {
   assert.equal(db.pragma('foreign_keys', { simple: true }), 1);
   assert.equal(db.pragma('integrity_check', { simple: true }), 'ok');
   assert.deepEqual(db.pragma('foreign_key_check'), []);
-  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name IN ('transactions_date_id_idx','transactions_account_date_id_idx','transactions_item_date_id_idx')").get().count,3,'schema migration creates the date/account/item page indexes');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name IN ('transactions_date_id_idx','transactions_account_date_id_idx','transactions_item_date_id_idx','transactions_budget_analytics_idx')").get().count,4,'schema migration creates the date/account/item page indexes and covering budget analytics index');
   db.close();
 
   const backupPath = join(directory, 'verified.sqlite');
   const backupResult = spawnSync(process.execPath, ['scripts/sqlite-backup.mjs', databasePath, backupPath], { cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8' });
   assert.equal(backupResult.status, 0, backupResult.stderr);
   assert.equal(JSON.parse(backupResult.stdout).ok, true);
-  assert.equal(JSON.parse(backupResult.stdout).schemaVersion, 3, 'backup manifest reports the database schema it contains');
+  assert.equal(JSON.parse(backupResult.stdout).schemaVersion, 7, 'backup manifest reports the database schema it contains');
   assert.equal((await stat(backupPath)).mode & 0o777, 0o600);
   const restoredPath = join(directory, 'restored.sqlite');
   const restoreResult = spawnSync(process.execPath, ['scripts/sqlite-restore.mjs', backupPath, restoredPath], { cwd: resolve(import.meta.dirname, '..'), encoding: 'utf8' });
@@ -117,7 +220,7 @@ try {
   const restored = new Database(restoredPath, { readonly: true, fileMustExist: true });
   assert.equal(restored.pragma('integrity_check', { simple: true }), 'ok');
   assert.equal(restored.prepare('SELECT COUNT(*) AS count FROM transactions').get().count, 1);
-  assert.equal(restored.prepare('SELECT COUNT(*) AS count FROM budget_templates').get().count,1);
+  assert.equal(restored.prepare("SELECT amount FROM budget_templates WHERE category_id='system:groceries' AND effective_from='2026-10'").get().amount,73000,'the scoped budget edit survives backup and restore');
   assert.equal(restored.prepare('SELECT amount FROM monthly_budgets').get().amount,0);
   assert.equal(restored.prepare("SELECT json_extract(payload_json, '$.override') AS value FROM transactions").get().value, 'Travel');
   restored.close();
@@ -160,6 +263,7 @@ try {
   assert.deepEqual((await metadataOnlyRepository.read()).state.goals, [{id:'preserve-me'}], 'metadata-only entities prevent an import from overwriting them');
   await metadataOnlyRepository.close();
 
+  const splitReportRepository=await createSqliteRepositoryAt(join(directory,'split-report.sqlite'));await splitReportRepository.mutate(state=>{state.transactions=[{id:'parent',accountId:'cash',date:'2026-10-10',amount:10000,currency:'USD',category:'Other',categoryId:'system:other'}];state.transactionSplits=[{id:'split',transactionId:'parent',parentAmount:10000,parentDate:'2026-10-10',parentAccountId:'cash',parentCurrency:'USD',allocations:[{id:'s1',categoryId:'system:groceries',amount:6000},{id:'s2',categoryId:'system:dining',amount:4000}]}];});const splitMonth=(await splitReportRepository.queryMonthSummary('2026-10')).current;assert.equal(splitMonth.spend,10000);assert.deepEqual(splitMonth.categories,{Groceries:6000,Dining:4000},'SQLite Overview counts split allocations instead of the parent category');await splitReportRepository.close();
   const orderingRepository=await createSqliteRepositoryAt(join(directory,'ordering.sqlite'));
   await orderingRepository.mutate(state=>{state.transactions=[{id:'z-last',date:'2026-10-25',merchant:'Same day Z',amount:200,currency:'USD',category:'Dining'},{id:'a-first',date:'2026-10-25',merchant:'Same day A',amount:300,currency:'USD',category:'Dining'},{id:'refund',date:'2026-10-24',merchant:'Refund',amount:-50,currency:'USD',category:'Dining'},{id:'pending',date:'2026-10-24',merchant:'Pending',amount:500,currency:'USD',category:'Dining',pending:true}];});
   const orderedPage=await orderingRepository.queryTransactions({page:1,limit:3,from:'2026-10-01',to:'2026-10-31'});
@@ -191,11 +295,13 @@ try {
 
   const budgetPersistencePath=join(directory,'budget-template-persistence.sqlite'),budgetMonthParts=new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit'}).formatToParts(new Date()),budgetCurrentMonth=budgetMonthParts.find(part=>part.type==='year').value+'-'+budgetMonthParts.find(part=>part.type==='month').value,budgetPriorDate=new Date(budgetCurrentMonth+'-01T12:00:00Z');budgetPriorDate.setUTCMonth(budgetPriorDate.getUTCMonth()-1);const budgetPriorMonth=budgetPriorDate.toISOString().slice(0,7),budgetCategoryId='custom:budget-persistence';
   const budgetPersistenceRepository=await createSqliteRepositoryAt(budgetPersistencePath);
-  await budgetPersistenceRepository.mutate(state=>{state.categoryRecords=[{id:budgetCategoryId,name:'Current Budget Name',normalizedName:'current budget name',kind:'expense',system:false,order:20,archivedAt:null}];state.customCategories=['Current Budget Name'];state.budgets={'Current Budget Name':10000};state.budgetHistoryUnavailableBefore=budgetPriorMonth;state.budgetTemplates=[{categoryId:budgetCategoryId,amount:10000,effectiveFrom:budgetCurrentMonth}];state.monthlyBudgets={[`${budgetPriorMonth}:${budgetCategoryId}`]:0};});
+  await budgetPersistenceRepository.mutate(state=>{state.categoryRecords=[{id:budgetCategoryId,name:'Current Budget Name',normalizedName:'current budget name',kind:'expense',system:false,order:20,archivedAt:null}];state.customCategories=['Current Budget Name'];state.budgets={'Current Budget Name':10000};state.budgetHistoryUnavailableBefore=budgetPriorMonth;state.budgetTemplates=[{categoryId:budgetCategoryId,amount:10000,effectiveFrom:budgetCurrentMonth}];state.budgetTemplateSchedules={[`${budgetCategoryId}:${budgetCurrentMonth}`]:{frequency:'annual',dueMonth:11,sourceAmount:120000}};state.monthlyBudgets={[`${budgetPriorMonth}:${budgetCategoryId}`]:0};state.monthlyBudgetSchedules={[`${budgetPriorMonth}:${budgetCategoryId}`]:{frequency:'monthly',dueMonth:null,sourceAmount:0}};});
   await budgetPersistenceRepository.close();
   const reopenedBudgetRepository=await createSqliteRepositoryAt(budgetPersistencePath),reopenedBudgetState=(await reopenedBudgetRepository.read()).state;
   assert.deepEqual(reopenedBudgetState.budgetTemplates,[{categoryId:budgetCategoryId,amount:10000,effectiveFrom:budgetCurrentMonth}],'explicit category budget template survives SQLite close and reopen');
   assert.equal(reopenedBudgetState.monthlyBudgets[`${budgetPriorMonth}:${budgetCategoryId}`],0,'SQLite preserves explicit zero month overrides alongside templates');
+  assert.deepEqual(reopenedBudgetState.budgetTemplateSchedules[`${budgetCategoryId}:${budgetCurrentMonth}`],{frequency:'annual',dueMonth:11,sourceAmount:120000},'SQLite preserves schedule metadata with its effective template');
+  assert.deepEqual(reopenedBudgetState.monthlyBudgetSchedules[`${budgetPriorMonth}:${budgetCategoryId}`],{frequency:'monthly',dueMonth:null,sourceAmount:0},'SQLite preserves schedule metadata for a zero month override');
   await reopenedBudgetRepository.mutate(state=>{state.categoryRecords[0]={...state.categoryRecords[0],name:'Renamed Budget'};state.customCategories=['Renamed Budget'];state.budgets={'Renamed Budget':10000};});
   await reopenedBudgetRepository.close();
   const renamedBudgetRepository=await createSqliteRepositoryAt(budgetPersistencePath),renamedBudgetState=(await renamedBudgetRepository.read()).state;
@@ -210,7 +316,7 @@ try {
   oldDb.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(1,?)').run(new Date().toISOString());
   oldDb.close();
   const migrated=await openLedgerDatabase(legacyDatabase);
-  assert.equal(migrated.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,3);
+  assert.equal(migrated.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,7);
   assert.equal(migrated.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='monthly_budgets'").get().count,1);
   migrated.close();
   const migrationBackupDirectory=join(directory,'backups');
@@ -224,9 +330,30 @@ try {
   assert.equal(preMigrationBackup.prepare('SELECT COUNT(*) AS count FROM schema_migrations').get().count,1,'backup captured the old schema before applying migration 002');
   preMigrationBackup.close();
 
+  const migration3Directory=join(directory,'version-3-migration');await mkdir(migration3Directory,{mode:0o700});
+  const migration3Path=join(migration3Directory,'ledger.sqlite'),migration3Db=new Database(migration3Path);
+  for(const [version,file] of [[1,'001-initial.sql'],[2,'002-monthly-budgets.sql'],[3,'003-transaction-query-indexes.sql']]){migration3Db.exec(await readFile(new URL(`../server/migrations/${file}`,import.meta.url),'utf8'));migration3Db.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)').run(version,new Date().toISOString());}
+  const legacyReplay={id:'f4248bc1-e924-4db0-a726-616e4ac340f6',fingerprint:'manual-account\n{"amount":1,"revision":7}',response:{ok:true,revision:8},createdAt:'2026-10-28T12:00:00.000Z'};
+  migration3Db.prepare('INSERT INTO state_meta(singleton,payload_json) VALUES(1,?)').run(JSON.stringify({version:1,owner:'synthetic-migration-owner',revision:7,operationResults:[legacyReplay],budgetTemplateSchedules:{'custom:annual:2026-10':{frequency:'annual',dueMonth:11,sourceAmount:120000}},monthlyBudgetSchedules:{'2026-10:custom:zero':{frequency:'monthly',dueMonth:null,sourceAmount:0}}}));
+  migration3Db.prepare('INSERT INTO budget_templates(category_id,effective_from,amount) VALUES(?,?,?)').run('custom:annual','2026-10',10000);
+  migration3Db.prepare('INSERT INTO monthly_budgets(month,category_id,amount) VALUES(?,?,?)').run('2026-10','custom:zero',0);
+  migration3Db.prepare('INSERT INTO transactions(id,account_id,item_id,payload_json) VALUES(?,?,?,?)').run('migration-3-transaction',null,null,JSON.stringify({id:'migration-3-transaction',date:'2026-10-01',amount:1234,currency:'USD',category:'Groceries'}));migration3Db.close();
+  const migrated3=await openLedgerDatabase(migration3Path);
+  assert.equal(migrated3.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,7,'version-3 databases migrate additively to budget history');
+  assert.equal(migrated3.prepare('SELECT id FROM transactions').get().id,'migration-3-transaction','version-3 migration preserves existing transaction identity');
+  assert.equal(migrated3.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='index' AND name='transactions_budget_analytics_idx'").get().count,1,'version-3 migration creates the covering analytics index');
+  const migratedReplay=migrated3.prepare('SELECT scope,payload_digest,response_json,revision FROM operation_results WHERE operation_id=?').get(legacyReplay.id);
+  assert.equal(migratedReplay.scope,'manual-account');assert.equal(migratedReplay.payload_digest,createHash('sha256').update(legacyReplay.fingerprint).digest('hex'));assert.deepEqual(JSON.parse(migratedReplay.response_json),legacyReplay.response);assert.equal(migratedReplay.revision,8);
+  const canonicalAnnual=migrated3.prepare("SELECT monthly_cents,source_cents,frequency,due_month FROM budget_records WHERE category_id='custom:annual'").get();assert.deepEqual(canonicalAnnual,{monthly_cents:10000,source_cents:120000,frequency:'annual',due_month:11},'legacy amount and schedule migrate together without changing the annual source amount');
+  const canonicalZero=migrated3.prepare("SELECT monthly_cents,source_cents,frequency FROM budget_records WHERE category_id='custom:zero'").get();assert.deepEqual(canonicalZero,{monthly_cents:0,source_cents:0,frequency:'monthly'},'a known zero survives the budget-record migration');
+  const migratedMeta=JSON.parse(migrated3.prepare('SELECT payload_json FROM state_meta').get().payload_json);assert.equal(Object.hasOwn(migratedMeta,'operationResults'),false,'legacy raw fingerprints are removed only after indexed insertion');assert.equal(Object.hasOwn(migratedMeta,'budgetTemplateSchedules'),false,'budget schedule metadata is moved out of the JSON state');migrated3.close();
+  const migratedBudgetRepository=await createSqliteRepositoryAt(migration3Path),migratedBudgetState=(await migratedBudgetRepository.read()).state;assert.deepEqual(migratedBudgetState.budgetTemplates,[{categoryId:'custom:annual',effectiveFrom:'2026-10',amount:10000}]);assert.deepEqual(migratedBudgetState.budgetTemplateSchedules['custom:annual:2026-10'],{frequency:'annual',dueMonth:11,sourceAmount:120000});assert.equal(migratedBudgetState.monthlyBudgets['2026-10:custom:zero'],0);assert.equal(migratedBudgetState.monthlyBudgetSchedules['2026-10:custom:zero'].sourceAmount,0);await migratedBudgetRepository.close();
+  const migration3Backups=(await readdir(join(migration3Directory,'backups'))).filter(name=>name.endsWith('.sqlite'));assert.equal(migration3Backups.length,1);
+  const migration3Backup=new Database(join(migration3Directory,'backups',migration3Backups[0]),{readonly:true,fileMustExist:true});assert.equal(migration3Backup.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version,3,'automatic rollback copy preserves the pre-v4 database');assert.equal(migration3Backup.prepare('SELECT id FROM transactions').get().id,'migration-3-transaction');migration3Backup.close();
+
   const futureSchemaPath=join(directory,'future-schema.sqlite'),futureSchema=new Database(futureSchemaPath);
   futureSchema.pragma('journal_mode = DELETE');futureSchema.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL); CREATE TABLE future_data(value TEXT);');
-  futureSchema.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(4,?)').run(new Date().toISOString());futureSchema.prepare('INSERT INTO future_data(value) VALUES(?)').run('preserved');futureSchema.close();
+  futureSchema.prepare('INSERT INTO schema_migrations(version,applied_at) VALUES(8,?)').run(new Date().toISOString());futureSchema.prepare('INSERT INTO future_data(value) VALUES(?)').run('preserved');futureSchema.close();
   await assert.rejects(openLedgerDatabase(futureSchemaPath),/newer than this application supports/);
   const afterFutureRefusal=new Database(futureSchemaPath,{readonly:true,fileMustExist:true});assert.equal(afterFutureRefusal.pragma('journal_mode',{simple:true}),'delete','future-schema refusal does not change the database journal mode');assert.equal(afterFutureRefusal.prepare('SELECT value FROM future_data').get().value,'preserved');afterFutureRefusal.close();
 

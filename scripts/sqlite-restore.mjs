@@ -3,16 +3,18 @@ import { chmod, mkdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { verifyRecoveryBundle } from './recovery-bundle.mjs';
 
 process.umask(0o077);
 
 const [backupArg, destinationArg] = process.argv.slice(2);
-if (!backupArg || !destinationArg || process.argv.length !== 4) throw new Error('Usage: node scripts/sqlite-restore.mjs BACKUP_FILE NEW_DATABASE_PATH');
-const backupPath = resolve(backupArg);
+if (!backupArg || !destinationArg || process.argv.length !== 4) throw new Error('Usage: node scripts/sqlite-restore.mjs BACKUP_FILE_OR_RECOVERY_BUNDLE NEW_DATABASE_PATH');
+const backupSource=resolve(backupArg),backupInfo=await stat(backupSource),recoveryBundle=backupInfo.isDirectory();
+let backupPath=recoveryBundle?(await verifyRecoveryBundle(backupSource)).databasePath:backupSource;
 const destination = resolve(destinationArg);
 if (process.env.LEDGER_RESTORE_LOCKED !== '1') {
-  const lockPath = resolve(dirname(backupPath), 'backup.lock');
-  const result = spawnSync('flock', ['-n', '-F', lockPath, process.execPath, resolve(import.meta.filename), backupPath, destination], {
+  const lockPath = resolve(dirname(backupSource), 'backup.lock');
+  const result = spawnSync('flock', ['-n', '-F', lockPath, process.execPath, resolve(import.meta.filename), backupSource, destination], {
     encoding: 'utf8', stdio: 'inherit', env: { ...process.env, LEDGER_RESTORE_LOCKED: '1' }
   });
   if (result.error) throw new Error('Could not acquire the local backup recovery lock.');

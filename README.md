@@ -2,18 +2,27 @@
 
 A personal finance dashboard hosted on a Jetson. Source code lives at https://github.com/pterbrwn/finance-app. GitHub contains code and synthetic test fixtures only.
 
-## Current operational build
+## Last recorded deployed build
 
-The private service runs release `7b922e5` on Node.js 24.22.1 with SQLite schema 3. The existing JSON state was imported and reconciled before activation; its paired JSON/config recovery copy remains private on the Jetson. The verified daily SQLite backup timer is active. The bank sync timer remains disabled. Existing provider records without a saved environment are blocked from sync until that environment is independently verified; manual entry and CSV import remain available.
+The last recorded deployed service ran release `7b922e5` on Node.js 24.22.1 with SQLite schema 3. At that handoff, the existing JSON state had been imported and reconciled before activation, and its paired JSON/config recovery copy remained private on the Jetson. The daily SQLite backup timer was active and the bank sync timer remained disabled. Provider records without a saved environment were blocked from sync until that environment could be independently verified; manual entry and CSV import remained available.
+
+## Current source candidate
+
+The checkout contains uncommitted stability improvements based on source commit `6d5fc0c`. This candidate has not been built from a committed repository revision or activated; the last recorded deployed build is described above. Synthetic verification passes with `npm run check`, `npm run check:local-http`, `npm run check:browser:harness`, and `npm run check:browser`. Chromium's accessibility tree also confirms landmarks and headings across all eight views, table row/cell semantics, and named controls in the category and import dialogs. The committed disposable Node 24.22.1 source-copy install and full check pass, `npm audit` reports zero vulnerabilities, and the synthetic immutable-release/rollback rehearsal passes. The committed-response recovery matrix covers the current replay-safe mutation inventory, including retries after SQLite server restarts. Remaining work includes actual screen-reader and physical 200% zoom checks and a full privacy review of all repository content. The code-safe changed-file Gitleaks scan found no leaks; the staged-source boundary check covers only the 70 files in the Git index. No live configuration or financial records were changed during this candidate work.
+
+The active queue and exact scope are in the [stability implementation plan](docs/STABILITY_IMPLEMENTATION_PLAN.md); the [stability execution record](docs/STABILITY_EXECUTION_2026-10-28.md) distinguishes completed synthetic checks from remaining release and manual checks. Passing automated checks does not approve a deployment.
+
+The current dirty candidate also implements the product work in [PRODUCT_IMPLEMENTATION_PLAN_LUNA_HIGH.md](docs/PRODUCT_IMPLEMENTATION_PLAN_LUNA_HIGH.md), with evidence in [PRODUCT_IMPLEMENTATION_EXECUTION.md](docs/PRODUCT_IMPLEMENTATION_EXECUTION.md). New product work includes budget history and forecast limits, statement reviews, transaction splits, dated commitments, and portable financial export. It is synthetic-candidate code only and has not been activated. Encrypted off-device backup requires an operator-configured `age` executable, recipient, and destination; no destination or timer is configured here.
 
 ## Privacy and access
 
 - Financial records are stored on the Jetson under `~/.local/state/ledger/`, outside the repository. The current service uses SQLite; a checksummed pre-migration JSON/config pair is retained in a private recovery directory. Directories use permissions `700` and private files use `600`.
+- The SQLite financial database is not encrypted at rest by Ledger. The local service trusts loopback and the configured Tailscale owner boundary; protect the Jetson account, disk, and backups with operating-system access controls and device encryption. Recovery bundles include the matching configuration and token-encryption key, so the bundle itself is key-bearing and must remain private.
 - Credentials and the bank token encryption key live in `~/.config/ledger/config.json` with permissions `600`. Never paste them into chat, a GitHub issue, or source code.
 - The Jetson service listens only on `127.0.0.1:3001` (the development default is port 3000). Tailscale Serve provides a private HTTPS address for remote access. The configured Tailscale owner is required; other tailnet identities and anonymous requests are rejected.
 - Remote access requires Tailscale on the client. Do not enable Tailscale Funnel, public port forwarding, or public hosting. Tailscale HTTPS certificate names appear in public certificate transparency logs; financial content remains private.
 - Plaid may process bank data when enabled. Ledger's database, bank tokens, and credentials remain on the Jetson; no Sites, R2, GitHub, or cloud job stores them.
-- Viewing the dashboard sends records to your authenticated browser. Responses use `Cache-Control: no-store`; there is no browser database or transaction cache. Export CSV explicitly downloads records to the device running your browser.
+- Viewing the dashboard sends records to your authenticated browser. Responses use `Cache-Control: no-store`; there is no browser database or transaction cache. For save recovery, the current tab may keep only an operation ID, write scope, base revision, and start time in `sessionStorage`; it never stores form values, account IDs, CSV content, or credentials. Export CSV explicitly downloads records to the device running your browser.
 - With bank integration disabled or unconfigured, browser policy blocks external scripts, frames, and network connections. The app includes no analytics, remote fonts, or external assets.
 
 ## Run locally
@@ -120,7 +129,7 @@ Plaid sync collects pagination before committing, restarts after pagination muta
 
 ## Checks and source control
 
-For the current testing handoff, use the [automated testing execution plan](docs/AUTOMATED_TESTING_PLAN.md) and [browser acceptance playbook](docs/AGENT_BROWSER_REPAIR_PLAN.md). The transaction-save repair and budget plan-versus-actual implementation are in the current release candidate, with the verified coverage and remaining acceptance gaps recorded in [CURRENT_STATE_REPORT.md](docs/CURRENT_STATE_REPORT.md).
+For the active stabilization handoff, use the [stability implementation plan](docs/STABILITY_IMPLEMENTATION_PLAN.md) and its [execution record](docs/STABILITY_EXECUTION_2026-10-28.md). Earlier testing notes remain available in the [automated testing execution plan](docs/AUTOMATED_TESTING_PLAN.md) and [browser acceptance playbook](docs/AGENT_BROWSER_REPAIR_PLAN.md).
 
 The [budget plan-versus-actual update plan](docs/BUDGET_PLAN_VS_ACTUAL_PLAN.md) records the original requirements and acceptance cases for compact rows, projected income, running bucket deductions, actual results, and month-end outlook. The implementation is now available in Budgets; the plan's remaining test cases are still useful for manual acceptance.
 
@@ -132,7 +141,7 @@ npm run check:source
 
 The HTTP suite uses disposable synthetic data and tests imports, restart persistence, permissions, Host/Origin protections, Tailscale identity checks, and local-only mode. It does not load your private config or production records.
 
-Automated browser acceptance covers 1440, 390, and 320 CSS px, keyboard workflows, dialogs, chart data alternatives, and a 720 CSS px zoom proxy. The owner accepted the manual accessibility item for this deployment; headless automation does not emulate a screen reader or actual 200% browser zoom.
+Automated browser acceptance for the candidate covers 1440, 390, and 320 CSS px, keyboard workflows, dialogs, chart data alternatives, and a 720 CSS px viewport proxy. A Chromium accessibility-tree check verifies landmarks, headings, table semantics, and named dialog controls. The candidate's actual screen-reader assessment and physical 200% browser zoom remain unrun; headless automation and the viewport proxy do not replace those checks.
 
 The repository ignores local config, runtime state, bank exports, databases, logs, certificates, generated builds, and hosting metadata. Install [Gitleaks](https://github.com/gitleaks/gitleaks), ensure it is on PATH, and enable the included hooks:
 

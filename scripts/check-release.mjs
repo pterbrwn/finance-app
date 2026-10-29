@@ -13,6 +13,8 @@ if(!process.argv[2])throw new Error('Usage: node scripts/check-release.mjs IMMUT
 assert.equal(spawnSync(runtime,['--version'],{encoding:'utf8'}).stdout.trim(),'v24.22.1','release checks require pinned Node.js 24.22.1');
 const release=JSON.parse(await readFile(join(releaseRoot,'release.json'),'utf8'));
 assert.equal(release.nodeVersion,'24.22.1');
+for(const required of ['encrypted-backup.mjs','portable-export.mjs'])await stat(join(releaseRoot,'scripts',required));
+await stat(join(releaseRoot,'shared','categories.mjs'));
 const manifest=(await readFile(join(releaseRoot,'manifest.sha256'),'utf8')).trim().split('\n');
 for(const line of manifest){
   const match=line.match(/^([a-f0-9]{64})  (.+)$/);assert.ok(match,`invalid release manifest line: ${line}`);
@@ -43,6 +45,12 @@ try{
   const backupPath=join(directory,'backup.sqlite'),restoredPath=join(directory,'restored.sqlite');
   const backup=JSON.parse(run('sqlite-backup.mjs',[databasePath,backupPath]));assert.equal(backup.schemaVersion,release.schemaVersion);
   run('sqlite-restore.mjs',[backupPath,restoredPath]);
+  const portablePath=join(directory,'portable.json');
+  const portable=spawnSync(runtime,[join(releaseRoot,'scripts','portable-export.mjs')],{cwd:directory,encoding:'utf8',env:{...process.env,LEDGER_NODE_BIN:runtime,LEDGER_LOCAL_DATA_DIR:dataDirectory,LEDGER_PORTABLE_EXPORT_FILE:portablePath}});
+  assert.equal(portable.status,0,`packaged portable export failed: ${portable.stderr||portable.stdout}`);
+  const portableSnapshot=JSON.parse(await readFile(portablePath,'utf8'));assert.equal(portableSnapshot.format,'ledger-portable-finance');assert.equal(portableSnapshot.data.transactions[0].id,'release-fixture');assert.equal(JSON.stringify(portableSnapshot).includes('tokenEncryptionKey'),false);
+  const encryptedCli=spawnSync(runtime,[join(releaseRoot,'scripts','encrypted-backup.mjs')],{cwd:directory,encoding:'utf8',env:{...process.env,LEDGER_NODE_BIN:runtime}});
+  assert.equal(encryptedCli.status,1,'packaged encrypted recovery command starts and fails closed without operator configuration');assert.match(encryptedCli.stderr,/Set LEDGER_RECOVERY_BUNDLE/);
   const serverFile=join(releaseRoot,'scripts/start-ledger.sh');
   const portProbe=createServer();await new Promise((resolve,reject)=>portProbe.once('error',reject).listen(0,'127.0.0.1',resolve));const port=portProbe.address().port;await new Promise(resolve=>portProbe.close(resolve));
   server=spawn(serverFile,{cwd:directory,env:{...process.env,LEDGER_NODE_BIN:runtime,LEDGER_CONFIG_FILE:configPath,LEDGER_LOCAL_DATA_DIR:dataDirectory,PORT:String(port)},stdio:['ignore','pipe','pipe']});

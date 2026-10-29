@@ -18,7 +18,7 @@ if [[ -e "$release_root/$release_id" ]]; then
 fi
 work_dir="$(mktemp -d "${release_root}/.prepare-${release_id}.XXXXXX")"
 trap 'chmod -R u+w "$work_dir" 2>/dev/null || true; rm -rf "$work_dir"' EXIT
-mkdir -p "$work_dir/source" "$work_dir/release/scripts" "$work_dir/release/dist" "$work_dir/release/deploy"
+mkdir -p "$work_dir/source" "$work_dir/release/scripts" "$work_dir/release/dist" "$work_dir/release/deploy" "$work_dir/release/shared"
 git -C "$repo_root" archive --format=tar "$release_id" | tar -xf - -C "$work_dir/source"
 node_dir="$(dirname "$node_bin")"
 PATH="$node_dir:$PATH" "$node_bin" "$node_dir/../lib/node_modules/npm/bin/npm-cli.js" ci --omit=dev --prefix "$work_dir/source"
@@ -26,9 +26,10 @@ PATH="$node_dir:$PATH" "$node_bin" "$node_dir/../lib/node_modules/npm/bin/npm-cl
 cp -R "$work_dir/source/dist/." "$work_dir/release/dist/"
 cp "$work_dir/source/package.json" "$work_dir/release/package.json"
 cp "$work_dir/source/package-lock.json" "$work_dir/release/package-lock.json"
-for file in dev-server.mjs runtime.mjs local-storage.mjs sync.mjs import-legacy-json.mjs sqlite-backup.mjs sqlite-restore.mjs backup-runner.mjs backup-retention.mjs start-ledger.sh start-sync.sh start-backup.sh; do
+for file in dev-server.mjs runtime.mjs local-storage.mjs sync.mjs import-legacy-json.mjs sqlite-backup.mjs sqlite-restore.mjs backup-runner.mjs backup-retention.mjs recovery-bundle.mjs encrypted-backup.mjs portable-export.mjs start-ledger.sh start-sync.sh start-backup.sh; do
   cp "$work_dir/source/scripts/$file" "$work_dir/release/scripts/$file"
 done
+cp "$work_dir/source/shared/categories.mjs" "$work_dir/release/shared/categories.mjs"
 for file in ledger.service ledger-sync.service ledger-sync.timer ledger-backup.service ledger-backup.timer; do
   cp "$work_dir/source/deploy/$file" "$work_dir/release/deploy/$file"
 done

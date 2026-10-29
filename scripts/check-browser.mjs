@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -7,6 +7,10 @@ import { createServer } from 'node:net';
 import { chromium } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
+if (process.env.BROWSER_CASE) {
+  const { runBrowserCase } = await import('./browser-cases.mjs');
+  await runBrowserCase(process.env.BROWSER_CASE);
+} else {
 assert.match(process.version,/^v24\.22\.1$/,'browser acceptance uses pinned Node.js 24.22.1');
 const appRoot=resolve(import.meta.dirname,'..'),directory=await mkdtemp(join(tmpdir(),'ledger-browser-'));
 await (await import('node:fs/promises')).chmod(directory,0o700);
@@ -14,7 +18,8 @@ const configPath=join(directory,'config.json');await writeFile(configPath,JSON.s
 const probe=createServer();await new Promise((resolve,reject)=>probe.once('error',reject).listen(0,'127.0.0.1',resolve));const port=probe.address().port;await new Promise(resolve=>probe.close(resolve));
 const child=spawn('bash',['scripts/start-ledger.sh'],{cwd:appRoot,env:{...process.env,PORT:String(port),LEDGER_NODE_BIN:process.execPath,LEDGER_LOCAL_DATA_DIR:directory,LEDGER_CONFIG_FILE:configPath},stdio:['ignore','pipe','pipe']});
 let logs='';child.stdout.on('data',chunk=>logs+=chunk);child.stderr.on('data',chunk=>logs+=chunk);
-let browser;
+let browser,context,page,traceStarted=false;
+const browserErrors=[],consoleErrors=[],apiFailures=[],observedRequests=[],sampleWrites=[],failures=[];
 try{
   let ready=false;
   for(let attempt=0;attempt<80;attempt++){
@@ -24,15 +29,14 @@ try{
   }
   assert.ok(ready,`synthetic server did not become ready: ${logs}`);
   browser=await chromium.launch({headless:true});
-  const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage();
-  const browserErrors=[];
+  context=await browser.newContext({viewport:{width:1440,height:1000}});page=await context.newPage();
+  await context.tracing.start({screenshots:true,snapshots:true,sources:true});traceStarted=true;
   let expectedDialog=null;
   page.on('dialog',async dialog=>{const expected=expectedDialog;expectedDialog=null;if(!expected){logs+='\nunexpected dialog ('+dialog.type()+'): '+dialog.message();await dialog.dismiss();return;}try{assert.match(dialog.message(),expected.pattern,'confirmation names the requested action');await dialog[expected.action]();expected.resolve();}catch(error){expected.reject(error);}});
   async function withDialog(pattern,action,trigger){assert.equal(expectedDialog,null,'no previous confirmation is pending');let resolve,reject;const handled=new Promise((yes,no)=>{resolve=yes;reject=no;});expectedDialog={pattern,action,resolve,reject};await trigger();await handled;}
   page.on('pageerror',error=>{browserErrors.push(error.message);logs+=`\npageerror: ${error.message}`;});
-  page.on('console',message=>{if(message.type()==='error')logs+=`\nconsole: ${message.text()}`;});
-  const observedRequests=[];page.on('request',request=>{if(request.url().includes('/api/category-bulk'))observedRequests.push(request.method()+' '+request.url());});
-  const failures=[];
+  page.on('response',response=>{const url=new URL(response.url());if(url.pathname.startsWith('/api/')&&response.status()>=400)apiFailures.push({method:response.request().method(),path:url.pathname,status:response.status()});});page.on('console',message=>{if(message.type()==='error'){const text=message.text();if(!text.startsWith('Failed to load resource:'))consoleErrors.push(text);logs+=`\nconsole: ${text}`;}});
+  page.on('request',request=>{if(request.url().includes('/api/category-bulk'))observedRequests.push(request.method()+' '+request.url());if(request.url().includes('/api/')&&request.method()==='POST')sampleWrites.push(request.method()+' '+request.url());});
   async function audit(label){
     const result=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();
     const serious=result.violations.filter(row=>['critical','serious'].includes(row.impact));
@@ -43,8 +47,22 @@ try{
   const qaMonthParts=new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit'}).formatToParts(new Date());
   const selectedMonth=qaMonthParts.find(part=>part.type==='year').value+'-'+qaMonthParts.find(part=>part.type==='month').value;
   const testDate=selectedMonth+'-12';
+  const observationParts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()),observationDate=observationParts.find(part=>part.type==='year').value+'-'+observationParts.find(part=>part.type==='month').value+'-'+observationParts.find(part=>part.type==='day').value;
   await audit('overview');
-  for(const view of ['transactions','budgets','accounts','investments','goals','home','settings'])await visit(view);
+  for(const view of ['transactions','budgets','commitments','accounts','investments','goals','home','settings'])await visit(view);
+
+  await page.locator('[data-view="overview"]').first().click();
+  const beforeSample=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,snapshots:state.balanceSheetSnapshots.length})));
+  await page.getByRole('button',{name:'Explore sample data'}).click();
+  assert.equal(await page.locator('.balance-sheet').count(),0,'sample Overview never renders saved balance sheet data or snapshot controls');
+  assert.match(await page.locator('.bank-mini').innerText(),/Sample preview/,'sample mode does not reveal the saved account count');
+  await page.locator('[data-view="transactions"]').first().click();
+  const sampleCategory=page.locator('[data-category]').first();await sampleCategory.waitFor();await sampleCategory.selectOption({label:'Shopping'});
+  await page.waitForTimeout(100);
+  assert.deepEqual(sampleWrites,[],'sample edits never send mutation requests');
+  const afterSample=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,snapshots:state.balanceSheetSnapshots.length})));
+  assert.deepEqual(afterSample,beforeSample,'sample preview leaves persisted revision and snapshots unchanged');
+  await page.locator('[data-exit-demo]').first().click();
 
   await page.locator('[data-view="transactions"]').first().click();
   const emptyCount=await page.evaluate(async()=>((await fetch('/api/state')).json()).then(state=>state.transactionCount));assert.equal(emptyCount,0,'the initial manual-only dataset is empty');
@@ -77,6 +95,18 @@ try{
   await bulkImportDialog.getByRole('button',{name:'Commit 2 rows'}).click();
   const bulkImportBatch=await(await bulkCommitResponse).json();
   await page.keyboard.press('Escape');
+  await page.locator('[data-view="overview"]').first().click();
+  const overviewRecent=page.locator('.transactions tbody tr').filter({hasText:'Synthetic bulk market'}).locator('[data-category]');
+  await overviewRecent.waitFor();
+  await page.route('**/api/month-summary*',route=>route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({error:'Synthetic summary failure.'})}));
+  const overviewCategoryResponse=page.waitForResponse(response=>response.url().endsWith('/api/category')&&response.request().method()==='POST');
+  await overviewRecent.selectOption({label:'Dining'});
+  assert.equal((await overviewCategoryResponse).status(),200,'the Overview recent row saves its category using its month-summary record');
+  await page.locator('.error-note').filter({hasText:'Synthetic summary failure.'}).waitFor();
+  assert.equal(await page.locator('.metric.featured .value').innerText(),'$31.25','a failed refresh keeps the last coherent spending total');
+  await page.unroute('**/api/month-summary*');await page.locator('#retry-load').click();await page.locator('.error-note').filter({hasText:'Synthetic summary failure.'}).waitFor({state:'detached'});
+  const overviewRestoreResponse=page.waitForResponse(response=>response.url().endsWith('/api/category')&&response.request().method()==='POST');await page.locator('.transactions tbody tr').filter({hasText:'Synthetic bulk market'}).locator('[data-category]').selectOption({label:'Groceries'});assert.equal((await overviewRestoreResponse).status(),200,'the Overview regression restores its synthetic row before later budget assertions');
+  await page.locator('[data-view="transactions"]').first().click();
   await page.locator('#search').fill('Synthetic bulk market');
   await page.getByText('Synthetic bulk market',{exact:true}).waitFor();
   await page.getByRole('checkbox',{name:'Select Synthetic bulk market'}).check();
@@ -122,7 +152,7 @@ try{
   assert.equal(reloadedIndividual.override,'Dining','individual category edit survives reload');
   await page.locator('#search').fill('Synthetic');
   const remainingActual=await page.evaluate(async month=>fetch('/api/month-summary?month='+encodeURIComponent(month)).then(response=>response.json()).then(summary=>summary.current.categories),selectedMonth);
-  assert.equal(remainingActual.Dining,1250,'recategorizing one actual changes the category total');
+  assert.equal(remainingActual.Dining,1250,'recategorizing one Overview actual changes the category total');
 
   await page.locator('#search').fill('Synthetic');
   const bulkAcceptanceRows=Array.from({length:121},(_,index)=>selectedMonth+'-12,Bulk acceptance '+String(index+1).padStart(3,'0')+',1.00,Groceries').join('\n');
@@ -143,6 +173,9 @@ try{
   const fullBulkRows=await page.evaluate(async selectedMonth=>{const params=new URLSearchParams({search:'Bulk acceptance',limit:'100'});const rows=[];for(let page=1;rows.length<121;page++){params.set('page',String(page));rows.push(...(await fetch('/api/transactions?'+params).then(response=>response.json())).transactions);}return rows;},selectedMonth);
   const fullBulkIds=new Set(fullBulkRows.map(row=>row.id));
   assert.equal(fullBulkIds.size,121,'the fixture read-back includes all matching pages');
+  let exportMutationApplied=false,exportDownloads=0;page.on('download',()=>exportDownloads++);
+  await page.route('**/api/transactions*',async route=>{const requestUrl=new URL(route.request().url());if(!exportMutationApplied&&requestUrl.searchParams.get('search')==='Bulk acceptance'&&requestUrl.searchParams.get('page')==='1'){const firstPage=await route.fetch(),rowId=await page.locator('[data-category]').first().getAttribute('data-category'),revision=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>state.revision)),mutation=await page.evaluate(async input=>fetch('/api/category',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:input.id,category:'Groceries',categoryId:'system:groceries',revision:input.revision})}).then(response=>({status:response.status})),{id:rowId,revision});assert.equal(mutation.status,200,'synthetic transaction edit occurs between export pages');exportMutationApplied=true;await route.fulfill({response:firstPage});}else await route.continue();});
+  await page.locator('#export').click();await page.locator('#toast').filter({hasText:'Transactions changed during export. Retry the export.'}).waitFor();await page.unroute('**/api/transactions*');await page.waitForTimeout(50);assert.equal(exportDownloads,0,'a mixed-revision export is rejected before download');await page.reload();await page.locator('#search').fill('Bulk acceptance');await page.getByText('Bulk acceptance 001',{exact:true}).waitFor();
   async function savedBulkRows(){return page.evaluate(async()=>{const params=new URLSearchParams({search:'Bulk acceptance',limit:'100'}),rows=[];for(let page=1;rows.length<121;page++){params.set('page',String(page));const result=await fetch('/api/transactions?'+params).then(response=>response.json());rows.push(...result.transactions);if(!result.transactions.length)break;}return rows;});}
   async function selectVisibleBulkRows(){const labels=await page.locator('[data-select-transaction]').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label')));for(const label of labels)await page.getByRole('checkbox',{name:label}).check();}
   await selectVisibleBulkRows();
@@ -189,10 +222,14 @@ try{
   await page.locator('[data-view="budgets"]').first().click();
   await page.locator('[data-new-category]').click();
   const categoryDialog=page.getByRole('dialog');
-  await categoryDialog.getByText('begins in the current reporting month').waitFor();
+  await categoryDialog.getByLabel('Frequency').waitFor();
+  await categoryDialog.getByLabel('Amount per period (USD, optional)').waitFor();
   await categoryDialog.locator('#new-category-name').fill('Browser test category');
+  const categoryCreateResponse=page.waitForResponse(response=>response.url().endsWith('/api/category-create')&&response.request().method()==='POST');
   await categoryDialog.getByRole('button',{name:'Create bucket'}).click();
+  assert.equal((await categoryCreateResponse).status(),200,'new budget bucket is saved');
   await page.locator('.category-manage-row input[value="Browser test category"]').waitFor();
+  assert.ok(await page.locator('.category-manage-row input[value="Browser test category"]').count(),'the created recurring bucket appears in the editable category list');
   await page.waitForLoadState('networkidle');
   const categoryName=page.locator('.category-manage-row input').first();
   await categoryName.fill('Browser renamed category');await categoryName.press('Tab');await page.keyboard.press('Enter');
@@ -209,6 +246,8 @@ try{
   assert.equal((await page.evaluate(async month=>fetch('/api/state').then(response=>response.json()).then(state=>state.incomePlanTemplates.find(row=>row.effectiveFrom===month)?.amount),selectedMonth)),500000,'recurring projected income persists in integer cents');
   assert.match(await page.locator('.budget-income-line').innerText(),/\$5,000\.00/,'the budget shows planned monthly income');
   const budgetForm=()=>page.locator('form[data-budget]').first(),templateAmount='75';
+  const editBudgetForm=async form=>{if(!(await form.getAttribute('data-editing')))await form.locator('[data-budget-edit]').click();};
+  await editBudgetForm(budgetForm());
   await budgetForm().locator('select[name="mode"]').selectOption('template');
   await budgetForm().locator('input[name="amount"]').fill(templateAmount);
   assert.equal(await budgetForm().locator('input[name="amount"]').inputValue(),templateAmount,'the recurring template draft is visible before save');
@@ -218,12 +257,22 @@ try{
   const templateSave=await templateSaveResponse;assert.equal(templateSave.status(),200);assert.deepEqual(templateSave.request().postDataJSON().amount,7500,'budget template input is sent as integer cents');
   await page.locator('p.form-status').filter({hasText:'Budget saved.'}).waitFor();
   assert.match(await page.locator('.budget-total-line').innerText(),/Planned surplus \$4,925\.00/,'planned bucket amounts reduce projected income to show the month surplus');
+  const conflictBudgetId=await budgetForm().getAttribute('data-budget-id'),conflictForm=()=>page.locator('form[data-budget-id="'+conflictBudgetId+'"]'),secondBudgetTab=await context.newPage();
+  await secondBudgetTab.goto(`http://127.0.0.1:${port}/?page=budgets&month=${encodeURIComponent(selectedMonth)}`);await secondBudgetTab.locator('form[data-budget-id="'+conflictBudgetId+'"]').waitFor();
+  const secondTabForm=secondBudgetTab.locator('form[data-budget-id="'+conflictBudgetId+'"]');await editBudgetForm(secondTabForm);await secondTabForm.locator('select[name="mode"]').selectOption('template');await secondTabForm.locator('input[name="amount"]').fill('80');
+  const secondTabSave=secondBudgetTab.waitForResponse(response=>response.url().endsWith('/api/budget')&&response.request().method()==='POST');await secondTabForm.locator('button[type="submit"]').click();assert.equal((await secondTabSave).status(),200,'a second real browser tab can update the same budget');
+  await editBudgetForm(conflictForm());await conflictForm().locator('input[name="amount"]').fill('90');const staleTabSave=page.waitForResponse(response=>response.url().endsWith('/api/budget')&&response.request().method()==='POST');await conflictForm().locator('button[type="submit"]').click();assert.equal((await staleTabSave).status(),409,'the first tab cannot silently overwrite a newer budget revision');
+  assert.equal(await conflictForm().locator('input[name="amount"]').inputValue(),'90','the conflicting unsaved draft remains available to the user');await conflictForm().locator('[data-budget-error]').filter({hasText:'another tab'}).waitFor();
+  const conflictedState=await page.evaluate(async month=>fetch('/api/state').then(response=>response.json()).then(state=>state.budgetTemplates.find(row=>row.categoryId===document.querySelector('form[data-budget]')?.dataset.budgetId&&row.effectiveFrom===month)?.amount),selectedMonth);assert.equal(conflictedState,8000,'the second tab’s value survives the conflict');
+  const confirmedDraftSave=page.waitForResponse(response=>response.url().endsWith('/api/budget')&&response.request().method()==='POST');await conflictForm().locator('button[type="submit"]').click();assert.equal((await confirmedDraftSave).status(),200,'reapplying a retained draft requires a new explicit save');await page.locator('p.form-status').filter({hasText:'Budget saved.'}).waitFor();
+  await editBudgetForm(conflictForm());await conflictForm().locator('input[name="amount"]').fill('75');const restoredTemplateSave=page.waitForResponse(response=>response.url().endsWith('/api/budget')&&response.request().method()==='POST');await conflictForm().locator('button[type="submit"]').click();const restoredResponse=await restoredTemplateSave;assert.equal(restoredResponse.status(),200,'the isolated recurring budget fixture is restored to $75');await page.locator('p.form-status').filter({hasText:'Budget saved.'}).waitFor();const restoredAmount=await page.evaluate(async input=>fetch('/api/state').then(response=>response.json()).then(state=>state.budgetTemplates.find(row=>row.categoryId===input.categoryId&&row.effectiveFrom===input.month)?.amount),{categoryId:conflictBudgetId,month:selectedMonth});assert.equal(restoredAmount,7500,'the explicit second save restores the recurring template amount');await secondBudgetTab.close();
   assert.equal(await page.locator('.budget-line').filter({hasText:'Groceries'}).locator('[data-label="Actual spent"]').innerText(),'$18.75','posted spending is visible beside planned category amounts');
   await page.reload();
   await budgetForm().waitFor();
   assert.equal(await page.locator('[data-income-plan] input[name="amount"]').inputValue(),'5000.00','projected income survives a full page reload');
   assert.match(await page.locator('.budget-total-line').innerText(),/Planned surplus \$4,925\.00/,'projected-versus-actual budget values survive a full page reload');
   const budgetMonth=await page.locator('#month').inputValue(),followingMonth=await page.evaluate(month=>{const date=new Date(month+'-01T12:00:00Z');date.setUTCMonth(date.getUTCMonth()+1);return date.toISOString().slice(0,7);},budgetMonth),savedBudgetId=await budgetForm().getAttribute('data-budget-id'),selectedBudgetForm=()=>page.locator('form[data-budget-id="'+savedBudgetId+'"]');
+  await editBudgetForm(selectedBudgetForm());
   await selectedBudgetForm().locator('select[name="mode"]').selectOption('month');
   await selectedBudgetForm().locator('input[name="amount"]').fill('0');
   const monthBudgetRequest=page.waitForRequest(request=>request.url().endsWith('/api/budget')&&request.method()==='POST');
@@ -233,6 +282,8 @@ try{
   assert.equal(monthResponse.status(),200,JSON.stringify(monthPayload));assert.equal(monthPayload.mode,'month');assert.equal(monthPayload.amount,0);
   const stateAfterMonthSave=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));
   assert.equal(stateAfterMonthSave.monthlyBudgets[budgetMonth+':'+monthPayload.categoryId],0,JSON.stringify(stateAfterMonthSave.monthlyBudgets));
+  assert.equal(stateAfterMonthSave.monthlyBudgetSchedules[budgetMonth+':'+monthPayload.categoryId].sourceAmount,0,'monthly override schedule metadata is saved with the override');
+  assert.equal(stateAfterMonthSave.budgetTemplateSchedules[monthPayload.categoryId+':'+budgetMonth].sourceAmount,7500,'recurring schedule metadata remains attached to its effective template');
   await page.goto(`http://127.0.0.1:${port}/?page=budgets&month=${followingMonth}`);
   await page.waitForLoadState('networkidle');
   await page.locator('.budget-income-line').getByText('$5,000.00',{exact:true}).first().waitFor();
@@ -243,6 +294,7 @@ try{
   await page.waitForLoadState('networkidle');
   await selectedBudgetForm().waitFor();
   assert.equal(await selectedBudgetForm().locator('input[name="amount"]').inputValue(),'0.00','an explicit zero month override survives a month switch and reload');
+  await editBudgetForm(selectedBudgetForm());
   await selectedBudgetForm().getByRole('button',{name:/Reset .* month override/}).click();
   await page.locator('.budget-message').filter({hasText:'Month override reset to its recurring template.'}).waitFor();
   assert.equal(await selectedBudgetForm().locator('input[name="amount"]').inputValue(),'75.00','reset returns the selected month to its recurring template');
@@ -301,7 +353,7 @@ try{
   await page.unroute('**/api/category-update');
 
   await page.route('**/api/budget',route=>route.abort());
-  const failingBudget=budgetForm(),failingBudgetInput=failingBudget.locator('input[name="amount"]');await failingBudgetInput.fill('123.45');
+  const failingBudget=budgetForm();await editBudgetForm(failingBudget);const failingBudgetInput=failingBudget.locator('input[name="amount"]');await failingBudgetInput.fill('123.45');
   await failingBudget.locator('button[type="submit"]').click();
   await page.locator('.budget-message').filter({hasText:'Could not reach Ledger.'}).waitFor();
   assert.equal(await failingBudget.locator('input[name="amount"]').inputValue(),'123.45','an offline budget request preserves the entered amount');
@@ -315,11 +367,26 @@ try{
   await accountDialog.locator('#manual-name').fill('Synthetic savings checking');
   await accountDialog.locator('#manual-type').selectOption('depository');
   await accountDialog.locator('#manual-balance').fill('1000');
-  await accountDialog.locator('#manual-asof').fill('2026-10-25');
+  await accountDialog.locator('#manual-asof').fill(observationDate);
+  let dropAccountResponse=true,committedAccountId=null;await page.route('**/api/manual-account',async route=>{const payload=route.request().postDataJSON();if(dropAccountResponse&&payload.name==='Synthetic savings checking'){dropAccountResponse=false;const committed=await route.fetch(),body=await committed.json();committedAccountId=body.account.id;await route.abort('failed');}else await route.continue();});
   await accountDialog.getByRole('button',{name:'Save account'}).click();
-  await page.getByText('Synthetic savings checking',{exact:true}).first().waitFor();
+  await page.getByText('Synthetic savings checking',{exact:true}).first().waitFor();await page.unroute('**/api/manual-account');assert.ok(committedAccountId,'the first synthetic account request committed before its response was lost');const replayedAccount=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>state.accounts.filter(account=>account.name==='Synthetic savings checking').map(account=>account.id)));assert.deepEqual(replayedAccount,[committedAccountId],'a committed-but-lost response retries the same operation without creating a duplicate account');
 
   const cashAccountRow=page.locator('.account-manage-row').filter({hasText:'Synthetic savings checking'});
+  await cashAccountRow.locator('[data-reconcile]').click();
+  const statementDialog=page.getByRole('dialog',{name:'Reconcile Synthetic savings checking'}),statementForm=statementDialog.locator('form');
+  const priorStatementDate=new Date(observationDate+'T12:00:00Z');priorStatementDate.setUTCDate(priorStatementDate.getUTCDate()-1);
+  await statementForm.locator('[name="openingDate"]').fill(priorStatementDate.toISOString().slice(0,10));
+  await statementForm.locator('[name="openingBalance"]').fill('1000.00');
+  await statementForm.locator('[name="closingDate"]').fill(observationDate);
+  await statementForm.locator('[name="closingBalance"]').fill('1000.00');
+  await statementForm.locator('[name="historyComplete"]').check();
+  const statementResponse=page.waitForResponse(response=>response.url().endsWith('/api/statement-reconciliation')&&response.request().method()==='POST');
+  await statementForm.getByRole('button',{name:'Save reviewed statement'}).click();
+  const savedStatement=await statementResponse;assert.equal(savedStatement.status(),200,'reviewed statement saves through the account UI');
+  const statementResult=(await savedStatement.json()).review;assert.equal(statementResult.result.expectedClosing,100000);assert.equal(statementResult.result.discrepancy,0);
+  await statementForm.locator('[data-reconcile-status]').filter({hasText:'difference $0.00'}).waitFor();
+  await page.keyboard.press('Escape');
   await cashAccountRow.getByRole('button',{name:'Edit'}).click();
   const staleAccountDialog=page.getByRole('dialog');
   await page.route('**/api/manual-account',route=>route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({error:'Synthetic account revision conflict.'})}));
@@ -330,10 +397,11 @@ try{
   await page.unroute('**/api/manual-account');
   await page.keyboard.press('Escape');
 
-  const observationDate=new Date().toISOString().slice(0,10);
   async function createManualAccount(name,type,balance){await page.locator('#add-account').click();await page.getByRole('dialog').locator('#add-manual').click();const dialog=page.getByRole('dialog');await dialog.locator('#manual-name').fill(name);await dialog.locator('#manual-type').selectOption(type);await dialog.locator('#manual-balance').fill(String(balance));await dialog.locator('#manual-asof').fill(observationDate);await dialog.getByRole('button',{name:'Save account'}).click();await page.getByText(name,{exact:true}).first().waitFor();}
   await createManualAccount('Synthetic retirement account','retirement','12000');
   await createManualAccount('Synthetic student liability','liability','2000');
+  const cashEligibility=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({accounts:state.accounts.filter(account=>account.name==='Synthetic savings checking'),eligible:state.goalSummary.accounts.filter(account=>account.name==='Synthetic savings checking')})));
+  assert.equal(cashEligibility.eligible[0]?.eligible,true,`today's saved manual cash should be eligible for a goal: ${JSON.stringify(cashEligibility)}`);
   const getBalanceSheetTotals=()=>page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>state.balanceSheet.totals));
   assert.deepEqual(await getBalanceSheetTotals(),{cash:100000,investments:1200000,otherAssets:0,property:0,debts:200000,assets:1300000,liabilities:200000,netWorth:1100000},'manual retirement and liability balances are classified in the balance sheet');
   const liabilityRow=()=>page.locator('.account-manage-row').filter({hasText:'Synthetic student liability'});
@@ -402,14 +470,49 @@ try{
   await page.locator('[data-compare-scenario]').nth(1).check();
   await page.locator('.scenario-compare').waitFor();
   assert.match(await page.locator('.scenario-compare').innerText(),/Browser purchase estimate/,'two saved scenarios can be compared');
+  const failedGoalApplyRequests=[];
+  await page.route('**/api/scenario-goal',async route=>{failedGoalApplyRequests.push(route.request().postDataJSON());await route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({error:'Synthetic scenario goal failure.'})});});
+  let applyFailureState=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,goals:(state.goals||[]).map(row=>row.id),budgetTemplates:state.budgetTemplates})));
+  await withDialog(/down-payment goal/,'accept',()=>scenarioCard().getByRole('button',{name:'Create down-payment goal'}).click());
+  await page.locator('#toast').filter({hasText:'Synthetic scenario goal failure.'}).waitFor();
+  assert.equal(failedGoalApplyRequests.length,2,'a synthetic 500 on scenario-to-goal retries once');
+  assert.equal(failedGoalApplyRequests[0].clientOperationId,failedGoalApplyRequests[1].clientOperationId,'scenario-to-goal retry keeps one operation ID');
+  let afterFailedGoalApply=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,goals:(state.goals||[]).map(row=>row.id),budgetTemplates:state.budgetTemplates})));
+  assert.deepEqual(afterFailedGoalApply,applyFailureState,'failed scenario-to-goal application leaves persisted state unchanged');
+  await page.unroute('**/api/scenario-goal');
+  let canceledActionState=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,scenarios:(state.scenarios||[]).map(row=>row.id),goals:(state.goals||[]).map(row=>row.id),budgetTemplates:state.budgetTemplates})));
+  let canceledActionWrites=sampleWrites.length;
+  await withDialog(/down-payment goal/,'dismiss',()=>scenarioCard().getByRole('button',{name:'Create down-payment goal'}).click());
+  let afterCanceledGoalAction=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,scenarios:(state.scenarios||[]).map(row=>row.id),goals:(state.goals||[]).map(row=>row.id),budgetTemplates:state.budgetTemplates})));
+  assert.deepEqual(afterCanceledGoalAction,canceledActionState,'dismissing the scenario-to-goal confirmation leaves saved records unchanged');
+  assert.equal(sampleWrites.length,canceledActionWrites,'dismissing the scenario-to-goal confirmation sends no mutation');
+  const goalRetryRequest=page.waitForRequest(request=>request.url().endsWith('/api/scenario-goal')&&request.method()==='POST');
   const goalActionResponse=page.waitForResponse(response=>response.url().endsWith('/api/scenario-goal')&&response.request().method()==='POST');
   await withDialog(/down-payment goal/,'accept',()=>scenarioCard().getByRole('button',{name:'Create down-payment goal'}).click());
+  assert.equal((await goalRetryRequest).postDataJSON().clientOperationId,failedGoalApplyRequests[0].clientOperationId,'a user retry after the synthetic failure reuses its operation ID');
   assert.equal((await goalActionResponse).status(),200,'creating the linked goal is an explicit successful action');
   await page.locator('[data-update-scenario-goal]').first().waitFor();
   const housingScenarioId=await scenarioCard().getByRole('button',{name:'Set Housing budget'}).getAttribute('data-scenario-budget');
   const savedScenarioRecord=await page.evaluate(async id=>fetch('/api/scenarios').then(response=>response.json()).then(result=>result.scenarios.find(scenario=>scenario.id===id)),housingScenarioId);
+  canceledActionState=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,scenarios:(state.scenarios||[]).map(row=>row.id),goals:(state.goals||[]).map(row=>row.id),budgetTemplates:state.budgetTemplates})));
+  const failedBudgetApplyRequests=[];
+  await page.route('**/api/scenario-budget',async route=>{failedBudgetApplyRequests.push(route.request().postDataJSON());await route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({error:'Synthetic scenario budget failure.'})});});
+  await withDialog(/Housing budget/,'accept',()=>scenarioCard().getByRole('button',{name:'Set Housing budget'}).click());
+  await page.locator('#toast').filter({hasText:'Synthetic scenario budget failure.'}).waitFor();
+  assert.equal(failedBudgetApplyRequests.length,2,'a synthetic 500 on scenario-to-budget retries once');
+  assert.equal(failedBudgetApplyRequests[0].clientOperationId,failedBudgetApplyRequests[1].clientOperationId,'scenario-to-budget retry keeps one operation ID');
+  afterCanceledGoalAction=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,scenarios:(state.scenarios||[]).map(row=>row.id),goals:(state.goals||[]).map(row=>row.id),budgetTemplates:state.budgetTemplates})));
+  assert.deepEqual(afterCanceledGoalAction,canceledActionState,'failed scenario-to-budget application leaves persisted state unchanged');
+  await page.unroute('**/api/scenario-budget');
+  canceledActionWrites=sampleWrites.length;
+  await withDialog(/Housing budget/,'dismiss',()=>scenarioCard().getByRole('button',{name:'Set Housing budget'}).click());
+  afterCanceledGoalAction=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,scenarios:(state.scenarios||[]).map(row=>row.id),goals:(state.goals||[]).map(row=>row.id),budgetTemplates:state.budgetTemplates})));
+  assert.deepEqual(afterCanceledGoalAction,canceledActionState,'dismissing the scenario-to-budget confirmation leaves saved records unchanged');
+  assert.equal(sampleWrites.length,canceledActionWrites,'dismissing the scenario-to-budget confirmation sends no mutation');
+  const budgetRetryRequest=page.waitForRequest(request=>request.url().endsWith('/api/scenario-budget')&&request.method()==='POST');
   const budgetActionResponse=page.waitForResponse(response=>response.url().endsWith('/api/scenario-budget')&&response.request().method()==='POST');
   await withDialog(/Housing budget/,'accept',()=>scenarioCard().getByRole('button',{name:'Set Housing budget'}).click());
+  assert.equal((await budgetRetryRequest).postDataJSON().clientOperationId,failedBudgetApplyRequests[0].clientOperationId,'a user retry after scenario-to-budget failure reuses its operation ID');
   const budgetAction=await budgetActionResponse;assert.equal(budgetAction.status(),200);
   assert.equal((await budgetAction.json()).amount,savedScenarioRecord.result.ownershipOutflow,'Housing budget action uses the saved scenario ownership outflow');
   await page.locator('[data-view="goals"]').first().click();
@@ -437,6 +540,7 @@ try{
   await withDialog(/Restore this mortgage record/,'accept',()=>page.locator('[data-restore-mortgage]').click());
   await homeCard.locator('.mortgage-card').waitFor();
 
+  await page.setViewportSize({width:390,height:900});
   const mobileControls=await page.locator('nav[aria-label="Main navigation"] button').evaluateAll(buttons=>buttons.map(button=>Math.round(button.getBoundingClientRect().height)));
   assert.ok(mobileControls.every(height=>height>=44),`mobile navigation controls are at least 44px high: ${mobileControls}`);
 
@@ -450,12 +554,27 @@ try{
   const zoomOverflow=await page.evaluate(()=>{const content=document.querySelector('.content');return{effectiveViewport:innerWidth,contentWidth:content?.clientWidth,contentScrollWidth:content?.scrollWidth,document:document.documentElement.scrollWidth};});
   assert.ok(zoomOverflow.contentScrollWidth<=zoomOverflow.contentWidth+1,`essential content overflows at 200% zoom-equivalent 720 CSS px: ${JSON.stringify(zoomOverflow)}`);
   await audit('category-200%-zoom');
+  const actualApiFailures=apiFailures.map(row=>row.method+' '+row.path+' '+row.status).sort(),expectedApiFailures=['GET /api/month-summary 500','POST /api/budget 409','POST /api/category-update 409','POST /api/manual-account 409','POST /api/scenario-budget 500','POST /api/scenario-budget 500','POST /api/scenario-goal 500','POST /api/scenario-goal 500'].sort();
+  assert.deepEqual(actualApiFailures,expectedApiFailures,'only the explicitly injected refresh, conflict, and replay-safe apply failures occur');
   if(browserErrors.length)throw new Error('Unhandled browser errors: '+JSON.stringify(browserErrors));
+  if(consoleErrors.length)throw new Error('Unexpected browser console errors: '+JSON.stringify(consoleErrors));
   if(logs.includes('unexpected dialog'))throw new Error(logs.slice(logs.indexOf('unexpected dialog')));
   if(failures.length)throw new Error('Serious accessibility violations: '+JSON.stringify(failures));
+  await context.tracing.stop();traceStarted=false;
   console.log('Browser acceptance passed: 1440/390/320 px layout, 720 CSS px at 200% zoom, import preview/commit/undo, category and budget edits, goal/scenario saves, keyboard workflows, and zero serious/critical axe violations across tested views.');
+}catch(error){
+  const artifactRoot=process.env.LEDGER_BROWSER_ARTIFACTS||join(tmpdir(),'ledger-browser-failures');
+  await mkdir(artifactRoot,{recursive:true,mode:0o700});await chmod(artifactRoot,0o700);
+  const artifacts=await mkdtemp(join(artifactRoot,'failure-'));await chmod(artifacts,0o700);
+  if(page)await page.screenshot({path:join(artifacts,'failure.png'),fullPage:true}).catch(()=>{});
+  if(traceStarted&&context)await context.tracing.stop({path:join(artifacts,'trace.zip')}).catch(()=>{});
+  await writeFile(join(artifacts,'failure.txt'),String(error?.stack||error)+'\n\n'+logs,{mode:0o600});
+  await writeFile(join(artifacts,'requests.json'),JSON.stringify({sampleWrites,observedRequests,apiFailures,browserErrors,consoleErrors,accessibilityFailures:failures},null,2),{mode:0o600});
+  console.error(`Browser failure artifacts retained at ${artifacts}`);
+  throw error;
 }finally{
   await browser?.close();
-  if(child.exitCode===null){const closed=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGTERM');await closed;}
+  if(child.exitCode===null){let killTimer;const closed=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGTERM');await Promise.race([closed,new Promise(resolve=>{killTimer=setTimeout(()=>{child.kill('SIGKILL');resolve();},5000);})]);clearTimeout(killTimer);if(child.exitCode===null)await closed;}
   await rm(directory,{recursive:true,force:true});
+}
 }

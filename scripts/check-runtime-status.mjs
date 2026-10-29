@@ -22,7 +22,9 @@ let repository;
 try{
  const {localRuntime}=await import('../scripts/runtime.mjs?runtime-status-test');
  const env=await localRuntime();repository=env.REPOSITORY;
- const sync=await env.getSyncTimerStatus(),backup=await env.getBackupStatus();
+ const sync=await env.getSyncTimerStatus(),backup=await env.getBackupStatus(),syncCached=await env.getSyncTimerStatus();
+ assert.equal(syncCached.checkedAt,sync.checkedAt,'timer state is briefly cached and keeps its original checked-at time');
+ assert.equal(backup.recoveryStale,true,'missing complete recovery evidence is reported as stale');assert.equal(backup.recoveryState,'database_only');
  assert.equal(sync.state,'available');assert.equal(sync.enabled,false);assert.equal(sync.active,false);assert.equal(sync.nextRun,null);
  assert.equal(backup.state,'not_run');assert.equal(backup.timer.state,'available');assert.equal(backup.timer.enabled,true);assert.equal(backup.timer.active,true);assert.equal(backup.timer.nextRun,'Mon 2026-10-26 03:00:00 CDT');
  console.log('Systemd timer status parsing passed for reordered property output.');

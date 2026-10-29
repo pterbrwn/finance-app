@@ -11,9 +11,9 @@ import worker from '../dist/server/index.js';
 const directory = await mkdtemp(join(tmpdir(), 'ledger-dev-'));
 const configFile = join(directory, 'config.json');
 await writeFile(configFile, JSON.stringify({ enablePlaid: false, publicOrigin: 'https://ledger.example.ts.net', tailscaleLogin: 'owner@example.test' }), { mode: 0o600 });
-let child;
+let child,childOutput='';const logCanary='SYNTHETIC_LOG_CANARY_93C1';
 async function start() {
-  child = spawn('bash', ['scripts/start-ledger.sh'], {
+  childOutput='';child = spawn('bash', ['scripts/start-ledger.sh'], {
     cwd: new URL('..', import.meta.url),
     env: { ...process.env, PORT: '0', LEDGER_LOCAL_DATA_DIR: directory, LEDGER_CONFIG_FILE: configFile },
     stdio: ['ignore', 'pipe', 'pipe']
@@ -22,11 +22,11 @@ async function start() {
     let output = '';
     const timeout = setTimeout(() => reject(new Error('Local server did not start: ' + output)), 5000);
     child.stdout.on('data', chunk => {
-      output += chunk;
+      output += chunk;childOutput=output;
       const match = output.match(/http:\/\/127\.0\.0\.1:\d+/);
       if (match) { clearTimeout(timeout); resolve(match[0]); }
     });
-    child.stderr.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { output += chunk;childOutput=output; });
     child.once('error', error => { clearTimeout(timeout); reject(error); });
     child.once('close', code => { clearTimeout(timeout); reject(new Error('Local server exited: ' + code + ' ' + output)); });
   });
@@ -42,9 +42,13 @@ async function assertSecondWriterBlocked(directory, configFile) {
 }
 async function stop() {
   if (child && child.exitCode === null) {
-    const exited = once(child, 'exit');
+    const closed = once(child, 'close');
     child.kill('SIGTERM');
-    await exited;
+    await closed;
+    assert.ok(childOutput.includes('"event":"shutdown_complete"'), 'SIGTERM drains requests and closes the local repository');
+    assert.ok(!childOutput.includes(logCanary), 'request diagnostics never log query values');
+    const requestEvent=childOutput.split(/\r?\n/).filter(line=>line.startsWith('{')).map(line=>{try{return JSON.parse(line);}catch{return null;}}).find(event=>event?.event==='request'&&event.route==='/api/state');
+    assert.ok(requestEvent?.requestId&&requestEvent.method==='GET'&&requestEvent.status===200&&Number.isFinite(requestEvent.durationMs), 'request diagnostics include a bounded id, route, status, and duration');
   }
 }
 try {
@@ -59,11 +63,11 @@ try {
   assert.equal((await (await local('import',{...sample,revision:firstPreview.revision})).json()).imported, 1);
   const repeatPreview=await(await local('import-preview',sample)).json();
   assert.equal((await (await local('import',{...sample,revision:repeatPreview.revision})).json()).skipped, 1);
-  const saved = await Promise.all([
-    local('budget', { category: 'Groceries', amount: 50000 }),
-    local('budget', { category: 'Dining', amount: 20000 })
-  ]);
-  saved.forEach(response => assert.equal(response.status, 200));
+  let currentRevision=(await(await local('state')).json()).revision;
+  const saved=[];
+  for(const [category,amount] of [['Groceries',50000],['Dining',20000]]){
+    const response=await local('budget',{category,amount,revision:currentRevision});assert.equal(response.status,200);saved.push(response);currentRevision=(await(await local('state')).json()).revision;
+  }
   bucket = await createLocalBucket(directory);
   const persisted = await (await local('state')).json();
   assert.equal(persisted.transactionCount, 1);
@@ -92,6 +96,7 @@ try {
       }).on('error', reject);
     });
     const page = await (await call('/')).text();
+    const canaryResponse=await call('/api/state?query='+encodeURIComponent(logCanary));assert.equal(canaryResponse.status,200);await canaryResponse.text();
     assert.match(page, /Ledger · Personal finance/);
     assert.ok(page.includes('<script type="module" src="/assets/app.js"></script>'));
     assert.ok(!page.includes('<script>'));
@@ -112,7 +117,7 @@ try {
     assert.equal((await call('/api/state', undefined, { 'X-Forwarded-For': '100.100.100.1' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'Tailscale-User-Login': 'other@example.test' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'Tailscale-User-Login': 'owner@example.test' })).status, 200);
-    assert.equal((await call('/api/budget', { category: 'Groceries', amount: 50000 }, { 'Tailscale-User-Login': 'owner@example.test', Origin: 'https://ledger.example.ts.net' })).status, 200);
+    assert.equal((await call('/api/budget', { category: 'Groceries', amount: 50000, revision: state.revision }, { 'Tailscale-User-Login': 'owner@example.test', Origin: 'https://ledger.example.ts.net' })).status, 200);
     assert.equal((await call('/api/budget', { category: 'Groceries', amount: 50000 }, { 'Tailscale-User-Login': 'owner@example.test', Origin: 'https://other.test' })).status, 403);
     assert.equal((await call('/api/link-token', {})).status, 503);
     assert.ok(!(await call('/')).headers.get('Content-Security-Policy').includes('plaid.com'));
@@ -121,10 +126,10 @@ try {
     assert.equal((await(await call('/api/import',{...csv,revision:preview.revision})).json()).imported, 1);
     const repeated=await(await call('/api/import-preview',csv)).json();
     assert.equal((await(await call('/api/import',{...csv,revision:repeated.revision})).json()).skipped, 1);
-    await Promise.all([
-      call('/api/budget', { category: 'Groceries', amount: 50000 }),
-      call('/api/budget', { category: 'Dining', amount: 20000 })
-    ]);
+    let concurrentRevision=(await(await call('/api/state')).json()).revision;
+    for(const [category,amount] of [['Groceries',50000],['Dining',20000]]){
+      const response=await call('/api/budget',{category,amount,revision:concurrentRevision});assert.equal(response.status,200);concurrentRevision=(await(await call('/api/state')).json()).revision;
+    }
     await stop();
     origin = await start();
     const restored = await (await call('/api/state')).json();
