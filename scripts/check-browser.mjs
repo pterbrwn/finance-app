@@ -547,6 +547,7 @@ try{
   await homeCard.locator('.mortgage-card').waitFor();
 
   await page.setViewportSize({width:390,height:900});
+  await page.waitForFunction(()=>innerWidth===390&&[...document.querySelectorAll('nav[aria-label="Main navigation"] button')].length===9&&[...document.querySelectorAll('nav[aria-label="Main navigation"] button')].every(button=>button.getBoundingClientRect().height>0));
   const mobileControls=await page.locator('nav[aria-label="Main navigation"] button').evaluateAll(buttons=>buttons.map(button=>Math.round(button.getBoundingClientRect().height)));
   assert.ok(mobileControls.every(height=>height>=44),`mobile navigation controls are at least 44px high: ${mobileControls}`);
 
