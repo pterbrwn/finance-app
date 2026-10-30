@@ -2,17 +2,13 @@
 
 A personal finance dashboard hosted on a Jetson. Source code lives at https://github.com/pterbrwn/finance-app. GitHub contains code and synthetic test fixtures only.
 
-## Last recorded deployed build
+## Current production release
 
-The last recorded deployed service ran release `7b922e5` on Node.js 24.22.1 with SQLite schema 3. At that handoff, the existing JSON state had been imported and reconciled before activation, and its paired JSON/config recovery copy remained private on the Jetson. The daily SQLite backup timer was active and the bank sync timer remained disabled. Provider records without a saved environment were blocked from sync until that environment could be independently verified; manual entry and CSV import remained available.
+Production runs immutable release `d93600d` (commit `d93600d3460946162d0472a76dcafd9ddfb15ac2`) on Node.js 24.22.1 with SQLite schema 7. It was activated on 2026-10-30 after the GitHub test workflow passed and the release manifest and health checks were verified. A fresh private database/config recovery bundle was verified before activation. The daily SQLite backup timer is active; the bank sync timer remains disabled.
 
-## Current source candidate
+The current source and production application code are at the same commit. The [GitHub test run](https://github.com/pterbrwn/finance-app/actions/runs/40980802182) passed for that commit. Remaining manual acceptance includes actual screen-reader and physical 200% zoom checks and a full privacy review of repository content. See the [stability execution record](docs/STABILITY_EXECUTION_2026-10-28.md) for synthetic check coverage and outstanding manual checks.
 
-The checkout contains uncommitted stability improvements based on source commit `6d5fc0c`. This candidate has not been built from a committed repository revision or activated; the last recorded deployed build is described above. Synthetic verification passes with `npm run check`, `npm run check:local-http`, `npm run check:browser:harness`, and `npm run check:browser`. Chromium's accessibility tree also confirms landmarks and headings across all eight views, table row/cell semantics, and named controls in the category and import dialogs. The committed disposable Node 24.22.1 source-copy install and full check pass, `npm audit` reports zero vulnerabilities, and the synthetic immutable-release/rollback rehearsal passes. The committed-response recovery matrix covers the current replay-safe mutation inventory, including retries after SQLite server restarts. Remaining work includes actual screen-reader and physical 200% zoom checks and a full privacy review of all repository content. The code-safe changed-file Gitleaks scan found no leaks; the staged-source boundary check covers only the 70 files in the Git index. No live configuration or financial records were changed during this candidate work.
-
-The active queue and exact scope are in the [stability implementation plan](docs/STABILITY_IMPLEMENTATION_PLAN.md); the [stability execution record](docs/STABILITY_EXECUTION_2026-10-28.md) distinguishes completed synthetic checks from remaining release and manual checks. Passing automated checks does not approve a deployment.
-
-The current dirty candidate also implements the product work in [PRODUCT_IMPLEMENTATION_PLAN_LUNA_HIGH.md](docs/PRODUCT_IMPLEMENTATION_PLAN_LUNA_HIGH.md), with evidence in [PRODUCT_IMPLEMENTATION_EXECUTION.md](docs/PRODUCT_IMPLEMENTATION_EXECUTION.md). New product work includes budget history and forecast limits, statement reviews, transaction splits, dated commitments, and portable financial export. It is synthetic-candidate code only and has not been activated. Encrypted off-device backup requires an operator-configured `age` executable, recipient, and destination; no destination or timer is configured here.
+The stability and product work are documented in [PRODUCT_IMPLEMENTATION_PLAN_LUNA_HIGH.md](docs/PRODUCT_IMPLEMENTATION_PLAN_LUNA_HIGH.md) and [PRODUCT_IMPLEMENTATION_EXECUTION.md](docs/PRODUCT_IMPLEMENTATION_EXECUTION.md). Encrypted off-device backup still requires an operator-configured `age` executable, recipient, and destination; no destination or timer is configured.
 
 ## Privacy and access
 
