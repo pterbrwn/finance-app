@@ -946,8 +946,11 @@ export async function runBrowserCase(name) {
       const alphaGate=new Promise(resolvePromise=>releaseAlpha=resolvePromise);
       await page.route('**/api/transactions*',async route=>{const requestUrl=new URL(route.request().url());if(requestUrl.searchParams.get('search')==='Alpha race marker'){alphaStartedResolve();await alphaGate;const response=await route.fetch();await route.fulfill({response});alphaResponseResolve();}else await route.continue();});
       await search.fill('Alpha race marker');await alphaStarted;
-      await search.fill('Beta race marker');await page.getByText('Beta race marker',{exact:true}).waitFor();
-      releaseAlpha();await alphaResponse;await page.waitForTimeout(100);
+      const betaResponse=page.waitForResponse(response=>new URL(response.url()).searchParams.get('search')==='Beta race marker');
+      await search.fill('Beta race marker');assert.equal((await betaResponse).status(),200,'the newer search request completes while the older request remains delayed');
+      await page.locator('#transaction-table').getByText('Beta race marker',{exact:true}).waitFor();
+      const alphaBrowserResponse=page.waitForResponse(response=>new URL(response.url()).searchParams.get('search')==='Alpha race marker');
+      releaseAlpha();await alphaResponse;await alphaBrowserResponse;await page.waitForTimeout(100);
       assert.equal(await page.locator('#search').inputValue(),'Beta race marker','the latest search remains selected after the old response completes');
       assert.equal(await page.locator('#transaction-table').getByText('Beta race marker',{exact:true}).count(),1,'the latest search result remains visible');
       assert.equal(await page.locator('#transaction-table').getByText('Alpha race marker',{exact:true}).count(),0,'the older search response cannot replace the current result');
