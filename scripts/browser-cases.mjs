@@ -14,6 +14,11 @@ function monthInChicago(date = new Date()) {
   return parts.find(part => part.type === 'year').value + '-' + parts.find(part => part.type === 'month').value;
 }
 
+function dateInChicago(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(date);
+  return parts.find(part => part.type === 'year').value + '-' + parts.find(part => part.type === 'month').value + '-' + parts.find(part => part.type === 'day').value;
+}
+
 function nextMonth(month) {
   const date = new Date(month + '-01T12:00:00Z');
   date.setUTCMonth(date.getUTCMonth() + 1);
@@ -156,7 +161,7 @@ export async function runBrowserCase(name) {
 
     if(name==='operation-reload-recovery'){
       await page.locator('[data-view="accounts"]').first().click();await page.locator('#add-account').click();await page.locator('#add-manual').click();
-      const dialog=page.getByRole('dialog');await dialog.locator('#manual-name').fill('Synthetic recovery account');await dialog.locator('#manual-institution').fill('Recovery private marker');await dialog.locator('#manual-balance').fill('88.42');await dialog.locator('#manual-asof').fill(new Date().toISOString().slice(0,10));
+      const dialog=page.getByRole('dialog');await dialog.locator('#manual-name').fill('Synthetic recovery account');await dialog.locator('#manual-institution').fill('Recovery private marker');await dialog.locator('#manual-balance').fill('88.42');await dialog.locator('#manual-asof').fill(dateInChicago());
       let dropped=0;const committed=[];
       await page.route('**/api/manual-account',async route=>{const upstream=await route.fetch(),body=await upstream.json();committed.push({status:upstream.status(),body});dropped++;await route.abort();});
       await dialog.getByRole('button',{name:'Save account'}).click();await dialog.locator('#manual-error').filter({hasText:'Could not reach Ledger'}).waitFor();
@@ -438,7 +443,7 @@ export async function runBrowserCase(name) {
       await dialog.locator('#manual-name').fill('Retained synthetic account');
       await dialog.locator('#manual-institution').fill('Synthetic institution');
       await dialog.locator('#manual-balance').fill('845.12');
-      await dialog.locator('#manual-asof').fill(new Date().toISOString().slice(0,10));
+      await dialog.locator('#manual-asof').fill(dateInChicago());
       await dialog.locator('#manual-notes').fill('Retained account notes');
       await assertReplaySafeFailure('manual-account',500,'application/json',dialog.locator('#manual-error').filter({hasText:'Synthetic server failure'}),async()=>{
         assert.equal(await dialog.locator('#manual-name').inputValue(),'Retained synthetic account');
@@ -469,7 +474,7 @@ export async function runBrowserCase(name) {
       await dialog.locator('[name="name"]').fill('Retained edited property');
       await dialog.locator('[name="address"]').fill('Retained synthetic address');
       await dialog.locator('[name="valuation"]').fill('321000');
-      await dialog.locator('[name="valuationAsOf"]').fill(new Date().toISOString().slice(0,10));
+      await dialog.locator('[name="valuationAsOf"]').fill(dateInChicago());
       await assertReplaySafeFailure('property',500,'application/json',dialog.getByRole('alert').filter({hasText:'Synthetic server failure'}),async()=>{
         assert.equal(await dialog.locator('[name="name"]').inputValue(),'Retained edited property');
         assert.equal(await dialog.locator('[name="address"]').inputValue(),'Retained synthetic address');
@@ -481,11 +486,11 @@ export async function runBrowserCase(name) {
       await dialog.locator('[name="lender"]').fill('Retained synthetic lender');
       await dialog.locator('[name="loanType"]').selectOption('fixed');
       await dialog.locator('[name="balance"]').fill('240000');
-      await dialog.locator('[name="balanceAsOf"]').fill(new Date().toISOString().slice(0,10));
+      await dialog.locator('[name="balanceAsOf"]').fill(dateInChicago());
       await assertReplaySafeFailure('mortgage',502,'text/html',dialog.getByRole('alert').filter({hasText:'Ledger could not complete'}),async()=>{
         assert.equal(await dialog.locator('[name="lender"]').inputValue(),'Retained synthetic lender');
         assert.equal(await dialog.locator('[name="balance"]').inputValue(),'240000');
-        assert.equal(await dialog.locator('[name="balanceAsOf"]').inputValue(),new Date().toISOString().slice(0,10));
+        assert.equal(await dialog.locator('[name="balanceAsOf"]').inputValue(),dateInChicago());
       });
 
       await page.locator('#new-scenario').click();
@@ -519,7 +524,7 @@ export async function runBrowserCase(name) {
       assert.deepEqual(browserErrors,[],'form retries and preserved drafts have no uncaught browser errors');
       assert.deepEqual(consoleErrors,[],'form retries and preserved drafts have no browser console errors');
       let setupState=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));
-      const allocationAccount=await page.evaluate(async input=>fetch('/api/manual-account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Synthetic allocation cash',type:'depository',subtype:'checking',balance:100000,asOf:input.asOf,currency:'USD',includeInReporting:true,revision:input.revision})}).then(response=>response.json()),{revision:setupState.revision,asOf:new Date().toISOString().slice(0,10)});
+      const allocationAccount=await page.evaluate(async input=>fetch('/api/manual-account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Synthetic allocation cash',type:'depository',subtype:'checking',balance:100000,asOf:input.asOf,currency:'USD',includeInReporting:true,revision:input.revision})}).then(response=>response.json()),{revision:setupState.revision,asOf:dateInChicago()});
       assert.ok(allocationAccount.account?.id,'synthetic setup creates eligible cash for the allocation-dialog case');
       setupState=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));
       const allocationGoal=await page.evaluate(async revision=>fetch('/api/goal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Synthetic allocation draft goal',target:50000,targetDate:'2027-12-31',priority:1,monthlyContribution:0,apyBps:0,revision})}).then(response=>response.json()),setupState.revision);
@@ -558,7 +563,7 @@ export async function runBrowserCase(name) {
 
     if(name==='form-cancel'){
       async function create(path,input){const state=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));const result=await page.evaluate(async value=>{const response=await fetch('/api/'+value.path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...value.input,revision:value.revision})});return{status:response.status,body:await response.json()};},{path,input,revision:state.revision});assert.equal(result.status,200,`${path} synthetic setup: ${JSON.stringify(result.body)}`);return result.body;}
-      const today=new Date().toISOString().slice(0,10);
+      const today=dateInChicago();
       const account=(await create('manual-account',{name:'Synthetic cancel cash',type:'depository',subtype:'checking',balance:500000,currency:'USD',asOf:today,includeInReporting:true})).account;
       const goal=(await create('goal',{name:'Synthetic cancel goal',target:100000,targetDate:'2027-12-31',priority:1,monthlyContribution:0,apyBps:0})).goal;
       const property=(await create('property',{name:'Synthetic cancel property',address:'',ownershipBps:10000,valuation:null})).property;
@@ -610,7 +615,7 @@ export async function runBrowserCase(name) {
     }
 
     if(name==='refresh-edit'){
-      const today=new Date().toISOString().slice(0,10),month=monthInChicago();
+      const today=dateInChicago(),month=monthInChicago();
       await page.goto(`http://127.0.0.1:${port}/?page=accounts`);await page.locator('#add-account').waitFor();
       let refreshStateStartedResolve;const refreshStateStarted=new Promise(resolvePromise=>refreshStateStartedResolve=resolvePromise);let releaseRefreshState;const refreshStateGate=new Promise(resolvePromise=>releaseRefreshState=resolvePromise);let delayNextState=true;
       await page.route('**/api/state',async route=>{if(delayNextState&&route.request().method()==='GET'){delayNextState=false;const response=await route.fetch();refreshStateStartedResolve();await refreshStateGate;await route.fulfill({response});}else await route.continue();});
@@ -653,7 +658,7 @@ export async function runBrowserCase(name) {
         return committed.body;
       };
       const state=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));
-      const payload=await page.evaluate(revision=>({clientOperationId:crypto.randomUUID(),name:'Synthetic uncertain account',institution:'Synthetic institution',type:'depository',subtype:'checking',balance:48123,asOf:new Date().toISOString().slice(0,10),currency:'USD',includeInReporting:true,notes:'Idempotency replay across restart',revision}),state.revision);
+      const payload=await page.evaluate(input=>({clientOperationId:crypto.randomUUID(),name:'Synthetic uncertain account',institution:'Synthetic institution',type:'depository',subtype:'checking',balance:48123,asOf:input.asOf,currency:'USD',includeInReporting:true,notes:'Idempotency replay across restart',revision:input.revision}),{revision:state.revision,asOf:dateInChicago()});
       let upstreamResult=null;
       await page.route('**/api/manual-account',async route=>{const upstream=await route.fetch();upstreamResult={status:upstream.status(),body:await upstream.json()};await route.abort();});
       const firstAttempt=await page.evaluate(async input=>{try{const response=await fetch('/api/manual-account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input)});return{networkError:false,status:response.status};}catch{return{networkError:true};}},payload);
