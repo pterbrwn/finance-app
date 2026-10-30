@@ -4,9 +4,9 @@ A personal finance dashboard hosted on a Jetson. Source code lives at https://gi
 
 ## Current production release
 
-Production runs immutable release `d93600d` (commit `d93600d3460946162d0472a76dcafd9ddfb15ac2`) on Node.js 24.22.1 with SQLite schema 7. It was activated on 2026-10-30 after the GitHub test workflow passed and the release manifest and health checks were verified. A fresh private database/config recovery bundle was verified before activation. The daily SQLite backup timer is active; the bank sync timer remains disabled.
+Production runs immutable release `e6e5dcb` (commit `e6e5dcbcddff27c1ffe410b1389b345f94ec32c9`) on Node.js 24.22.1 with SQLite schema 7. It was activated on 2026-10-30 after the GitHub test workflow passed and the release manifest and health checks were verified. A fresh private database/config recovery bundle was verified before activation. The daily SQLite backup timer is active; the bank sync timer remains disabled.
 
-The current source and production application code are at the same commit. The [GitHub test run](https://github.com/pterbrwn/finance-app/actions/runs/40980802182) passed for that commit. Remaining manual acceptance includes actual screen-reader and physical 200% zoom checks and a full privacy review of repository content. See the [stability execution record](docs/STABILITY_EXECUTION_2026-10-28.md) for synthetic check coverage and outstanding manual checks.
+Production application code matches `e6e5dcb`. `main` is at `51600a3`; its only post-release change records this deployment. The [GitHub test run](https://github.com/pterbrwn/finance-app/actions/runs/40982267897) passed for the deployed commit. Remaining manual acceptance includes actual screen-reader and physical 200% zoom checks and a full privacy review of repository content. See the [stability execution record](docs/STABILITY_EXECUTION_2026-10-28.md) for synthetic check coverage and outstanding manual checks.
 
 The stability and product work are documented in [PRODUCT_IMPLEMENTATION_PLAN_LUNA_HIGH.md](docs/PRODUCT_IMPLEMENTATION_PLAN_LUNA_HIGH.md) and [PRODUCT_IMPLEMENTATION_EXECUTION.md](docs/PRODUCT_IMPLEMENTATION_EXECUTION.md). Encrypted off-device backup still requires an operator-configured `age` executable, recipient, and destination; no destination or timer is configured.
 
