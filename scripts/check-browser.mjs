@@ -546,7 +546,9 @@ try{
   await withDialog(/Restore this mortgage record/,'accept',()=>page.locator('[data-restore-mortgage]').click());
   await homeCard.locator('.mortgage-card').waitFor();
 
+  await page.goto(`http://127.0.0.1:${port}/?page=overview`);await page.locator('#app .shell').waitFor();
   await page.setViewportSize({width:390,height:900});
+  await page.evaluate(()=>new Promise(resolvePromise=>requestAnimationFrame(()=>requestAnimationFrame(resolvePromise))));
   await page.waitForFunction(()=>innerWidth===390&&[...document.querySelectorAll('nav[aria-label="Main navigation"] button')].length===9&&[...document.querySelectorAll('nav[aria-label="Main navigation"] button')].every(button=>button.getBoundingClientRect().height>0));
   const mobileControls=await page.locator('nav[aria-label="Main navigation"] button').evaluateAll(buttons=>buttons.map(button=>Math.round(button.getBoundingClientRect().height)));
   assert.ok(mobileControls.every(height=>height>=44),`mobile navigation controls are at least 44px high: ${mobileControls}`);
