@@ -8,14 +8,16 @@ function currentHistoryValue(state,entry){
 }
 
 export async function handleBudgetSummaryRoute(context) {
-  const {request,path,url,repository,user,response,apiError,monthInReportingZone,validMonth,budgetActualsFromRows,budgetActuals,budgetRolloversFromRows,budgetRollovers,categoryCatalog,budgetTemplates}=context;
+  const {request,path,url,repository,user,env,response,apiError,monthInReportingZone,validMonth,budgetActualsFromRows,budgetActuals,budgetRolloversFromRows,budgetRollovers,categoryCatalog,budgetTemplates,requestedViewProfile,stateForProfile,hasHouseholdAccess}=context;
   if(request.method!=='GET'||path!=='/api/budget-summary')return null;
   const month=url.searchParams.get('month')||monthInReportingZone();
+  const viewProfile=requestedViewProfile(url);
   if(!validMonth(month))throw apiError('Choose a valid reporting month.');
-  const analytics=typeof repository.readBudgetAnalytics==='function'?await repository.readBudgetAnalytics(month):null;
+  const analytics=typeof repository.readBudgetAnalytics==='function'?await repository.readBudgetAnalytics(month,viewProfile):null;
   let {state}=analytics||await repository.read();
   if((state.transactionSplits||[]).length)state=(await repository.read()).state;
-  if(state.owner&&state.owner!==user)return response({error:'This dashboard belongs to another account.'},403);
+  state=stateForProfile(state,viewProfile);
+  if(!hasHouseholdAccess(state,user,env))return response({error:'This dashboard belongs to another account.'},403);
   const useSplitRows=(state.transactionSplits||[]).length>0;
   const actuals=analytics&&!useSplitRows?budgetActualsFromRows(state,analytics.currentRows):budgetActuals(state,month);
   const rollovers=analytics&&!useSplitRows?budgetRolloversFromRows(state,month,analytics.historicalRows):budgetRollovers(state,month);
@@ -49,7 +51,7 @@ export async function handleBudgetMutationRoute(context) {
 
   if(path==='/api/budget-history-revert'&&request.method==='POST'){
     const input=await body(request),replay=await findOperationReplay(env,state,'budget-history-revert',input);if(replay.found)return response(replay.response);
-    const history=typeof repository.readBudgetHistory==='function'?await repository.readBudgetHistory({id:input.historyId,limit:1}):(await repository.read()).state.budgetChangeHistory?.filter(row=>row.id===input.historyId)||[],entry=history[0];
+    const history=typeof repository.readBudgetHistory==='function'?await repository.readBudgetHistory({id:input.historyId,profileId:input.profileId||'peter',limit:1}):(await repository.read()).state.budgetChangeHistory?.filter(row=>row.id===input.historyId)||[],entry=history[0];
     if(!entry)throw apiError('Budget history entry not found.',404);
     const mutation=await mutateWithReplay(env,'budget-history-revert',input,s=>{
       checkRevision(s,input);
@@ -74,6 +76,7 @@ export async function handleBudgetMutationRoute(context) {
   if(path==='/api/budget'&&request.method==='POST'){
     const input=await body(request),replay=await findOperationReplay(env,state,'budget',input);if(replay.found)return response(replay.response);
     const category=categoryCatalog(state).find(row=>row.id===input.categoryId)||categoryCatalog(state).find(row=>row.name===input.category),mode=input.mode||'template',month=input.month||monthInReportingZone(),rawSchedule=input.schedule||null;
+    if(category&&!category.system&&(category.profileId||'peter')!==(input.profileId||'peter'))throw apiError('Choose a custom category owned by the budget profile.');
     let schedule=null,amount=input.amount;
     try{if(rawSchedule){schedule=validateBudgetSchedule(rawSchedule);if(amount!==null)amount=monthlyBudgetAmount(amount,schedule.frequency);}}
     catch(error){throw apiError(error.message);}
@@ -88,7 +91,7 @@ export async function handleBudgetMutationRoute(context) {
         s.budgetTemplateSchedules={...(s.budgetTemplateSchedules||{}),[`${live.id}:${month}`]:{frequency:effectiveSchedule.frequency,dueMonth:effectiveSchedule.dueMonth,sourceAmount:input.amount}};
         const template={categoryId:live.id,amount,effectiveFrom:month};
         if(index>=0)s.budgetTemplates[index]=template;else s.budgetTemplates.push(template);
-        if(month<=monthInReportingZone()){if(amount===null)delete s.budgets[live.name];else s.budgets[live.name]=amount;}
+        if((input.profileId||'peter')==='peter'&&month<=monthInReportingZone()){if(amount===null)delete s.budgets[live.name];else s.budgets[live.name]=amount;}
       }else{
         const key=budgetMonthKey(month,live.id);s.monthlyBudgets={...(s.monthlyBudgets||{}),[key]:amount};s.monthlyBudgetSchedules={...(s.monthlyBudgetSchedules||{}),[key]:{frequency:effectiveSchedule.frequency,dueMonth:effectiveSchedule.dueMonth,sourceAmount:input.amount}};
       }
@@ -100,6 +103,7 @@ export async function handleBudgetMutationRoute(context) {
   if(path==='/api/budget-reset'&&request.method==='POST'){
     const input=await body(request),replay=await findOperationReplay(env,state,'budget-reset',input);if(replay.found)return response(replay.response);
     const category=categoryCatalog(state).find(row=>row.id===input.categoryId);
+    if(category&&!category.system&&(category.profileId||'peter')!==(input.profileId||'peter'))throw apiError('Choose a custom category owned by the budget profile.');
     if(!category||!['expense','allocation'].includes(category.kind)||!validMonth(input.month))throw apiError('Choose a valid category and month.');
     const mutation=await mutateWithReplay(env,'budget-reset',input,s=>{checkRevision(s,input);const key=budgetMonthKey(input.month,category.id);s.monthlyBudgets={...(s.monthlyBudgets||{})};s.monthlyBudgetSchedules={...(s.monthlyBudgetSchedules||{})};delete s.monthlyBudgets[key];delete s.monthlyBudgetSchedules[key];},(saved,revision)=>{const resolved=resolveBudget(budgetTemplates(saved),saved.monthlyBudgets||{},category.id,input.month,saved.monthlyBudgetSchedules||{}),effectiveScheduleResult=resolved.source==='month'?resolved:saved.budgetTemplateSchedules?.[`${category.id}:${resolved.effectiveFrom}`]||{};return{ok:true,revision,amount:resolved.amount,schedule:{frequency:effectiveScheduleResult.frequency||'monthly',dueMonth:effectiveScheduleResult.dueMonth??null,sourceAmount:effectiveScheduleResult.sourceAmount??resolved.amount}};},null,'budget');
     return response(mutation.result);
@@ -146,22 +150,22 @@ export async function handleBudgetMutationRoute(context) {
   if(path==='/api/category-create'&&request.method==='POST'){
     const input=await body(request),name=typeof input.name==='string'?input.name.trim().replace(/\s+/g,' '):'';
     if(!name||name.length>80||!/^[\p{L}\p{N}][\p{L}\p{N} .&'’()/_-]*$/u.test(name)||Object.hasOwn(Object.prototype,name))throw apiError('Use a bucket name up to 80 characters, starting with a letter or number.');
-    const itemType=input.itemType||'expense',budgetGroup=typeof input.budgetGroup==='string'?input.budgetGroup.trim():'',effectiveMonth=input.month||monthInReportingZone(),mode=input.mode||'template';
+    const ownerProfile=input.profileId||'peter';if(!['peter','maddie','joint'].includes(ownerProfile))throw apiError('Choose Peter, Maddie, or Joint as the category owner.');const itemType=input.itemType||'expense',budgetGroup=typeof input.budgetGroup==='string'?input.budgetGroup.trim():'',effectiveMonth=input.month||monthInReportingZone(),mode=input.mode||'template';
     let schedule=null,amount=input.amount;
     try{if(input.schedule){schedule=validateBudgetSchedule(input.schedule);const sourceAmount=input.schedule.sourceAmount??amount;if(sourceAmount!==undefined&&sourceAmount!==null)amount=monthlyBudgetAmount(sourceAmount,schedule.frequency);}}
     catch(error){throw apiError(error.message);}
     if(!['expense','allocation'].includes(itemType)||!['template','month'].includes(mode)||!validMonth(effectiveMonth)||budgetGroup.length>50||input.amount!==undefined&&input.amount!==null&&(!Number.isSafeInteger(input.amount)||input.amount<0||input.amount>100_000_000)||amount!==undefined&&amount!==null&&(!Number.isSafeInteger(amount)||amount>100_000_000))throw apiError('Enter a valid budget item.');
-    const mutation=await mutateWithReplay(env,'category-create',input,s=>{
+    let savedCategory;const mutation=await mutateWithReplay(env,'category-create',input,s=>{
       checkRevision(s,input);
-      if(categoryCatalog(s).some(category=>category.normalizedName===normalizeCategory(name)))throw apiError('A bucket with this name already exists.',409);
-      if(categoryCatalog(s).filter(existing=>!existing.system).length>=50)throw apiError('Use up to 50 custom budget buckets.');
+      if(categoryCatalog(s).some(category=>category.normalizedName===normalizeCategory(name)&&(category.system||(category.profileId||'peter')===ownerProfile)))throw apiError('A bucket with this name already exists for this profile.',409);
+      if(categoryCatalog(s).filter(existing=>!existing.system&&(existing.profileId||'peter')===ownerProfile).length>=50)throw apiError('Use up to 50 custom budget buckets per profile.');
       if(amount!==undefined&&amount!==null){if(mode==='template')s.budgetTemplates=budgetTemplates(s);else s.monthlyBudgets={...(s.monthlyBudgets||{})};}
-      const catalog=categoryCatalog(s),records=s.categoryRecords||catalog.filter(category=>!category.system),category={id:crypto.randomUUID(),name,normalizedName:normalizeCategory(name),kind:itemType==='allocation'?'allocation':'expense',system:false,order:Math.max(CATEGORIES.length-1,...catalog.map(row=>row.order))+1,archivedAt:null,budgetGroup};
-      s.owner=user;s.categoryRecords=[...records,category];
+      const catalog=categoryCatalog(s),records=s.categoryRecords||catalog.filter(category=>!category.system),category={id:crypto.randomUUID(),name,normalizedName:normalizeCategory(name),kind:itemType==='allocation'?'allocation':'expense',system:false,profileId:ownerProfile,order:Math.max(CATEGORIES.length-1,...catalog.map(row=>row.order))+1,archivedAt:null,budgetGroup};
+      savedCategory=category;s.owner=user;s.categoryRecords=[...records,category];
       s.budgetItemSettings={...(s.budgetItemSettings||{}),[category.id]:{itemType,budgetGroup,...(schedule||{frequency:'monthly',dueMonth:null}),sourceAmount:schedule?.sourceAmount??input.amount??null}};
-      if(amount!==undefined&&amount!==null){const scheduleRecord={frequency:schedule?.frequency||'monthly',dueMonth:schedule?.dueMonth??null,sourceAmount:schedule?.sourceAmount??input.amount??amount};if(mode==='template'){s.budgetTemplates.push({categoryId:category.id,amount,effectiveFrom:effectiveMonth});s.budgetTemplateSchedules={...(s.budgetTemplateSchedules||{}),[`${category.id}:${effectiveMonth}`]:scheduleRecord};if(effectiveMonth<=monthInReportingZone())s.budgets[name]=amount;}else{const key=budgetMonthKey(effectiveMonth,category.id);s.monthlyBudgets[key]=amount;s.monthlyBudgetSchedules={...(s.monthlyBudgetSchedules||{}),[key]:scheduleRecord};}}
+      if(amount!==undefined&&amount!==null){const scheduleRecord={frequency:schedule?.frequency||'monthly',dueMonth:schedule?.dueMonth??null,sourceAmount:schedule?.sourceAmount??input.amount??amount};if(mode==='template'){s.budgetTemplates.push({categoryId:category.id,amount,effectiveFrom:effectiveMonth});s.budgetTemplateSchedules={...(s.budgetTemplateSchedules||{}),[`${category.id}:${effectiveMonth}`]:scheduleRecord};if(ownerProfile==='peter'&&effectiveMonth<=monthInReportingZone())s.budgets[name]=amount;}else{const key=budgetMonthKey(effectiveMonth,category.id);s.monthlyBudgets[key]=amount;s.monthlyBudgetSchedules={...(s.monthlyBudgetSchedules||{}),[key]:scheduleRecord};}}
       s.budgetCategoryIds={...(s.budgetCategoryIds||{}),[category.id]:name};
-    },(s,revision)=>({ok:true,revision,category:categoryCatalog(s).find(category=>category.name===name&&!category.system)}),null,'budget');
+    },(s,revision)=>({ok:true,revision,category:savedCategory}),null,'budget');
     return response(mutation.result);
   }
 
@@ -176,15 +180,16 @@ export async function handleBudgetMutationRoute(context) {
       if(index<0)throw apiError('Custom category not found.',404);
       const category=records[index];
       if(category.system||!['expense','allocation'].includes(category.kind))throw apiError('System categories cannot be changed here.',400);
+      if((category.profileId||'peter')!==(input.profileId||'peter'))throw apiError('Switch to the custom category owner before changing it.');
       if(input.action==='rename'){
         const name=typeof input.name==='string'?input.name.trim().replace(/\s+/g,' '):'';
         if(!name||name.length>80||!/^[\p{L}\p{N}][\p{L}\p{N} .&'’()/_-]*$/u.test(name))throw apiError('Use a bucket name up to 80 characters, starting with a letter or number.');
         const normalizedName=normalizeCategory(name);
-        if(categoryCatalog(s).some(row=>row.id!==category.id&&row.normalizedName===normalizedName))throw apiError('A bucket with this name already exists.',409);
+        if(categoryCatalog(s).some(row=>row.id!==category.id&&row.normalizedName===normalizedName&&(row.system||(row.profileId||'peter')===(category.profileId||'peter'))))throw apiError('A bucket with this name already exists for this profile.',409);
         const oldName=category.name;records[index]={...category,name,normalizedName};
-        if(Object.hasOwn(s.budgets||{},oldName)){s.budgets[name]=s.budgets[oldName];delete s.budgets[oldName];s.budgetCategoryIds={...(s.budgetCategoryIds||{}),[category.id]:name};}
-        s.transactions.forEach(transaction=>{if(transaction.overrideCategoryId===category.id||(!transaction.overrideCategoryId&&transaction.override===oldName)){transaction.overrideCategoryId=category.id;transaction.override=name;}if(transaction.category===oldName){transaction.sourceCategory??=oldName;transaction.categoryId=category.id;transaction.category=name;}});
-        s.customCategories=(s.customCategories||[]).map(value=>value===oldName?name:value);if(s.budgetCategoryIds?.[category.id])s.budgetCategoryIds[category.id]=name;
+        if((category.profileId||'peter')==='peter'&&Object.hasOwn(s.budgets||{},oldName)){s.budgets[name]=s.budgets[oldName];delete s.budgets[oldName];s.budgetCategoryIds={...(s.budgetCategoryIds||{}),[category.id]:name};}
+        s.transactions.forEach(transaction=>{const owner=transaction.profileId??s.accounts.find(account=>account.id===transaction.accountId)?.profileId??null;if(owner!==(category.profileId||'peter'))return;if(transaction.overrideCategoryId===category.id||(!transaction.overrideCategoryId&&transaction.override===oldName)){transaction.overrideCategoryId=category.id;transaction.override=name;}if(transaction.categoryId===category.id||(!transaction.categoryId&&transaction.category===oldName)){transaction.sourceCategory??=oldName;transaction.categoryId=category.id;transaction.category=name;}});
+        const otherOwnerStillUsesName=records.some((row,rowIndex)=>rowIndex!==index&&row.name===oldName);s.customCategories=[...new Set([...(s.customCategories||[]).filter(value=>value!==oldName||otherOwnerStillUsesName),name])];if(s.budgetCategoryIds?.[category.id])s.budgetCategoryIds[category.id]=name;
       }else if(input.action==='archive'){
         if(category.archivedAt)throw apiError('Category is already archived.',409);records[index]={...category,archivedAt:new Date().toISOString()};
       }else if(input.action==='restore'){

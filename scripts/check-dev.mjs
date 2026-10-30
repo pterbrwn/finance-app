@@ -10,7 +10,7 @@ import worker from '../dist/server/index.js';
 
 const directory = await mkdtemp(join(tmpdir(), 'ledger-dev-'));
 const configFile = join(directory, 'config.json');
-await writeFile(configFile, JSON.stringify({ enablePlaid: false, publicOrigin: 'https://ledger.example.ts.net', tailscaleLogin: 'owner@example.test' }), { mode: 0o600 });
+await writeFile(configFile, JSON.stringify({ enablePlaid: false, publicOrigin: 'https://ledger.example.ts.net', tailscaleLogin: 'owner@example.test', tailscaleMembers:[{login:'owner@example.test',actorId:'local-owner'},{login:'maddie@example.test',actorId:'maddie'}] }), { mode: 0o600 });
 let child,childOutput='';const logCanary='SYNTHETIC_LOG_CANARY_93C1';
 async function start() {
   childOutput='';child = spawn('bash', ['scripts/start-ledger.sh'], {
@@ -117,6 +117,8 @@ try {
     assert.equal((await call('/api/state', undefined, { 'X-Forwarded-For': '100.100.100.1' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'Tailscale-User-Login': 'other@example.test' })).status, 403);
     assert.equal((await call('/api/state', undefined, { 'Tailscale-User-Login': 'owner@example.test' })).status, 200);
+    assert.equal((await call('/api/state', undefined, { 'Tailscale-User-Login': 'maddie@example.test' })).status, 200,'a second explicitly configured household member can access the same household');
+    assert.equal((await call('/api/state', undefined, { 'Tailscale-User-Login': 'third@example.test' })).status, 403,'an unlisted Tailscale identity is denied');
     assert.equal((await call('/api/budget', { category: 'Groceries', amount: 50000, revision: state.revision }, { 'Tailscale-User-Login': 'owner@example.test', Origin: 'https://ledger.example.ts.net' })).status, 200);
     assert.equal((await call('/api/budget', { category: 'Groceries', amount: 50000 }, { 'Tailscale-User-Login': 'owner@example.test', Origin: 'https://other.test' })).status, 403);
     assert.equal((await call('/api/link-token', {})).status, 503);

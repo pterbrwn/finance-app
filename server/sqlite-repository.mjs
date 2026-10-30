@@ -3,11 +3,11 @@ import { chmod, mkdir, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import { budgetRecordProjections, budgetRecordsFromProjections, normalizeBudgetRecord } from '../shared/budget-records.mjs';
+import { budgetRecordProjections, budgetRecordProjectionsForProfile, budgetRecordsFromProjections, normalizeBudgetRecord } from '../shared/budget-records.mjs';
 import { applyTransactionSplitsToRows } from '../shared/transaction-splits.mjs';
 import { addSafeCents } from '../shared/reporting.mjs';
 
-const MIGRATION_VERSION = 7;
+const MIGRATION_VERSION = 9;
 const TABLES = ['items', 'accounts', 'transactions', 'holdings'];
 const MIGRATIONS = [
   { version: 1, file: '001-initial.sql' },
@@ -16,9 +16,11 @@ const MIGRATIONS = [
   { version: 4, file: '004-budget-analytics-index.sql' },
   { version: 5, file: '005-operation-results.sql' },
   { version: 6, file: '006-budget-records.sql' },
-  { version: 7, file: '007-budget-history.sql' }
+  { version: 7, file: '007-budget-history.sql' },
+  { version: 8, file: '008-household-profiles.sql' },
+  { version: 9, file: '009-profile-custom-categories.sql' }
 ];
-const CORE_TABLES = ['schema_migrations','state_meta','items','accounts','transactions','holdings','custom_categories','budgets','import_batches'];
+const CORE_TABLES = ['schema_migrations','state_meta','items','accounts','transactions','holdings','custom_categories','budgets','import_batches','household_profiles','household_plan_state'];
 const json = value => JSON.stringify(value);
 const parse = value => JSON.parse(value);
 
@@ -70,7 +72,7 @@ export async function openLedgerDatabase(path) {
       throw new Error('Database contains tables without migration history; no changes were made.');
     }
     if(currentVersion>0){
-      const expectedTables=new Set([...CORE_TABLES,...(currentVersion>=2?['budget_templates','monthly_budgets']:[]),...(currentVersion>=5?['operation_results']:[]),...(currentVersion>=6?['budget_records']:[]),...(currentVersion>=7?['budget_change_history']:[])]);
+      const expectedTables=new Set([...CORE_TABLES.filter(name=>!['household_profiles','household_plan_state'].includes(name)||currentVersion>=8),...(currentVersion>=2?['budget_templates','monthly_budgets']:[]),...(currentVersion>=5?['operation_results']:[]),...(currentVersion>=6?['budget_records']:[]),...(currentVersion>=7?['budget_change_history']:[])]);
       if([...expectedTables].some(name=>!tableNames.has(name))||[...tableNames].some(name=>!expectedTables.has(name)))throw new Error('Database tables do not match the recorded migration history; no changes were made.');
     }
     await chmod(filename, 0o600);
@@ -91,13 +93,42 @@ export async function openLedgerDatabase(path) {
         check.close();check=null;await chmod(temporary,0o600);await rename(temporary,backupPath);
       }catch(error){check?.close();await rm(temporary,{force:true});throw new Error('Could not create a verified pre-migration backup; migration stopped.');}
     }
+    const migrateLegacyProfiles=()=>{
+      for(const table of TABLES){
+        const rows=db.prepare(`SELECT rowid,payload_json FROM ${table}`).all(),update=db.prepare(`UPDATE ${table} SET payload_json=? WHERE rowid=?`);
+        for(const row of rows){const value=JSON.parse(row.payload_json);if(table==='accounts'&&value.profileId===undefined)value.profileId='peter';update.run(JSON.stringify(value),row.rowid);}
+      }
+      const row=db.prepare('SELECT payload_json FROM state_meta WHERE singleton=1').get();
+      if(row){
+        const state=JSON.parse(row.payload_json);
+        for(const key of ['goals','properties','mortgages','scenarios','commitments','categoryRecords','mortgageSnapshots'])if(Array.isArray(state[key]))for(const value of state[key])if(value&&typeof value==='object'&&value.profileId===undefined)value.profileId='peter';
+        state.householdProfiles=[{id:'peter',label:'Peter'},{id:'maddie',label:'Maddie'},{id:'joint',label:'Joint'}];state.ownershipReviewRequired=true;state.legacyPlanProfileId='peter';state.householdProfileMigrationComplete=true;
+        db.prepare("UPDATE household_plan_state SET income_templates_json=?,monthly_income_json=?,outlooks_json=?,updated_at=? WHERE profile_id='peter'").run(json(state.incomePlanTemplates||[]),json(state.monthlyIncomePlans||{}),json(state.monthlyBudgetOutlooks||{}),new Date().toISOString());
+        db.prepare('UPDATE state_meta SET payload_json=? WHERE singleton=1').run(JSON.stringify(state));
+      }
+    };
     for (const entry of MIGRATIONS.filter(migration=>migration.version>currentVersion)) {
       const migration = await readFile(new URL(`./migrations/${entry.file}`, import.meta.url), 'utf8');
       const apply=db.transaction(()=>{
         db.exec(migration);
+        if(entry.version===8)migrateLegacyProfiles();
         db.prepare('INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)').run(entry.version, new Date().toISOString());
       });
       apply();
+    }
+    if(currentVersion>=8){
+      const row=db.prepare('SELECT payload_json FROM state_meta WHERE singleton=1').get(),state=row?JSON.parse(row.payload_json):{};
+      if(!state.householdProfileMigrationComplete){
+        if(state.legacyPlanProfileId==='peter'||Array.isArray(state.householdProfiles)&&state.householdProfiles.some(profile=>profile?.id==='peter')&&state.householdProfiles.some(profile=>profile?.id==='maddie')&&state.householdProfiles.some(profile=>profile?.id==='joint')){
+          state.householdProfileMigrationComplete=true;db.prepare('UPDATE state_meta SET payload_json=? WHERE singleton=1').run(JSON.stringify(state));
+        }else if(currentVersion>=9&&!['incomePlanTemplates','monthlyIncomePlans','monthlyBudgetOutlooks'].some(key=>Object.hasOwn(state,key))){
+          state.householdProfileMigrationComplete=true;db.prepare('UPDATE state_meta SET payload_json=? WHERE singleton=1').run(JSON.stringify(state));
+        }else if(currentVersion>=9){
+          throw new Error('Household profile data migration is ambiguous; no records were changed. Preserve this database and compare it with the verified pre-migration backup before continuing.');
+        }else{
+          const repair=db.transaction(()=>{migrateLegacyProfiles();});repair();
+        }
+      }
     }
     if(MIGRATION_VERSION>=5){
       const migrateLegacyOperations=db.transaction(()=>{
@@ -165,12 +196,13 @@ export function createSqliteRepository(db) {
       ON CONFLICT(id) DO UPDATE SET item_id=excluded.item_id,payload_json=excluded.payload_json`),
     putTransaction: db.prepare('INSERT INTO transactions(id,account_id,item_id,payload_json) VALUES(?,?,?,?)'),
     putHolding: db.prepare('INSERT INTO holdings(id,item_id,payload_json) VALUES(?,?,?)'),
-    putCategory: db.prepare('INSERT INTO custom_categories(id,name,normalized_name) VALUES(?,?,?)'),
+    putCategory: db.prepare('INSERT INTO custom_categories(id,name,normalized_name,profile_id) VALUES(?,?,?,?)'),
     putBudget: db.prepare('INSERT INTO budgets(category,amount) VALUES(?,?)'),
     putTemplate: db.prepare('INSERT INTO budget_templates(category_id,effective_from,amount) VALUES(?,?,?)'),
     putMonthlyBudget: db.prepare('INSERT INTO monthly_budgets(month,category_id,amount) VALUES(?,?,?)'),
-    putBudgetRecord: db.prepare('INSERT INTO budget_records(category_id,effective_month,scope,monthly_cents,source_cents,frequency,due_month) VALUES(?,?,?,?,?,?,?)'),
-    putBudgetHistory: db.prepare('INSERT INTO budget_change_history(history_id,record_type,category_id,month,scope,action,before_json,after_json,revision,operation_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)'),
+    putBudgetRecord: db.prepare('INSERT INTO budget_records(category_id,effective_month,scope,profile_id,monthly_cents,source_cents,frequency,due_month) VALUES(?,?,?,?,?,?,?,?)'),
+    putBudgetHistory: db.prepare('INSERT INTO budget_change_history(history_id,record_type,category_id,month,scope,action,before_json,after_json,revision,operation_id,created_at,profile_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)'),
+    putProfilePlanState: db.prepare(`INSERT INTO household_plan_state(profile_id,income_templates_json,monthly_income_json,outlooks_json,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(profile_id) DO UPDATE SET income_templates_json=excluded.income_templates_json,monthly_income_json=excluded.monthly_income_json,outlooks_json=excluded.outlooks_json,updated_at=excluded.updated_at`),
     findImport: db.prepare('SELECT source_checksum FROM import_batches WHERE source_checksum=?'),
     addImport: db.prepare('INSERT INTO import_batches(source_checksum,schema_version,imported_at,record_counts_json) VALUES(?,?,?,?)')
     ,operationById: db.prepare('SELECT operation_id AS id,scope,payload_digest AS payloadDigest,response_json AS responseJson,revision,created_at AS createdAt FROM operation_results WHERE operation_id=?')
@@ -180,44 +212,78 @@ export function createSqliteRepository(db) {
   function recordsFromLegacyState(state){
     return budgetRecordsFromProjections(state);
   }
-  function persistCanonicalBudgetRecords(state){statements.clear.budget_records.run();for(const row of recordsFromLegacyState(state))statements.putBudgetRecord.run(row.categoryId,row.effectiveMonth,row.scope,row.monthlyCents,row.sourceCents,row.frequency,row.dueMonth);}
-  function persistBudgetHistory(state){for(const row of state._pendingBudgetHistory||[]){if(!row||typeof row.id!=='string'||!['budget','income','outlook'].includes(row.recordType)||!Number.isSafeInteger(row.revision)||typeof row.createdAt!=='string')throw new Error('Invalid budget audit entry.');statements.putBudgetHistory.run(row.id,row.recordType,row.categoryId,row.month,row.scope,row.action,json(row.before),json(row.after),row.revision,row.operationId,row.createdAt);}}
-  function budgetHistoryQuery({id,month,categoryId,limit=100}={}){const clauses=[],values=[];if(id){clauses.push('history_id=?');values.push(id);}if(month){clauses.push('month=?');values.push(month);}if(categoryId){clauses.push('category_id=?');values.push(categoryId);}const where=clauses.length?'WHERE '+clauses.join(' AND '):'';return db.prepare(`SELECT history_id AS id,record_type AS recordType,category_id AS categoryId,month,scope,action,before_json AS beforeJson,after_json AS afterJson,revision,operation_id AS operationId,created_at AS createdAt FROM budget_change_history ${where} ORDER BY created_at DESC,history_id DESC LIMIT ?`).all(...values,Math.min(500,Math.max(1,Number.isSafeInteger(limit)?limit:100))).map(row=>({...row,before:parse(row.beforeJson),after:parse(row.afterJson)}));}
+  function persistCanonicalBudgetRecords(state){
+    const editedProfile=state._budgetProfileId||'peter';
+    const records=state._budgetProfileId
+      ?[...db.prepare("SELECT category_id AS categoryId,effective_month AS effectiveMonth,scope,profile_id AS profileId,monthly_cents AS monthlyCents,source_cents AS sourceCents,frequency,due_month AS dueMonth FROM budget_records WHERE profile_id<>?").all(editedProfile),...recordsFromLegacyState(state).map(record=>({...record,profileId:editedProfile}))]
+      :Array.isArray(state.budgetRecords)&&state.budgetRecords.length>0
+        ?state.budgetRecords.map(normalizeBudgetRecord)
+        :recordsFromLegacyState(state).map(record=>({...record,profileId:editedProfile}));
+    statements.clear.budget_records.run();
+    for(const row of records)statements.putBudgetRecord.run(row.categoryId,row.effectiveMonth,row.scope,row.profileId,row.monthlyCents,row.sourceCents,row.frequency,row.dueMonth);
+  }
+  function persistBudgetHistory(state){for(const row of state._pendingBudgetHistory||[]){if(!row||typeof row.id!=='string'||!['budget','income','outlook'].includes(row.recordType)||!Number.isSafeInteger(row.revision)||typeof row.createdAt!=='string')throw new Error('Invalid budget audit entry.');statements.putBudgetHistory.run(row.id,row.recordType,row.categoryId,row.month,row.scope,row.action,json(row.before),json(row.after),row.revision,row.operationId,row.createdAt,row.profileId||'peter');}}
+  function budgetHistoryQuery({id,month,categoryId,profileId,limit=100}={}){const clauses=[],values=[];if(id){clauses.push('history_id=?');values.push(id);}if(month){clauses.push('month=?');values.push(month);}if(categoryId){clauses.push('category_id=?');values.push(categoryId);}if(profileId){clauses.push('profile_id=?');values.push(profileId);}const where=clauses.length?'WHERE '+clauses.join(' AND '):'';return db.prepare(`SELECT history_id AS id,record_type AS recordType,category_id AS categoryId,month,scope,profile_id AS profileId,action,before_json AS beforeJson,after_json AS afterJson,revision,operation_id AS operationId,created_at AS createdAt FROM budget_change_history ${where} ORDER BY created_at DESC,history_id DESC LIMIT ?`).all(...values,Math.min(500,Math.max(1,Number.isSafeInteger(limit)?limit:100))).map(row=>({...row,before:parse(row.beforeJson),after:parse(row.afterJson)}));}
   function attachCanonicalBudgetRecords(state){
-    const records=db.prepare('SELECT category_id AS categoryId,effective_month AS effectiveMonth,scope,monthly_cents AS monthlyCents,source_cents AS sourceCents,frequency,due_month AS dueMonth FROM budget_records ORDER BY effective_month,category_id,scope').all().map(normalizeBudgetRecord);
+    const records=db.prepare('SELECT category_id AS categoryId,effective_month AS effectiveMonth,scope,profile_id AS profileId,monthly_cents AS monthlyCents,source_cents AS sourceCents,frequency,due_month AS dueMonth FROM budget_records ORDER BY profile_id,effective_month,category_id,scope').all().map(normalizeBudgetRecord);
     Object.assign(state,budgetRecordProjections(records));
   }
-  function persistCustomCategories(names){
+  function readProfilePlanState(profileId){
+    const row=db.prepare('SELECT income_templates_json AS incomeTemplatesJson,monthly_income_json AS monthlyIncomeJson,outlooks_json AS outlooksJson FROM household_plan_state WHERE profile_id=?').get(profileId);
+    return row?{incomePlanTemplates:parse(row.incomeTemplatesJson),monthlyIncomePlans:parse(row.monthlyIncomeJson),monthlyBudgetOutlooks:parse(row.outlooksJson)}:{incomePlanTemplates:[],monthlyIncomePlans:{},monthlyBudgetOutlooks:{}};
+  }
+  function persistProfilePlanState(state){
+    const updatedAt=new Date().toISOString(),peterProjection={incomePlanTemplates:state.incomePlanTemplates,monthlyIncomePlans:state.monthlyIncomePlans,monthlyBudgetOutlooks:state.monthlyBudgetOutlooks},hasPeterProjection=(peterProjection.incomePlanTemplates||[]).length>0||Object.keys(peterProjection.monthlyIncomePlans||{}).length>0||Object.keys(peterProjection.monthlyBudgetOutlooks||{}).length>0,plans=state.profilePlanState&&typeof state.profilePlanState==='object'&&Object.keys(state.profilePlanState).length>0
+      ?Object.entries({...state.profilePlanState,peter:hasPeterProjection?peterProjection:(state.profilePlanState.peter||peterProjection)})
+      :[[state._budgetProfileId||'peter',peterProjection]];
+    for(const[profileId,plan]of plans)if(['peter','maddie','joint'].includes(profileId))statements.putProfilePlanState.run(profileId,json(plan?.incomePlanTemplates||[]),json(plan?.monthlyIncomePlans||{}),json(plan?.monthlyBudgetOutlooks||{}),updatedAt);
+  }
+  function attachProfilePlanStates(state){
+    const records=db.prepare('SELECT profile_id AS profileId,income_templates_json AS incomeTemplatesJson,monthly_income_json AS monthlyIncomeJson,outlooks_json AS outlooksJson FROM household_plan_state ORDER BY profile_id').all();
+    state.profilePlanState=Object.fromEntries(records.map(row=>[row.profileId,{incomePlanTemplates:parse(row.incomeTemplatesJson),monthlyIncomePlans:parse(row.monthlyIncomeJson),monthlyBudgetOutlooks:parse(row.outlooksJson)}]));
+    Object.assign(state,state.profilePlanState.peter||readProfilePlanState('peter'));
+  }
+  function markHouseholdProfileMigrationComplete(state){state.householdProfileMigrationComplete=true;}
+  function persistCustomCategories(state){
     statements.clear.custom_categories.run();
-    for(const name of names){
-      if(typeof name!=='string'||!name.trim())throw new Error('Invalid custom category.');
-      const value=name.trim(),id=`legacy-category-${createHash('sha256').update(value.toLocaleLowerCase('en-US')).digest('hex').slice(0,32)}`;
-      statements.putCategory.run(id,value,value.toLocaleLowerCase('en-US'));
+    const records=(state.categoryRecords||[]).filter(category=>category&&!category.system),knownNames=new Set(records.map(category=>String(category.name).normalize('NFKC').trim().toLocaleLowerCase('en-US')));
+    for(const category of records){
+      if(typeof category.name!=='string'||!category.name.trim())throw new Error('Invalid custom category.');
+      const name=category.name.trim(),normalized=category.normalizedName||name.normalize('NFKC').replace(/\s+/g,' ').toLocaleLowerCase('en-US');
+      statements.putCategory.run(category.id,name,normalized,category.profileId||'peter');
+    }
+    for(const rawName of state.customCategories||[]){
+      if(typeof rawName!=='string'||!rawName.trim())throw new Error('Invalid custom category.');
+      const name=rawName.trim(),normalized=name.normalize('NFKC').replace(/\s+/g,' ').toLocaleLowerCase('en-US');if(knownNames.has(normalized))continue;
+      const id=`legacy-category-${createHash('sha256').update(normalized).digest('hex').slice(0,32)}`;statements.putCategory.run(id,name,normalized,'peter');
     }
   }
   function load() {
     const meta = statements.meta.get();
-    const state = meta ? parse(meta.payload_json) : { version: 1, owner: null, lastSync: null, lease: null };
+    const state = meta ? parse(meta.payload_json) : { version: 1, owner: null, lastSync: null, lease: null, householdProfiles:[{id:'peter',label:'Peter'},{id:'maddie',label:'Maddie'},{id:'joint',label:'Joint'}] };
     for (const name of TABLES) state[name] = statements.rows[name].all().map(row => parse(row.payload_json));
-    state.customCategories = db.prepare('SELECT name FROM custom_categories ORDER BY rowid').all().map(row => row.name);
+    state.customCategories = db.prepare('SELECT DISTINCT name FROM custom_categories ORDER BY name').all().map(row => row.name);
     state.budgets = Object.fromEntries(db.prepare('SELECT category,amount FROM budgets ORDER BY category').all().map(row => [row.category, row.amount]));
     attachCanonicalBudgetRecords(state);
+    attachProfilePlanStates(state);
     return state;
   }
-  function loadBudgetState() {
+  function loadBudgetState(profileId='peter') {
     const meta = statements.meta.get();
     const state = meta ? parse(meta.payload_json) : { version: 1, owner: null, lastSync: null, lease: null };
-    state.customCategories = db.prepare('SELECT name FROM custom_categories ORDER BY rowid').all().map(row => row.name);
+    Object.assign(state,readProfilePlanState(profileId));
+    state.customCategories = db.prepare('SELECT DISTINCT name FROM custom_categories ORDER BY name').all().map(row => row.name);
     state.budgets = Object.fromEntries(db.prepare('SELECT category,amount FROM budgets ORDER BY category').all().map(row => [row.category, row.amount]));
     attachCanonicalBudgetRecords(state);
+    Object.assign(state,budgetRecordProjectionsForProfile(state.budgetRecords||[],profileId));state._budgetProfileId=profileId;
     return state;
   }
   function loadOwnerState() {
     const state=loadBudgetState();
     state.items=statements.rows.items.all().map(row=>parse(row.payload_json));
     state.accounts=statements.rows.accounts.all().map(row=>parse(row.payload_json));
-    state.transactions=[];
-    state.holdings=[];
+    state.transactions=statements.rows.transactions.all().map(row=>parse(row.payload_json));
+    state.holdings=statements.rows.holdings.all().map(row=>parse(row.payload_json));
     return state;
   }
   function dashboardState() {
@@ -227,24 +293,32 @@ export function createSqliteRepository(db) {
     const state={...meta,lastGoalAllocationUndo:[...(goalAllocationLedger||[])].reverse().find(entry=>!entry.undoneAt)||null,accounts:statements.rows.accounts.all().map(row=>parse(row.payload_json)),items:statements.rows.items.all().map(row=>{const {token,cursor,...item}=parse(row.payload_json);return item;}),holdings:statements.rows.holdings.all().map(row=>parse(row.payload_json))};
     state.goalAllocations=(state.goalAllocations||[]).filter(allocation=>allocation.active!==false);
     state.balanceSheetSnapshots=(state.balanceSheetSnapshots||[]).slice(-12);
-    state.customCategories=db.prepare('SELECT name FROM custom_categories ORDER BY rowid').all().map(row=>row.name);
+    state.customCategories=db.prepare('SELECT DISTINCT name FROM custom_categories ORDER BY name').all().map(row=>row.name);
     state.budgets=Object.fromEntries(db.prepare('SELECT category,amount FROM budgets ORDER BY category').all().map(row=>[row.category,row.amount]));
     attachCanonicalBudgetRecords(state);
+    attachProfilePlanStates(state);
     state.transactionCount=db.prepare('SELECT COUNT(*) AS count FROM transactions').get().count;
     state.transactionMonths=db.prepare("SELECT DISTINCT substr(json_extract(payload_json,'$.date'),1,7) AS month FROM transactions WHERE json_extract(payload_json,'$.date') IS NOT NULL ORDER BY month DESC").all().map(row=>row.month);
     return state;
   }
-  function queryTransactionPage({page=1,limit=50,search='',category='',accountId='',from='',to='',review=false}={}) {
+  function profileClause(profileId, values) {
+    if(!profileId||profileId==='combined')return '';
+    if(!['peter','maddie','joint'].includes(profileId))throw new TypeError('Invalid reporting profile.');
+    values.push(profileId);
+    return "coalesce(json_extract(transactions.payload_json,'$.profileId'),(SELECT json_extract(accounts.payload_json,'$.profileId') FROM accounts WHERE accounts.id=transactions.account_id))=?";
+  }
+  function queryTransactionPage({page=1,limit=50,search='',category='',accountId='',from='',to='',review=false,viewProfile='combined'}={}) {
     const clauses=[],values=[];
-    if(search){clauses.push("instr(ledger_casefold(json_extract(payload_json,'$.merchant')) ,?)>0");values.push(search.toLocaleLowerCase('en-US'));}
+    if(search){clauses.push("instr(ledger_casefold(json_extract(transactions.payload_json,'$.merchant')) ,?)>0");values.push(search.toLocaleLowerCase('en-US'));}
     if(category){const effectiveName="coalesce(nullif(json_extract(payload_json,'$.override'),''),json_extract(payload_json,'$.category'))",effectiveId="CASE WHEN nullif(json_extract(payload_json,'$.override'),'') IS NOT NULL THEN json_extract(payload_json,'$.overrideCategoryId') ELSE json_extract(payload_json,'$.categoryId') END";clauses.push(`(${effectiveName}=? OR ${effectiveId}=?)`);values.push(category,category);}
-    if(accountId){clauses.push('account_id=?');values.push(accountId);}
+    if(accountId){clauses.push('transactions.account_id=?');values.push(accountId);}
     if(from){clauses.push("json_extract(payload_json,'$.date')>=?");values.push(from);}
     if(to){clauses.push("json_extract(payload_json,'$.date')<=?");values.push(to);}
     if(review)clauses.push("(json_extract(payload_json,'$.review')=1 OR (json_type(payload_json,'$.confidence') IS NOT NULL AND CAST(json_extract(payload_json,'$.confidence') AS REAL)<0.5) OR coalesce(json_extract(payload_json,'$.override'),json_extract(payload_json,'$.category'))='Other')");
+    const owner=profileClause(viewProfile,values);if(owner)clauses.push(owner);
     const where=clauses.length?`WHERE ${clauses.join(' AND ')}`:'';
     const total=db.prepare(`SELECT COUNT(*) AS count FROM transactions ${where}`).get(...values).count;
-    const transactions=db.prepare(`SELECT payload_json FROM transactions ${where} ORDER BY json_extract(payload_json,'$.date') DESC,id ASC LIMIT ? OFFSET ?`).all(...values,limit,(page-1)*limit).map(row=>parse(row.payload_json));
+    const transactions=db.prepare(`SELECT transactions.payload_json FROM transactions ${where} ORDER BY json_extract(transactions.payload_json,'$.date') DESC,id ASC LIMIT ? OFFSET ?`).all(...values,limit,(page-1)*limit).map(row=>parse(row.payload_json));
     const revision=db.prepare("SELECT coalesce(json_extract(payload_json,'$.revision'),0) AS revision FROM state_meta WHERE singleton=1").get()?.revision||0;
     return {page,limit,total,transactions,revision};
   }
@@ -253,13 +327,14 @@ export function createSqliteRepository(db) {
       OR json_extract(payload_json,'$.overrideCategoryId')=?
       OR (coalesce(json_extract(payload_json,'$.overrideCategoryId'),'')='' AND json_extract(payload_json,'$.override')=?)`).all(categoryName,categoryId,categoryName).map(row=>row.id);
   }
-  function queryBudgetAnalytics(month) {
-    const state=loadBudgetState();
+  function queryBudgetAnalytics(month,viewProfile='combined') {
+    const state=loadBudgetState(viewProfile==='combined'?'peter':viewProfile);
     const effectiveName="coalesce(nullif(json_extract(payload_json,'$.override'),''),json_extract(payload_json,'$.category'))";
     const effectiveId="CASE WHEN nullif(json_extract(payload_json,'$.override'),'') IS NOT NULL THEN json_extract(payload_json,'$.overrideCategoryId') ELSE json_extract(payload_json,'$.categoryId') END";
     const eligible="json_extract(payload_json,'$.pending') IS NOT 1 AND json_extract(payload_json,'$.currency')='USD'";
-    const aggregate=(from,to)=>db.prepare(`SELECT substr(json_extract(payload_json,'$.date'),1,7) AS month,${effectiveName} AS category,${effectiveId} AS categoryId,SUM(json_extract(payload_json,'$.amount')) AS amount,COUNT(*) AS activity
-      FROM transactions WHERE ${eligible} AND json_extract(payload_json,'$.date')>=? AND json_extract(payload_json,'$.date')<? GROUP BY month,category,categoryId`).all(from,to);
+    const valuesFor=(from,to)=>{const values=[from,to],owner=profileClause(viewProfile,values);return{values,owner};};
+    const aggregate=(from,to)=>{const {values,owner}=valuesFor(from,to);return db.prepare(`SELECT substr(json_extract(transactions.payload_json,'$.date'),1,7) AS month,${effectiveName} AS category,${effectiveId} AS categoryId,SUM(json_extract(transactions.payload_json,'$.amount')) AS amount,COUNT(*) AS activity
+      FROM transactions WHERE ${eligible} AND json_extract(transactions.payload_json,'$.date')>=? AND json_extract(transactions.payload_json,'$.date')<? ${owner?`AND ${owner}`:''} GROUP BY month,category,categoryId`).all(...values);};
     const currentRows=aggregate(`${month}-01`,`${nextMonth(month)}-01`);
     const boundary=state.budgetHistoryUnavailableBefore;
     const start=typeof boundary==='string'&&/^\d{4}-(0[1-9]|1[0-2])$/.test(boundary)&&boundary<=month?boundary:month;
@@ -270,7 +345,7 @@ export function createSqliteRepository(db) {
     const [year,number]=month.split('-').map(Number);
     return number===12?`${String(year+1).padStart(4,'0')}-01`:`${String(year).padStart(4,'0')}-${String(number+1).padStart(2,'0')}`;
   }
-  function monthSummary(month) {
+  function monthSummary(month,viewProfile='combined') {
     const start=`${month}-01`,monthDate=new Date(`${start}T12:00:00Z`),previousDate=new Date(Date.UTC(monthDate.getUTCFullYear(),monthDate.getUTCMonth()-1,1));
     const previous=`${previousDate.getUTCFullYear()}-${String(previousDate.getUTCMonth()+1).padStart(2,'0')}`;
     const nextDate=new Date(Date.UTC(monthDate.getUTCFullYear(),monthDate.getUTCMonth()+1,1));
@@ -280,11 +355,13 @@ export function createSqliteRepository(db) {
     const metaForSplits=statements.meta.get(),splitState=metaForSplits?parse(metaForSplits.payload_json):{};
     if((splitState.transactionSplits||[]).length){
       const allTransactions=statements.rows.transactions.all().map(row=>parse(row.payload_json)),reportRows=applyTransactionSplitsToRows(splitState,allTransactions);
-      const summarizeMonth=key=>{const categories={};let spend=0,income=0,purchases=0;const weeklySpend=[0,0,0,0,0];for(const row of reportRows){if(!row.date?.startsWith(key)||row.pending||row.currency!=='USD')continue;const category=row.override||row.category;if(category==='Income')income=addSafeCents(income,-row.amount,'Monthly income');else if(category!=='Transfers'&&splitState.budgetItemSettings?.[row.categoryId]?.itemType!=='allocation'&&splitState.categoryRecords?.find(value=>value.id===row.categoryId)?.kind!=='allocation'){spend=addSafeCents(spend,row.amount,'Monthly spending');categories[category]=addSafeCents(categories[category]||0,row.amount,'Monthly category spending');if(row.amount>0)purchases++;const week=Math.min(4,Math.floor((Number(row.date.slice(-2))-1)/7));weeklySpend[week]=addSafeCents(weeklySpend[week],row.amount,'Weekly spending');}}return{spend,income,purchases,categories,weeklySpend};};
-      const currentRows=allTransactions.filter(row=>row.date?.startsWith(month)).sort((a,b)=>b.date.localeCompare(a.date)||String(a.merchant||'').localeCompare(String(b.merchant||''))||a.id.localeCompare(b.id));
+      const accounts=statements.rows.accounts.all().map(row=>parse(row.payload_json)),effectiveOwner=row=>row.profileId??accounts.find(account=>account.id===row.accountId)?.profileId??null,visibleRows=viewProfile==='combined'?reportRows:reportRows.filter(row=>effectiveOwner(row)===viewProfile);
+      const summarizeMonth=key=>{const categories={};let spend=0,income=0,purchases=0;const weeklySpend=[0,0,0,0,0];for(const row of visibleRows){if(!row.date?.startsWith(key)||row.pending||row.currency!=='USD')continue;const category=row.override||row.category;if(category==='Income')income=addSafeCents(income,-row.amount,'Monthly income');else if(category!=='Transfers'&&splitState.budgetItemSettings?.[row.categoryId]?.itemType!=='allocation'&&splitState.categoryRecords?.find(value=>value.id===row.categoryId)?.kind!=='allocation'){spend=addSafeCents(spend,row.amount,'Monthly spending');categories[category]=addSafeCents(categories[category]||0,row.amount,'Monthly category spending');if(row.amount>0)purchases++;const week=Math.min(4,Math.floor((Number(row.date.slice(-2))-1)/7));weeklySpend[week]=addSafeCents(weeklySpend[week],row.amount,'Weekly spending');}}return{spend,income,purchases,categories,weeklySpend};};
+      const currentRows=visibleRows.filter(row=>row.date?.startsWith(month)).sort((a,b)=>b.date.localeCompare(a.date)||String(a.merchant||'').localeCompare(String(b.merchant||''))||a.id.localeCompare(b.id));
       return{month,previousMonth:previous,current:summarizeMonth(month),previous:summarizeMonth(previous),recent:currentRows.slice(0,6),transactionCount:currentRows.length};
     }
-    const category="coalesce(nullif(json_extract(payload_json,'$.override'),''),json_extract(payload_json,'$.category'))";
+    const ownerValues=[];const owner=profileClause(viewProfile,ownerValues);
+    const category="coalesce(nullif(json_extract(transactions.payload_json,'$.override'),''),json_extract(transactions.payload_json,'$.category'))";
     const eligible="json_extract(payload_json,'$.pending') IS NOT 1 AND json_extract(payload_json,'$.currency')='USD'";
     const effectiveId="CASE WHEN nullif(json_extract(payload_json,'$.override'),'') IS NOT NULL THEN json_extract(payload_json,'$.overrideCategoryId') ELSE json_extract(payload_json,'$.categoryId') END";
     const categoryRecords="coalesce((SELECT json_extract(payload_json,'$.categoryRecords') FROM state_meta WHERE singleton=1),'[]')";
@@ -299,18 +376,19 @@ export function createSqliteRepository(db) {
       SUM(CASE WHEN ${eligible} AND ${category}='Income' THEN -json_extract(payload_json,'$.amount') ELSE 0 END) AS income,
       SUM(CASE WHEN ${expenseEligible} AND json_extract(payload_json,'$.amount')>0 THEN 1 ELSE 0 END) AS purchases,
       substr(json_extract(payload_json,'$.date'),1,7) AS month
-      FROM transactions WHERE json_extract(payload_json,'$.date') BETWEEN ? AND ? GROUP BY month,category`).all(from,end);
+      FROM transactions WHERE json_extract(transactions.payload_json,'$.date') BETWEEN ? AND ? ${owner?`AND ${owner}`:''} GROUP BY month,category`).all(from,end,...ownerValues);
     const summarize=key=>{
       const categories={};let spend=0,income=0,purchases=0;
       for(const row of rows){if(row.month!==key)continue;if(row.category==='Income')income+=row.income||0;else if(row.category!=='Transfers'){const amount=row.spend||0;spend+=amount;purchases+=row.purchases||0;if(amount)categories[row.category||'Other']=(categories[row.category||'Other']||0)+amount;}}
       const weekly=db.prepare(`SELECT min(4,CAST((CAST(substr(json_extract(payload_json,'$.date'),9,2) AS INTEGER)-1)/7 AS INTEGER)) AS week,
         SUM(CASE WHEN ${expenseEligible} THEN json_extract(payload_json,'$.amount') ELSE 0 END) AS amount
-        FROM transactions WHERE json_extract(payload_json,'$.date') BETWEEN ? AND ? GROUP BY week`).all(`${key}-01`,key===month?end:previousEnd);
+        FROM transactions WHERE json_extract(payload_json,'$.date') BETWEEN ? AND ? ${owner?`AND ${owner}`:''} GROUP BY week`).all(`${key}-01`,key===month?end:previousEnd,...ownerValues);
       const weeklySpend=[0,0,0,0,0];for(const row of weekly)weeklySpend[row.week]=row.amount||0;
       return{spend,income,purchases,categories,weeklySpend};
     };
-    const recent=db.prepare("SELECT payload_json FROM transactions WHERE json_extract(payload_json,'$.date') BETWEEN ? AND ? ORDER BY json_extract(payload_json,'$.date') DESC,json_extract(payload_json,'$.merchant') ASC,id ASC LIMIT 6").all(start,end).map(row=>parse(row.payload_json));
-    const transactionCount=db.prepare("SELECT COUNT(*) AS count FROM transactions WHERE json_extract(payload_json,'$.date') BETWEEN ? AND ?").get(start,end).count;
+    const profileFilter=owner?`AND ${owner}`:'';
+    const recent=db.prepare(`SELECT payload_json FROM transactions WHERE json_extract(payload_json,'$.date') BETWEEN ? AND ? ${profileFilter} ORDER BY json_extract(payload_json,'$.date') DESC,json_extract(payload_json,'$.merchant') ASC,id ASC LIMIT 6`).all(start,end,...ownerValues).map(row=>parse(row.payload_json));
+    const transactionCount=db.prepare(`SELECT COUNT(*) AS count FROM transactions WHERE json_extract(payload_json,'$.date') BETWEEN ? AND ? ${profileFilter}`).get(start,end,...ownerValues).count;
     const revision=db.prepare("SELECT coalesce(json_extract(payload_json,'$.revision'),0) AS revision FROM state_meta WHERE singleton=1").get()?.revision||0;
     return{month,previousMonth:previous,revision,current:summarize(month),previous:summarize(previous),recent,transactionCount};
   }
@@ -328,29 +406,33 @@ export function createSqliteRepository(db) {
   }
   const persist = db.transaction(state => {
     validateState(state);
-    for (const name of [...TABLES, 'custom_categories', 'budgets', 'budget_templates', 'monthly_budgets','budget_records']) statements.clear[name].run();
-    const { items = [], accounts = [], transactions = [], holdings = [], customCategories = [], budgets = {}, budgetTemplates = [], monthlyBudgets = {}, budgetRecords, budgetTemplateSchedules, monthlyBudgetSchedules, _pendingOperation, _pendingBudgetHistory, ...meta } = state;
+    markHouseholdProfileMigrationComplete(state);
+    for (const name of [...TABLES, 'custom_categories', 'budgets', 'budget_templates', 'monthly_budgets']) statements.clear[name].run();
+    const { items = [], accounts = [], transactions = [], holdings = [], customCategories = [], budgets = {}, budgetTemplates = [], monthlyBudgets = {}, budgetRecords, budgetTemplateSchedules, monthlyBudgetSchedules, incomePlanTemplates, monthlyIncomePlans, monthlyBudgetOutlooks, profilePlanState, _budgetProfileId, _pendingOperation, _pendingBudgetHistory, ...meta } = state;
     statements.putMeta.run(json(meta));
     if(_pendingOperation)statements.putOperation.run(_pendingOperation.id,_pendingOperation.scope,_pendingOperation.payloadDigest,json(_pendingOperation.response),_pendingOperation.revision,_pendingOperation.createdAt);
     persistBudgetHistory(state);
     persistCanonicalBudgetRecords(state);
+    persistProfilePlanState(state);
     for (const row of items) statements.putItem.run(row.id, json(row));
     for (const row of accounts) statements.putAccount.run(row.id, row.itemId ?? null, json(row));
     for (const row of transactions) statements.putTransaction.run(row.id, row.accountId ?? null, row.itemId ?? null, json(row));
     for (const [index, row] of holdings.entries()) statements.putHolding.run(row.id || `legacy-holding-${index}`, row.itemId ?? null, json(row));
-    persistCustomCategories(customCategoryNames(state));
+    persistCustomCategories(state);
     for (const [category, amount] of Object.entries(budgets)) statements.putBudget.run(category, amount);
     for (const template of budgetTemplates) statements.putTemplate.run(template.categoryId, template.effectiveFrom, template.amount);
     for (const [key, amount] of Object.entries(monthlyBudgets)) { const month=key.slice(0,7), categoryId=key.slice(8); statements.putMonthlyBudget.run(month, categoryId, amount); }
   });
   const persistBudgetState = db.transaction(state => {
     validateState({ ...state, items: [], accounts: [], transactions: [], holdings: [] });
-    const { items, accounts, transactions, holdings, customCategories, budgets, budgetTemplates, monthlyBudgets, budgetRecords, budgetTemplateSchedules, monthlyBudgetSchedules, _pendingOperation, _pendingBudgetHistory, ...meta } = state;
+    markHouseholdProfileMigrationComplete(state);
+    const { items, accounts, transactions, holdings, customCategories, budgets, budgetTemplates, monthlyBudgets, budgetRecords, budgetTemplateSchedules, monthlyBudgetSchedules, incomePlanTemplates, monthlyIncomePlans, monthlyBudgetOutlooks, profilePlanState, _pendingOperation, _pendingBudgetHistory, _budgetProfileId, ...meta } = state;
     statements.putMeta.run(json(meta));
     if(_pendingOperation)statements.putOperation.run(_pendingOperation.id,_pendingOperation.scope,_pendingOperation.payloadDigest,json(_pendingOperation.response),_pendingOperation.revision,_pendingOperation.createdAt);
     persistBudgetHistory(state);
     persistCanonicalBudgetRecords(state);
-    persistCustomCategories(customCategoryNames(state));
+    persistProfilePlanState(state);
+    persistCustomCategories(state);
     statements.clear.budgets.run();
     statements.clear.budget_templates.run();
     statements.clear.monthly_budgets.run();
@@ -360,7 +442,8 @@ export function createSqliteRepository(db) {
   });
   const persistOwnerState = db.transaction(state => {
     validateState({ ...state, transactions: [], holdings: [] });
-    const { items, accounts, transactions, holdings, customCategories, budgets, budgetTemplates, monthlyBudgets, budgetRecords, budgetTemplateSchedules, monthlyBudgetSchedules, _pendingOperation, _pendingBudgetHistory, ...meta } = state;
+    markHouseholdProfileMigrationComplete(state);
+    const { items, accounts, transactions, holdings, customCategories, budgets, budgetTemplates, monthlyBudgets, budgetRecords, budgetTemplateSchedules, monthlyBudgetSchedules, incomePlanTemplates, monthlyIncomePlans, monthlyBudgetOutlooks, profilePlanState, _pendingOperation, _pendingBudgetHistory, _budgetProfileId, ...meta } = state;
     statements.putMeta.run(json(meta));
     if(_pendingOperation)statements.putOperation.run(_pendingOperation.id,_pendingOperation.scope,_pendingOperation.payloadDigest,json(_pendingOperation.response),_pendingOperation.revision,_pendingOperation.createdAt);
     persistBudgetHistory(state);
@@ -378,6 +461,7 @@ export function createSqliteRepository(db) {
   });
   const writeTransactionSubset = db.transaction((state, ids) => {
     validateState({ ...state, items: [], accounts: [], holdings: [], transactions: state.transactions || [], budgets: {} });
+    markHouseholdProfileMigrationComplete(state);
     const desired = new Map((state.transactions || []).map(transaction => [transaction.id, transaction]));
     const remove = db.prepare('DELETE FROM transactions WHERE id=?');
     const put = db.prepare(`INSERT INTO transactions(id,account_id,item_id,payload_json) VALUES(?,?,?,?)
@@ -393,20 +477,21 @@ export function createSqliteRepository(db) {
     const { transactions, items, accounts, holdings, _deleteAccountIds, customCategories, budgets, budgetTemplates, monthlyBudgets, budgetRecords, budgetTemplateSchedules, monthlyBudgetSchedules, _pendingOperation, _pendingBudgetHistory, ...meta } = state;
     statements.putMeta.run(json(meta));
     if(_pendingOperation)statements.putOperation.run(_pendingOperation.id,_pendingOperation.scope,_pendingOperation.payloadDigest,json(_pendingOperation.response),_pendingOperation.revision,_pendingOperation.createdAt);
+    persistCustomCategories(state);
     persistBudgetHistory(state);
   });
   return Object.freeze({
     schemaVersion: MIGRATION_VERSION,
     async read() { return { state: load() }; },
-    async readBudgetState() { return { state: loadBudgetState() }; },
+    async readBudgetState(profileId='peter') { return { state: loadBudgetState(profileId) }; },
     async readOwnerState() { return { state: loadOwnerState() }; },
     async readDashboard() { return {state:dashboardState()}; },
     async readIdentity() { return ownerIdentity(); },
     async readSyncJob() { return syncJobState(); },
     async queryTransactions(query) { return queryTransactionPage(query); },
     async queryCategoryTransactionIds(categoryId,categoryName) { return queryCategoryTransactionIds(categoryId,categoryName); },
-    async readBudgetAnalytics(month) { return queryBudgetAnalytics(month); },
-    async queryMonthSummary(month) { return monthSummary(month); },
+    async readBudgetAnalytics(month,viewProfile) { return queryBudgetAnalytics(month,viewProfile); },
+    async queryMonthSummary(month,viewProfile) { return monthSummary(month,viewProfile); },
     async readScenarios() { return scenarioDetails(); },
     async readOperationResult(id) { const row=statements.operationById.get(id);return row?{...row,response:parse(row.responseJson)}:null; },
     async readBudgetHistory(query) { return budgetHistoryQuery(query); },
@@ -417,20 +502,21 @@ export function createSqliteRepository(db) {
         const ids=[...new Set(transactionIds)];
         let state;
         if(strategy==='budget')state=loadBudgetState();
+        else if(strategy.startsWith('budget:'))state=loadBudgetState(strategy.slice(7));
         else if(strategy==='owner')state=loadOwnerState();
         else if(strategy==='transactions'){
           const meta=statements.meta.get();state=meta?parse(meta.payload_json):{version:1,owner:null,lastSync:null,lease:null};
           state.revision=Number.isSafeInteger(state.revision)?state.revision:0;
           state.transactions=ids.length?db.prepare(`SELECT payload_json FROM transactions WHERE id IN (${ids.map(()=>'?').join(',')})`).all(...ids).map(row=>parse(row.payload_json)):[];
           state.accounts=statements.rows.accounts.all().map(row=>parse(row.payload_json));state.items=statements.rows.items.all().map(row=>parse(row.payload_json));
-          state.customCategories=db.prepare('SELECT name FROM custom_categories ORDER BY rowid').all().map(row=>row.name);state.budgets=Object.fromEntries(db.prepare('SELECT category,amount FROM budgets ORDER BY category').all().map(row=>[row.category,row.amount]));
+          state.customCategories=db.prepare('SELECT DISTINCT name FROM custom_categories ORDER BY name').all().map(row=>row.name);state.budgets=Object.fromEntries(db.prepare('SELECT category,amount FROM budgets ORDER BY category').all().map(row=>[row.category,row.amount]));
           state.budgetTemplates=db.prepare('SELECT category_id AS categoryId,effective_from AS effectiveFrom,amount FROM budget_templates ORDER BY effective_from,category_id').all();state.monthlyBudgets=Object.fromEntries(db.prepare('SELECT month,category_id AS categoryId,amount FROM monthly_budgets ORDER BY month,category_id').all().map(row=>[`${row.month}:${row.categoryId}`,row.amount]));
         }else state=load();
         state._pendingOperation=await update(state);
         const commit=db.transaction(()=>{
           const existing=statements.operationById.get(state._pendingOperation.id);
           if(existing)return{state:null,result:parse(existing.responseJson),operation:{id:existing.id,scope:existing.scope,payloadDigest:existing.payloadDigest}};
-          if(strategy==='budget')persistBudgetState(state);
+          if(strategy==='budget'||strategy.startsWith('budget:'))persistBudgetState(state);
           else if(strategy==='owner')persistOwnerState(state);
           else if(strategy==='transactions')writeTransactionSubset(state,ids);
           else persist(state);
@@ -456,9 +542,9 @@ export function createSqliteRepository(db) {
       writes = operation.catch(() => {});
       return operation;
     },
-    async mutateBudgetState(update) {
+    async mutateBudgetState(update,profileId='peter') {
       const operation = writes.then(async () => {
-        const state = loadBudgetState();
+        const state = loadBudgetState(profileId);
         await update(state);
         persistBudgetState(state);
         return state;
@@ -487,7 +573,7 @@ export function createSqliteRepository(db) {
           : [];
         state.accounts = statements.rows.accounts.all().map(row => parse(row.payload_json));
         state.items = statements.rows.items.all().map(row => parse(row.payload_json));
-        state.customCategories = db.prepare('SELECT name FROM custom_categories ORDER BY rowid').all().map(row => row.name);
+        state.customCategories = db.prepare('SELECT DISTINCT name FROM custom_categories ORDER BY name').all().map(row => row.name);
         state.budgets = Object.fromEntries(db.prepare('SELECT category,amount FROM budgets ORDER BY category').all().map(row => [row.category, row.amount]));
         state.budgetTemplates = db.prepare('SELECT category_id AS categoryId,effective_from AS effectiveFrom,amount FROM budget_templates ORDER BY effective_from,category_id').all();
         state.monthlyBudgets = Object.fromEntries(db.prepare('SELECT month,category_id AS categoryId,amount FROM monthly_budgets ORDER BY month,category_id').all().map(row => [`${row.month}:${row.categoryId}`, row.amount]));

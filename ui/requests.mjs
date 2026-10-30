@@ -21,7 +21,8 @@ export function createApiClient({ isSample = () => false, fetcher = fetch, creat
   const inFlightWrites = new Map();
   const api=async function api(path, input) {
     if (isSample() && input !== undefined) throw new Error('Sample preview cannot save changes.');
-    const replaySafe = input !== undefined && REPLAY_SAFE_WRITE_PATHS.has(path);
+    const route = path.split('?')[0];
+    const replaySafe = input !== undefined && REPLAY_SAFE_WRITE_PATHS.has(route);
     let requestInput = input, operationKey = null;
     if (replaySafe) {
       operationKey = path + '\n' + JSON.stringify(input);

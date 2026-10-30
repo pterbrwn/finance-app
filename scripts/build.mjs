@@ -20,10 +20,10 @@ await mkdir(resolve(root,'dist/shared'),{recursive:true});
 await copyFile(resolve(root,'worker/index.js'),resolve(root,'dist/server/index.js'));
 await copyFile(resolve(root,'worker/budget-routes.mjs'),resolve(root,'dist/server/budget-routes.mjs'));
 await copyFile(resolve(root,'server/repository.mjs'),resolve(root,'dist/server/repository.mjs'));
-for (const file of ['sqlite-repository.mjs','migrations/001-initial.sql','migrations/002-monthly-budgets.sql','migrations/003-transaction-query-indexes.sql','migrations/004-budget-analytics-index.sql','migrations/005-operation-results.sql','migrations/006-budget-records.sql','migrations/007-budget-history.sql']) {
+for (const file of ['sqlite-repository.mjs','migrations/001-initial.sql','migrations/002-monthly-budgets.sql','migrations/003-transaction-query-indexes.sql','migrations/004-budget-analytics-index.sql','migrations/005-operation-results.sql','migrations/006-budget-records.sql','migrations/007-budget-history.sql','migrations/008-household-profiles.sql','migrations/009-profile-custom-categories.sql']) {
   await copyFile(resolve(root,'server',file),resolve(root,'dist/server',file));
 }
-for (const file of ['categories.mjs','dates.mjs','money.mjs','investments.mjs','reporting.mjs','reconciliation.mjs','statement-reconciliation.mjs','transaction-splits.mjs','commitments.mjs','budgets.mjs','budget-frequency.mjs','budget-records.mjs','operation-identity.mjs','goals.mjs','mortgages.mjs','scenarios.mjs','net-worth.mjs']) {
+for (const file of ['categories.mjs','dates.mjs','money.mjs','investments.mjs','reporting.mjs','reconciliation.mjs','statement-reconciliation.mjs','transaction-splits.mjs','commitments.mjs','budgets.mjs','budget-frequency.mjs','budget-records.mjs','operation-identity.mjs','goals.mjs','mortgages.mjs','scenarios.mjs','net-worth.mjs','profiles.mjs']) {
   await copyFile(resolve(root,'shared',file),resolve(root,'dist/shared',file));
 }
 const budgetModule=await readFile(resolve(root,'shared/budgets.mjs'),'utf8');

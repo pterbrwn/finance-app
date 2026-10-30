@@ -1,4 +1,6 @@
 const validMonth = /^\d{4}-(0[1-9]|1[0-2])$/;
+const validProfiles = new Set(['combined','peter','maddie']);
+const validOwners = new Set(['','peter','maddie','joint']);
 
 export function readViewState(href, currentMonth, views) {
   const params = new URL(href).searchParams;
@@ -7,6 +9,8 @@ export function readViewState(href, currentMonth, views) {
 
   return {
     view: views.includes(requestedView) ? requestedView : 'overview',
+    viewProfile: validProfiles.has(params.get('profile')) ? params.get('profile') : 'combined',
+    ownerFilter: params.get('profile')==='joint'?'joint':validOwners.has(params.get('owner')||'') ? params.get('owner')||'' : '',
     month: requestedMonth && validMonth.test(requestedMonth) ? requestedMonth : currentMonth,
     search: (params.get('search') || '').slice(0, 120),
     filter: (params.get('category') || '').slice(0, 80),
@@ -21,6 +25,8 @@ export function readViewState(href, currentMonth, views) {
 export function writeViewState(pathname, state, currentMonth) {
   const params = new URLSearchParams();
   if (state.view !== 'overview') params.set('page', state.view);
+  if (state.viewProfile && state.viewProfile !== 'combined') params.set('profile', state.viewProfile);
+  if (state.ownerFilter) params.set('owner', state.ownerFilter);
   if (state.month !== currentMonth) params.set('month', state.month);
   if (state.search) params.set('search', state.search);
   if (state.filter) params.set('category', state.filter);

@@ -2,6 +2,7 @@ const activeSubmissions = new WeakSet();
 
 export function showDialog(dialog, documentRef = document) {
   dialog.returnFocus = documentRef.activeElement;
+  for(const form of dialog.querySelectorAll('form')){form.addEventListener('input',()=>{form.dataset.dirty='true';});form.addEventListener('change',()=>{form.dataset.dirty='true';});}
   const heading = dialog.querySelector('h2');
   if (heading) {
     heading.id = heading.id || 'dialog-heading-' + Math.random().toString(36).slice(2);

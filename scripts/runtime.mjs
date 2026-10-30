@@ -50,9 +50,18 @@ export async function localRuntime() {
     if (error.code !== 'ENOENT') throw error;
   }
   const enabled = config.enablePlaid === true;
+  const tailscaleMembers={};
+  if(config.tailscaleMembers!==undefined){
+    if(!Array.isArray(config.tailscaleMembers)||config.tailscaleMembers.length>20)throw new Error('Tailscale members must be a list of at most 20 configured identities.');
+    for(const member of config.tailscaleMembers){
+      if(!member||typeof member.login!=='string'||!/^[^\s@]+@[^\s@]+$/.test(member.login)||typeof member.actorId!=='string'||!/^[a-z][a-z0-9-]{0,63}$/.test(member.actorId))throw new Error('Each Tailscale member needs a login and a stable actor ID.');
+      const login=member.login.toLocaleLowerCase('en-US');if(Object.hasOwn(tailscaleMembers,login)||Object.values(tailscaleMembers).includes(member.actorId))throw new Error('Tailscale member logins and actor IDs must be unique.');tailscaleMembers[login]=member.actorId;
+    }
+  }
+  if(config.tailscaleLogin&&!Object.hasOwn(tailscaleMembers,String(config.tailscaleLogin).toLocaleLowerCase('en-US')))tailscaleMembers[String(config.tailscaleLogin).toLocaleLowerCase('en-US')]='local-owner';
   if (config.publicOrigin) {
     const url = new URL(config.publicOrigin);
-    if (url.protocol !== 'https:' || !url.hostname.endsWith('.ts.net') || url.origin !== config.publicOrigin || !config.tailscaleLogin) throw new Error('Tailscale access needs an exact HTTPS ts.net origin and an owner login.');
+    if (url.protocol !== 'https:' || !url.hostname.endsWith('.ts.net') || url.origin !== config.publicOrigin || !Object.keys(tailscaleMembers).length) throw new Error('Tailscale access needs an exact HTTPS ts.net origin and at least one configured member.');
   }
   const repository = config.storageMode === 'sqlite'
     ? await createSqliteRepositoryAt(join(dataDirectory, 'ledger.sqlite'))
@@ -60,6 +69,8 @@ export async function localRuntime() {
   return {
     publicOrigin: config.publicOrigin,
     tailscaleLogin: config.tailscaleLogin,
+    tailscaleMembers,
+    HOUSEHOLD_ACTOR_IDS:Object.values(tailscaleMembers),
     REPOSITORY: repository,
     LOCAL_ONLY: !enabled,
     PLAID_ENV: enabled ? config.plaidEnv : undefined,

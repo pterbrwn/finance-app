@@ -44,6 +44,8 @@ try{
   }
   async function visit(view){await page.locator(`[data-view="${view}"]`).first().click();await page.waitForTimeout(100);await audit(view);}
   await page.goto(`http://127.0.0.1:${port}/`);await page.locator('#app .shell').waitFor({timeout:10000}).catch(error=>{throw new Error(`app did not render: ${logs}\n${error.message}`);});
+  await page.locator('#profile-select').selectOption('maddie');await page.waitForFunction(()=>new URL(location.href).searchParams.get('profile')==='maddie');assert.equal(await page.locator('#profile-select').inputValue(),'maddie','the profile selector updates the selected household view');
+  await page.locator('#profile-select').selectOption('combined');await page.waitForFunction(()=>!new URL(location.href).searchParams.has('profile'));assert.equal(await page.locator('#profile-select').inputValue(),'combined','Combined is the default URL state');
   const qaMonthParts=new Intl.DateTimeFormat('en-US',{timeZone:'America/Chicago',year:'numeric',month:'2-digit'}).formatToParts(new Date());
   const selectedMonth=qaMonthParts.find(part=>part.type==='year').value+'-'+qaMonthParts.find(part=>part.type==='month').value;
   const testDate=selectedMonth+'-12';
@@ -88,7 +90,7 @@ try{
 
   await page.locator('#import').click();
   const bulkImportDialog=page.getByRole('dialog');
-  await bulkImportDialog.locator('#import-account').fill('Synthetic bulk account');
+  await bulkImportDialog.locator('#import-account').fill('Synthetic bulk account');await bulkImportDialog.locator('[name=profileId]').selectOption('peter');
   await bulkImportDialog.locator('#csv-file').setInputFiles({name:'bulk.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category\n'+selectedMonth+'-13,Synthetic bulk market,18.75,Groceries\n'+selectedMonth+'-14,Synthetic source market,12.50,Groceries\n')});
   await bulkImportDialog.getByRole('button',{name:'Preview file'}).click();
   await bulkImportDialog.getByText('2 rows · 1 account(s)').waitFor();
@@ -97,6 +99,7 @@ try{
   const bulkImportBatch=await(await bulkCommitResponse).json();
   await page.keyboard.press('Escape');
   await page.locator('[data-view="overview"]').first().click();
+  await page.locator('.household-comparison').waitFor();await page.locator('.household-category-comparison').waitFor();
   const overviewRecent=page.locator('.transactions tbody tr').filter({hasText:'Synthetic bulk market'}).locator('[data-category]');
   await overviewRecent.waitFor();
   await page.route('**/api/month-summary*',route=>route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({error:'Synthetic summary failure.'})}));
@@ -220,6 +223,7 @@ try{
   await page.reload();
   const afterBulkReloadState=(await savedBulkRows()).filter(row=>row.overrideCategoryId==='system:shopping').length;
   assert.equal(afterBulkReloadState,121,'all categorized transaction changes remain saved after reload');
+  await page.locator('#profile-select').selectOption('peter');await page.waitForFunction(()=>new URL(location.href).searchParams.get('profile')==='peter');
   await page.locator('[data-view="budgets"]').first().click();
   await page.locator('[data-new-category]').click();
   const categoryDialog=page.getByRole('dialog');
@@ -240,6 +244,7 @@ try{
   await page.locator('p.form-status').filter({hasText:'Category renamed.'}).waitFor();
   await page.waitForFunction(()=>document.querySelector('.category-manage-row input')?.value==='Browser renamed category');
   assert.equal(await page.locator('.category-manage-row input').first().inputValue(),'Browser renamed category','keyboard submission renames a category');
+  await page.locator('#profile-select').selectOption('peter');await page.waitForFunction(()=>new URL(location.href).searchParams.get('profile')==='peter');
   const incomeForm=page.locator('[data-income-plan]');
   await incomeForm.locator('select[name="mode"]').selectOption('template');
   await incomeForm.locator('input[name="amount"]').fill('5000');
@@ -263,7 +268,7 @@ try{
   await page.locator('p.form-status').filter({hasText:'Budget saved.'}).waitFor();
   assert.match(await page.locator('.budget-total-line').innerText(),/Planned surplus \$4,925\.00/,'planned bucket amounts reduce projected income to show the month surplus');
   const conflictBudgetId=await budgetForm().getAttribute('data-budget-id'),conflictForm=()=>page.locator('form[data-budget-id="'+conflictBudgetId+'"]'),secondBudgetTab=await context.newPage();
-  await secondBudgetTab.goto(`http://127.0.0.1:${port}/?page=budgets&month=${encodeURIComponent(selectedMonth)}`);await secondBudgetTab.locator('form[data-budget-id="'+conflictBudgetId+'"]').waitFor();
+  await secondBudgetTab.goto(`http://127.0.0.1:${port}/?page=budgets&month=${encodeURIComponent(selectedMonth)}&profile=peter`);await secondBudgetTab.locator('form[data-budget-id="'+conflictBudgetId+'"]').waitFor();
   const secondTabForm=secondBudgetTab.locator('form[data-budget-id="'+conflictBudgetId+'"]');await editBudgetForm(secondTabForm);await secondTabForm.locator('select[name="mode"]').selectOption('template');await secondTabForm.locator('input[name="amount"]').fill('80');
   const secondTabSave=secondBudgetTab.waitForResponse(response=>response.url().endsWith('/api/budget')&&response.request().method()==='POST');await secondTabForm.locator('button[type="submit"]').click();assert.equal((await secondTabSave).status(),200,'a second real browser tab can update the same budget');
   await editBudgetForm(conflictForm());await conflictForm().locator('input[name="amount"]').fill('90');const staleTabSave=page.waitForResponse(response=>response.url().endsWith('/api/budget')&&response.request().method()==='POST');await conflictForm().locator('button[type="submit"]').click();assert.equal((await staleTabSave).status(),409,'the first tab cannot silently overwrite a newer budget revision');
@@ -289,13 +294,13 @@ try{
   assert.equal(stateAfterMonthSave.monthlyBudgets[budgetMonth+':'+monthPayload.categoryId],0,JSON.stringify(stateAfterMonthSave.monthlyBudgets));
   assert.equal(stateAfterMonthSave.monthlyBudgetSchedules[budgetMonth+':'+monthPayload.categoryId].sourceAmount,0,'monthly override schedule metadata is saved with the override');
   assert.equal(stateAfterMonthSave.budgetTemplateSchedules[monthPayload.categoryId+':'+budgetMonth].sourceAmount,7500,'recurring schedule metadata remains attached to its effective template');
-  await page.goto(`http://127.0.0.1:${port}/?page=budgets&month=${followingMonth}`);
+  await page.goto(`http://127.0.0.1:${port}/?page=budgets&month=${followingMonth}&profile=peter`);
   await page.waitForLoadState('networkidle');
   await page.locator('.budget-income-line').getByText('$5,000.00',{exact:true}).first().waitFor();
   await selectedBudgetForm().waitFor();
   const nextMonthBudgetValue=await selectedBudgetForm().locator('input[name="amount"]').inputValue(),savedBudgetState=await page.evaluate(async next=>({state:await fetch('/api/state').then(response=>response.json()),summary:await fetch('/api/budget-summary?month='+next).then(response=>response.json()),month:document.querySelector('#month')?.value}),followingMonth);
   assert.equal(nextMonthBudgetValue,'75.00',`the recurring template applies to ${followingMonth}; base=${budgetMonth}, category=${savedBudgetId}, ui=${savedBudgetState.month}, summary=${JSON.stringify(savedBudgetState.summary)}`);
-  await page.goto(`http://127.0.0.1:${port}/?page=budgets&month=${budgetMonth}`);
+  await page.goto(`http://127.0.0.1:${port}/?page=budgets&month=${budgetMonth}&profile=peter`);
   await page.waitForLoadState('networkidle');
   await selectedBudgetForm().waitFor();
   assert.equal(await selectedBudgetForm().locator('input[name="amount"]').inputValue(),'0.00','an explicit zero month override survives a month switch and reload');
@@ -330,7 +335,7 @@ try{
   const archivedExport=page.waitForEvent('download');await page.locator('#export').click();
   const archivedCSV=await readFile(await(await archivedExport).path(),'utf8');
   assert.match(archivedCSV,/Synthetic bulk market/,'archived category history remains exportable');
-  await page.goto(`http://127.0.0.1:${port}/?page=transactions&category=${encodeURIComponent('Browser renamed category')}`);
+  await page.goto(`http://127.0.0.1:${port}/?page=transactions&category=${encodeURIComponent('Browser renamed category')}&profile=peter`);
   await page.locator('#category-filter').waitFor();
   await page.getByText('Synthetic bulk market',{exact:true}).waitFor();
   assert.equal(await page.locator('#category-filter').inputValue(),'Browser renamed category','direct URLs select an archived historical category');
@@ -549,8 +554,7 @@ try{
   await page.goto(`http://127.0.0.1:${port}/?page=overview`);await page.locator('#app .shell').waitFor();
   await page.setViewportSize({width:390,height:900});
   await page.evaluate(()=>new Promise(resolvePromise=>requestAnimationFrame(()=>requestAnimationFrame(resolvePromise))));
-  await page.waitForFunction(()=>innerWidth===390&&[...document.querySelectorAll('nav[aria-label="Main navigation"] button')].length===9&&[...document.querySelectorAll('nav[aria-label="Main navigation"] button')].every(button=>button.getBoundingClientRect().height>0));
-  const mobileControls=await page.locator('nav[aria-label="Main navigation"] button').evaluateAll(buttons=>buttons.map(button=>Math.round(button.getBoundingClientRect().height)));
+  const mobileControls=await page.waitForFunction(()=>{const buttons=[...document.querySelectorAll('nav[aria-label="Main navigation"] button')],heights=buttons.map(button=>Math.round(button.getBoundingClientRect().height));return innerWidth===390&&heights.length===9&&heights.every(height=>height>=44)?heights:null;}).then(handle=>handle.jsonValue());
   assert.ok(mobileControls.every(height=>height>=44),`mobile navigation controls are at least 44px high: ${mobileControls}`);
 
   for(const width of [1440,390,320]){

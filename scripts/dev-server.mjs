@@ -27,7 +27,8 @@ const server = createServer(async (incoming, outgoing) => {
     reject(403, 'Open the dashboard using its printed local URL.');
     return;
   }
-  if (proxied && (!env.publicOrigin || incoming.headers['tailscale-user-login'] !== env.tailscaleLogin)) {
+  const tailscaleLogin=String(incoming.headers['tailscale-user-login']||'').toLocaleLowerCase('en-US');
+  if (proxied && (!env.publicOrigin || !Object.hasOwn(env.tailscaleMembers||{},tailscaleLogin))) {
     incoming.resume();
     reject(403, 'Connect with the authorized Tailscale account.');
     return;
@@ -60,7 +61,7 @@ const server = createServer(async (incoming, outgoing) => {
     for (const [name, value] of Object.entries(incoming.headers)) {
       if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(', ') : value);
     }
-    headers.set('oai-authenticated-user-id', 'local-owner');
+    headers.set('oai-authenticated-user-id', proxied?env.tailscaleMembers[tailscaleLogin]:'local-owner');
     headers.set('x-request-id',requestId);
     const method = incoming.method;
     const request = new Request((proxied ? env.publicOrigin : origin) + incoming.url, {
