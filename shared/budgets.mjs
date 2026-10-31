@@ -9,7 +9,7 @@ export function resolveBudget(templates = [], monthOverrides = {}, categoryId, m
     throw new TypeError('A category and YYYY-MM budget month are required.');
   }
   const key = `${month}:${categoryId}`;
-  if (Object.hasOwn(monthOverrides, key)) {
+  if (Object.prototype.hasOwnProperty.call(monthOverrides, key)) {
     return { amount: monthOverrides[key], source: 'month', month, categoryId, ...(monthSchedules[key] || {}) };
   }
   const template = templates
@@ -52,7 +52,7 @@ export function resolveIncomePlan(templates = [], monthOverrides = {}, month) {
   if (!validMonth(month)) {
     throw new TypeError('A YYYY-MM income plan month is required.');
   }
-  if (Object.hasOwn(monthOverrides, month)) {
+  if (Object.prototype.hasOwnProperty.call(monthOverrides, month)) {
     return { amount: monthOverrides[month], source: 'month', month };
   }
   const template = templates.filter(row => validMonth(row.effectiveFrom) && row.effectiveFrom <= month)

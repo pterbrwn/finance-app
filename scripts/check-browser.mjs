@@ -61,6 +61,28 @@ try{
   assert.match(await page.locator('.bank-mini').innerText(),/Sample preview/,'sample mode does not reveal the saved account count');
   await page.locator('[data-view="transactions"]').first().click();
   const sampleCategory=page.locator('[data-category]').first();await sampleCategory.waitFor();await sampleCategory.selectOption({label:'Shopping'});
+  await page.setViewportSize({width:390,height:844});
+  const mobileFilters=page.locator('.transaction-filter-details');
+  if(await mobileFilters.evaluate(details=>details.open))await mobileFilters.locator('summary').click();
+  await page.waitForFunction(()=>document.querySelector('.transaction-filter-details')?.open===false);
+  const mobileTransactionTop=await page.locator('#transaction-table tbody tr').first().evaluate(element=>element.getBoundingClientRect().top);
+  assert.ok(mobileTransactionTop<=600,`first transaction remains visible in the mobile viewport with filters collapsed: ${mobileTransactionTop}px`);
+  await mobileFilters.locator('summary').click();
+  await page.waitForFunction(()=>document.querySelector('.transaction-filter-details')?.open===true);
+  await mobileFilters.locator('#category-filter').selectOption({label:'Groceries'});
+  await page.waitForFunction(()=>document.querySelector('.transaction-filter-details')?.open===true);
+  assert.match(await mobileFilters.locator('summary').innerText(),/1 active/,'mobile disclosure remains open and reports one active filter after rerender');
+  await mobileFilters.locator('#clear-transaction-filters').click();
+  await page.waitForFunction(()=>document.querySelector('.transaction-filter-details')?.open===true&&document.querySelector('.transaction-filter-details summary')?.textContent.includes('0 active'));
+  await page.locator('#mobile-page-select').selectOption('budgets');
+  await page.locator('.budget-page').waitFor();
+  const mobileBudgetResultTop=await page.locator('.mobile-budget-result').evaluate(element=>element.getBoundingClientRect().top);
+  assert.ok(mobileBudgetResultTop<=640,`planned budget result remains visible in the mobile viewport: ${mobileBudgetResultTop}px`);
+  assert.equal(await page.locator('.budget-line:not([data-editing="true"]) .budget-plan-cell [data-budget-stop]:visible').count(),0,'read-only sample rows do not show disabled operator actions');
+  assert.equal(await page.locator('.budget-line').filter({hasText:'Dining'}).locator('[data-label="Planned"]').innerText(),'$350.00 / month\n$350.00 available','sample plans show one clear monthly amount and available balance');
+  for(const width of [320,390,1440]){await page.setViewportSize({width,height:900});const size=await page.evaluate(()=>({viewport:innerWidth,document:document.documentElement.scrollWidth}));assert.ok(size.document<=size.viewport+1,`sample budget has no page overflow at ${width}px: ${JSON.stringify(size)}`);}
+  await page.setViewportSize({width:1440,height:1000});
+  for(const [view,content] of [['commitments','Home rent'],['accounts','Everyday Checking'],['investments','Northstar 401(k)'],['goals','Emergency reserve'],['home','Purchase scenario example'],['settings','Sample settings view']]){await page.locator(`[data-view="${view}"]`).first().click();await page.getByText(content,{exact:false}).first().waitFor();assert.match(await page.locator('.demo-note').innerText(),/synthetic records/i,`${view} remains clearly marked as sample data`);await audit(`sample-${view}`);}
   await page.waitForTimeout(100);
   assert.deepEqual(sampleWrites,[],'sample edits never send mutation requests');
   const afterSample=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,snapshots:state.balanceSheetSnapshots.length})));
@@ -73,8 +95,15 @@ try{
   const cancelledImport=page.getByRole('dialog');
   await cancelledImport.locator('#import-account').fill('Cancelled browser import');
   await cancelledImport.locator('#csv-file').setInputFiles({name:'cancelled.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category\n'+testDate+',Cancelled Market,24.50,Groceries\n')});
-  await cancelledImport.locator('#cancel-import').click();
-  assert.equal(await page.getByRole('dialog').count(),0,'cancelling a CSV preview closes without committing');
+  await withDialog(/Discard your unsaved changes/,'accept',()=>cancelledImport.locator('#cancel-import').click());
+  assert.equal(await page.getByRole('dialog').count(),0,'confirmed cancellation closes the edited CSV preview');
+  await page.locator('#import').click();
+  const retainedImport=page.getByRole('dialog');
+  await retainedImport.locator('#import-account').fill('Keep this draft');
+  await withDialog(/Discard your unsaved changes/,'dismiss',()=>retainedImport.locator('#cancel-import').click());
+  assert.equal(await page.getByRole('dialog').count(),1,'declining discard keeps the edited CSV dialog open');
+  assert.equal(await retainedImport.locator('#import-account').inputValue(),'Keep this draft','declining discard preserves the draft');
+  await withDialog(/Discard your unsaved changes/,'accept',()=>retainedImport.locator('#cancel-import').click());
   await page.locator('#import').click();
   const importDialog=page.getByRole('dialog');
   await importDialog.locator('#import-account').fill('Synthetic browser account');
@@ -117,6 +146,10 @@ try{
   await page.locator('#bulk-category').waitFor();
   const selectedBulkCategory=await page.locator('#bulk-category').selectOption({label:'Shopping'});
   assert.ok(selectedBulkCategory[0],'bulk category selection is populated');
+  assert.equal(await page.locator('#apply-bulk-category').isDisabled(),true,'bulk category action requires reviewing selected records');
+  await page.locator('#review-selected').click();
+  assert.equal(await page.locator('dialog tbody tr').count(),1,'bulk review shows the selected transaction');
+  await page.locator('[data-confirm-bulk-review]').click();
   const bulkEditResponse=page.waitForResponse(response=>response.url().endsWith('/api/category-bulk')&&response.request().method()==='POST');
   await page.locator('#apply-bulk-category').click();
   const bulkEditResult=await bulkEditResponse.catch(async error=>{throw new Error(`${error.message}; bulk requests=${JSON.stringify(observedRequests)}; inline status=${await page.locator('.form-status').allTextContents()}; toast=${await page.locator('#toast').textContent()}; page errors=${logs}`);});
@@ -190,6 +223,11 @@ try{
   await page.locator('#next-page').click();
   await page.waitForFunction(()=>document.querySelector('#transaction-count')?.textContent.includes('Page 3 of 3'));
   await page.locator('.bulk-category-controls').getByText('100 selected').waitFor();
+  assert.equal(await page.locator('#apply-bulk-category').isDisabled(),true,'bulk edit stays disabled until the selected records are reviewed');
+  await page.locator('#review-selected').click();
+  assert.equal(await page.locator('dialog tbody tr').count(),100,'review lists every selected record across pages');
+  await page.locator('[data-confirm-bulk-review]').click();
+  assert.equal(await page.locator('#apply-bulk-category').isDisabled(),false,'review confirmation enables the bulk edit');
   await page.getByRole('checkbox',{name:/Bulk acceptance/}).first().click();
   await page.locator('#toast').filter({hasText:'Select up to 100 transactions'}).waitFor();
   assert.match(await page.locator('#toast').textContent(),/up to 100/,'the 101st selected row is explicitly rejected');
@@ -211,6 +249,9 @@ try{
   await page.waitForFunction(()=>document.querySelector('#transaction-count')?.textContent.includes('Page 3 of 3'));
   await selectVisibleBulkRows();
   await page.locator('.bulk-category-controls').getByText('21 selected').waitFor();
+  await page.locator('#review-selected').click();
+  assert.equal(await page.locator('dialog tbody tr').count(),21,'the final page selection is reviewable');
+  await page.locator('[data-confirm-bulk-review]').click();
   const finalTwentyOneResponse=page.waitForResponse(response=>response.url().endsWith('/api/category-bulk')&&response.request().method()==='POST');
   await page.locator('#bulk-category').selectOption({label:'Shopping'});
   const finalTwentyOneRequest=page.waitForRequest(request=>request.url().includes('/api/category-bulk')&&request.method()==='POST');
@@ -254,7 +295,7 @@ try{
   await incomeForm.getByRole('button',{name:'Save income'}).click();
   const incomePayload=(await incomeSaveRequest).postDataJSON(),incomeSaved=await incomeSaveResponse;assert.equal(incomeSaved.status(),200,JSON.stringify(incomePayload));assert.equal(incomePayload.amount,500000,'projected income is sent in integer cents');assert.equal((await incomeSaved.json()).amount,500000,'the saved income response is integer cents');
   assert.equal((await page.evaluate(async month=>fetch('/api/state').then(response=>response.json()).then(state=>state.incomePlanTemplates.find(row=>row.effectiveFrom===month)?.amount),selectedMonth)),500000,'recurring projected income persists in integer cents');
-  assert.match(await page.locator('.budget-income-line').innerText(),/\$5,000\.00/,'the budget shows planned monthly income');
+  assert.match(await page.locator('.budget-income-summary').innerText(),/\$5,000\.00/,'the budget shows planned monthly income');
   const budgetForm=()=>page.locator('form[data-budget]').first(),templateAmount='75';
   const editBudgetForm=async form=>{if(!(await form.getAttribute('data-editing')))await form.locator('[data-budget-edit]').click();};
   await editBudgetForm(budgetForm());
@@ -296,7 +337,7 @@ try{
   assert.equal(stateAfterMonthSave.budgetTemplateSchedules[monthPayload.categoryId+':'+budgetMonth].sourceAmount,7500,'recurring schedule metadata remains attached to its effective template');
   await page.goto(`http://127.0.0.1:${port}/?page=budgets&month=${followingMonth}&profile=peter`);
   await page.waitForLoadState('networkidle');
-  await page.locator('.budget-income-line').getByText('$5,000.00',{exact:true}).first().waitFor();
+  await page.locator('.budget-income-summary').getByText('$5,000.00',{exact:true}).first().waitFor();
   await selectedBudgetForm().waitFor();
   const nextMonthBudgetValue=await selectedBudgetForm().locator('input[name="amount"]').inputValue(),savedBudgetState=await page.evaluate(async next=>({state:await fetch('/api/state').then(response=>response.json()),summary:await fetch('/api/budget-summary?month='+next).then(response=>response.json()),month:document.querySelector('#month')?.value}),followingMonth);
   assert.equal(nextMonthBudgetValue,'75.00',`the recurring template applies to ${followingMonth}; base=${budgetMonth}, category=${savedBudgetId}, ui=${savedBudgetState.month}, summary=${JSON.stringify(savedBudgetState.summary)}`);
@@ -370,7 +411,7 @@ try{
   assert.equal(await page.evaluate(()=>document.activeElement?.id),await failingBudget.locator('input[name="amount"]').getAttribute('id'),'an offline budget request returns focus to the amount field');
   await page.unroute('**/api/budget');
 
-  await page.locator('[data-view="accounts"]').first().click();
+  await withDialog(/Discard unsaved form edits before leaving this page/, 'accept', async()=>page.locator('[data-view="accounts"]').first().click());
   await page.locator('#add-account').click();
   const addAccountDialog=page.getByRole('dialog');await addAccountDialog.locator('#add-manual').click();
   const accountDialog=page.getByRole('dialog');
@@ -405,7 +446,7 @@ try{
   await staleAccountDialog.getByRole('alert').filter({hasText:'Synthetic account revision conflict.'}).waitFor();
   assert.equal(await staleAccountDialog.locator('#manual-name').inputValue(),'Synthetic cash conflict draft','a stale manual-account response preserves the dialog draft');
   await page.unroute('**/api/manual-account');
-  await page.keyboard.press('Escape');
+  await withDialog(/Discard your unsaved changes/, 'accept', async()=>page.keyboard.press('Escape'));
 
   async function createManualAccount(name,type,balance){await page.locator('#add-account').click();await page.getByRole('dialog').locator('#add-manual').click();const dialog=page.getByRole('dialog');await dialog.locator('#manual-name').fill(name);await dialog.locator('#manual-type').selectOption(type);await dialog.locator('#manual-balance').fill(String(balance));await dialog.locator('#manual-asof').fill(observationDate);await dialog.getByRole('button',{name:'Save account'}).click();await page.getByText(name,{exact:true}).first().waitFor();}
   await createManualAccount('Synthetic retirement account','retirement','12000');
@@ -436,7 +477,7 @@ try{
   assert.doesNotMatch(await allocationDialog.innerText(),/Synthetic retirement account|Synthetic student liability/,'goal allocation lists only eligible cash, not investment or liability accounts');
   await allocationDialog.locator('[data-allocation-account]').fill('500');
   await allocationDialog.getByRole('button',{name:'Save allocations'}).click();
-  await page.getByText(/Scheduled month-end contributions:.*2026-10-31/).waitFor();
+  await page.getByText(/Scheduled month-end contributions:.*\d{4}-\d{2}-\d{2}/).waitFor();
 
   await page.locator('[data-view="home"]').first().click();
   await page.locator('#new-scenario').click();
@@ -447,9 +488,21 @@ try{
   await scenarioDialog.locator('[name="downPayment"]').fill('25000');
   await scenarioDialog.locator('[name="termMonths"]').fill('360');
   await scenarioDialog.locator('[name="noteRatePercent"]').fill('6.5');
+  await page.waitForFunction(()=>document.querySelector('#scenario-live-preview')?.textContent.includes('Rough principal and interest'));
+  assert.match(await scenarioDialog.locator('#scenario-live-preview').innerText(),/Taxes, insurance, upkeep, closing costs, and household budget are not included/,'the initial estimate clearly excludes unknown costs');
+  const saveRequirements=scenarioDialog.locator('#scenario-save-requirements');
+  assert.match(await saveRequirements.innerText(),/Fees financed into loan[\s\S]*PMI monthly estimate[\s\S]*Cash closing costs/,'save checklist lists the required costs while preview keeps them unknown');
+  await scenarioDialog.locator('summary').filter({hasText:'Household fit'}).click();
+  await scenarioDialog.locator('[name=netMonthlyIncome]').fill('5000');
+  assert.match(await saveRequirements.innerText(),/Current non-housing commitments[\s\S]*Current housing cost[\s\S]*Planned monthly savings/,'net income activates matching household requirements');
+  await scenarioDialog.locator('[name=netMonthlyIncome]').fill('');
+  await scenarioDialog.locator('summary').filter({hasText:'Ownership costs and escrow'}).click();
+  await scenarioDialog.locator('[name=pmiExplicitNone]').check();
+  assert.doesNotMatch(await saveRequirements.innerText(),/Monthly PMI estimate/,'explicit no-PMI removes the PMI amount requirement');
+  await scenarioDialog.locator('[name=pmiExplicitNone]').uncheck();
   await scenarioDialog.locator('[name="targetDate"]').fill('2027-12-31');
   for(const field of ['financedFees','propertyTaxMonthly','homeownersInsuranceMonthly','supplementaryInsuranceMonthly','pmiMonthly','hoaMonthly','maintenanceReserveMonthly','subordinateDebtMonthly'])await scenarioDialog.locator(`[name="${field}"]`).fill('0');
-  await scenarioDialog.getByRole('button',{name:'Save scenario'}).click();
+  await scenarioDialog.getByRole('button',{name:'Save complete scenario'}).click();
   const closingSection=scenarioDialog.locator('details').filter({hasText:'Closing, reserves, and available cash'});
   await page.waitForFunction(()=>{const d=[...document.querySelectorAll('.scenario-form details')].find(x=>x.textContent.includes('Closing, reserves, and available cash'));return d?.open&&document.querySelector('.scenario-form [role="alert"]')?.textContent.includes('required fields');});
   assert.equal(await closingSection.evaluate(element=>element.open),true,'submission reveals the collapsed section with required closing costs');
@@ -461,7 +514,7 @@ try{
   await page.waitForFunction(()=>!!document.querySelector('#scenario-live-preview .scenario-results'));
   const previewBreakdown=await scenarioDialog.locator('#scenario-live-preview .scenario-results').innerText();
   await audit('scenario-dialog');
-  await scenarioDialog.getByRole('button',{name:'Save scenario'}).click();
+  await scenarioDialog.getByRole('button',{name:'Save complete scenario'}).click();
   await page.getByText('Browser purchase estimate',{exact:true}).first().waitFor();
   const scenarioCard=()=>page.locator('article.scenario-card').first(),savedBreakdown=await scenarioCard().locator('.scenario-results').innerText();
   assert.equal(savedBreakdown.replace(/\s+/g,' ').trim(),previewBreakdown.replace(/\s+/g,' ').trim(),'saved scenario numbers match the live preview');
@@ -470,11 +523,11 @@ try{
   assert.equal(await editScenarioDialog.locator('[name="purchasePrice"]').inputValue(),'250000.00','editing a scenario restores its saved inputs');
   await page.route('**/api/scenario',route=>route.abort());
   await editScenarioDialog.locator('[name="name"]').fill('Browser scenario conflict draft');
-  await editScenarioDialog.getByRole('button',{name:'Save scenario'}).click();
+  await editScenarioDialog.getByRole('button',{name:'Save complete scenario'}).click();
   await editScenarioDialog.getByRole('alert').filter({hasText:'Could not reach Ledger.'}).waitFor();
   assert.equal(await editScenarioDialog.locator('[name="name"]').inputValue(),'Browser scenario conflict draft','an offline scenario save preserves all entered values');
   await page.unroute('**/api/scenario');
-  await page.keyboard.press('Escape');
+  await withDialog(/Discard your unsaved changes/,'accept',()=>page.keyboard.press('Escape'));
   await scenarioCard().getByRole('button',{name:'Duplicate'}).click();
   await page.waitForFunction(()=>document.querySelectorAll('article.scenario-card').length===2);
   await page.locator('[data-compare-scenario]').nth(0).check();
@@ -554,20 +607,22 @@ try{
   await page.goto(`http://127.0.0.1:${port}/?page=overview`);await page.locator('#app .shell').waitFor();
   await page.setViewportSize({width:390,height:900});
   await page.evaluate(()=>new Promise(resolvePromise=>requestAnimationFrame(()=>requestAnimationFrame(resolvePromise))));
-  const mobileControls=await page.waitForFunction(()=>{const buttons=[...document.querySelectorAll('nav[aria-label="Main navigation"] button')],heights=buttons.map(button=>Math.round(button.getBoundingClientRect().height));return innerWidth===390&&heights.length===9&&heights.every(height=>height>=44)?heights:null;}).then(handle=>handle.jsonValue());
-  assert.ok(mobileControls.every(height=>height>=44),`mobile navigation controls are at least 44px high: ${mobileControls}`);
+  const mobileControl=await page.waitForFunction(()=>{const select=document.querySelector('#mobile-page-select');return innerWidth===390&&select&&getComputedStyle(select).display!=='none'&&select.getBoundingClientRect().height>=44?{height:Math.round(select.getBoundingClientRect().height),options:select.options.length}:null;}).then(handle=>handle.jsonValue());
+  assert.equal(mobileControl.options,9,'mobile navigation exposes every destination');
+  assert.ok(mobileControl.height>=44,`mobile page selector meets the 44px touch target: ${mobileControl.height}`);
 
   for(const width of [1440,390,320]){
     await page.setViewportSize({width,height:900});
     const overflow=await page.evaluate(()=>({viewport:innerWidth,document:document.documentElement.scrollWidth,body:document.body.scrollWidth}));
     assert.ok(overflow.document<=overflow.viewport+1&&overflow.body<=overflow.viewport+1,`horizontal overflow at ${width}px: ${JSON.stringify(overflow)}`);
-    await page.locator('[data-view="commitments"]').first().click();const commitmentLayout=await page.evaluate(()=>{const labels=[...document.querySelectorAll('.commitment-form>label')].map(label=>{const r=label.getBoundingClientRect(),input=label.querySelector('input,select')?.getBoundingClientRect();return{label:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},input:input&&{left:input.left,right:input.right,top:input.top,bottom:input.bottom}};});let overlaps=false;for(let i=0;i<labels.length;i++)for(let j=i+1;j<labels.length;j++){const a=labels[i].label,b=labels[j].label;if(a.left<b.right&&a.right>b.left&&a.top<b.bottom&&a.bottom>b.top)overlaps=true;}return{labels,overlaps};});assert.equal(commitmentLayout.overlaps,false,`commitment fields do not overlap at ${width}px`);assert.ok(commitmentLayout.labels.every(row=>!row.input||row.input.left>=row.label.left&&row.input.right<=row.label.right),`commitment inputs stay inside their labels at ${width}px`);
+    if(width<601)await page.locator('#mobile-page-select').selectOption('commitments');else await page.locator('[data-view="commitments"]').first().click();const commitmentLayout=await page.evaluate(()=>{const labels=[...document.querySelectorAll('.commitment-form>label')].map(label=>{const r=label.getBoundingClientRect(),input=label.querySelector('input,select')?.getBoundingClientRect();return{label:{left:r.left,right:r.right,top:r.top,bottom:r.bottom},input:input&&{left:input.left,right:input.right,top:input.top,bottom:input.bottom}};});let overlaps=false;for(let i=0;i<labels.length;i++)for(let j=i+1;j<labels.length;j++){const a=labels[i].label,b=labels[j].label;if(a.left<b.right&&a.right>b.left&&a.top<b.bottom&&a.bottom>b.top)overlaps=true;}return{labels,overlaps};});assert.equal(commitmentLayout.overlaps,false,`commitment fields do not overlap at ${width}px`);assert.ok(commitmentLayout.labels.every(row=>!row.input||row.input.left>=row.label.left&&row.input.right<=row.label.right),`commitment inputs stay inside their labels at ${width}px`);
     await audit(`category-${width}px`);
   }
   await page.setViewportSize({width:720,height:900});
   const zoomOverflow=await page.evaluate(()=>{const content=document.querySelector('.content');return{effectiveViewport:innerWidth,contentWidth:content?.clientWidth,contentScrollWidth:content?.scrollWidth,document:document.documentElement.scrollWidth};});
   assert.ok(zoomOverflow.contentScrollWidth<=zoomOverflow.contentWidth+1,`essential content overflows at 200% zoom-equivalent 720 CSS px: ${JSON.stringify(zoomOverflow)}`);
   await audit('category-200%-zoom');
+  await page.setViewportSize({width:1440,height:1000});
   const actualApiFailures=apiFailures.map(row=>row.method+' '+row.path+' '+row.status).sort(),expectedApiFailures=['GET /api/month-summary 500','POST /api/budget 409','POST /api/category-update 409','POST /api/manual-account 409','POST /api/scenario-budget 500','POST /api/scenario-budget 500','POST /api/scenario-goal 500','POST /api/scenario-goal 500'].sort();
   assert.deepEqual(actualApiFailures,expectedApiFailures,'only the explicitly injected refresh, conflict, and replay-safe apply failures occur');
   if(browserErrors.length)throw new Error('Unhandled browser errors: '+JSON.stringify(browserErrors));

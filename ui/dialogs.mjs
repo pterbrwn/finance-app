@@ -10,8 +10,16 @@ export function showDialog(dialog, documentRef = document) {
   }
   dialog.addEventListener('cancel', event => {
     event.preventDefault();
+    const dirty=[...dialog.querySelectorAll('form')].some(form=>form.dataset.dirty==='true');
+    if(dirty&&!documentRef.defaultView.confirm('Discard your unsaved changes?'))return;
     closeDialog(dialog);
-  }, { once: true });
+  });
+  dialog.addEventListener('click', event => {
+    const closeControl=event.target.closest('[data-close],[data-cancel],[id^="cancel-"]');
+    if(!closeControl)return;
+    const dirty=[...dialog.querySelectorAll('form')].some(form=>form.dataset.dirty==='true');
+    if(dirty&&!documentRef.defaultView.confirm('Discard your unsaved changes?')){event.preventDefault();event.stopImmediatePropagation();}
+  }, true);
   documentRef.body.append(dialog);
   dialog.showModal();
 }

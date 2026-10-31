@@ -10,6 +10,7 @@ env.logError=record=>console.error(JSON.stringify({event:'request_error',...reco
 
 const port = Number(process.env.PORT ?? 3000);
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('PORT must be an integer between 0 and 65535.');
+const bindHost = process.env.LEDGER_BIND_HOST || '127.0.0.1';
 let origin;
 const server = createServer(async (incoming, outgoing) => {
   const requestId=randomUUID(),started=performance.now(),rawPath=String(incoming.url||'').split('?')[0],route=/^\/api\/[a-z0-9-]+$/i.test(rawPath)?rawPath:/^\/assets\/[a-z0-9._-]+$/i.test(rawPath)?rawPath:rawPath==='/'?'/':'other';
@@ -81,8 +82,8 @@ server.on('error', error => {
   console.error(error.code === 'EADDRINUSE' ? 'Port is in use. Choose another with PORT=3001 npm run dev.' : 'Could not start the local server: ' + error.message);
   process.exitCode = 1;
 });
-server.listen(port, '127.0.0.1', () => {
-  origin = 'http://127.0.0.1:' + server.address().port;
+server.listen(port, bindHost, () => {
+  origin = 'http://' + bindHost + ':' + server.address().port;
   console.log('Ledger: ' + origin);
   console.log(env.LOCAL_ONLY ? 'Local-only mode. CSV imports are available; external bank connections are disabled.' : 'Bank integration enabled. Financial records are stored on this machine.');
 });

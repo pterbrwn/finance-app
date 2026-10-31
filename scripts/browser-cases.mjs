@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { chromium } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
 
 const appRoot = resolve(import.meta.dirname, '..');
 export const availableBrowserCases = Object.freeze(['sample-isolation', 'sample-transaction-filters', 'combined-budget-rollup', 'profile-two-tab', 'profile-csv-roundtrip', 'profile-account-reassignment', 'profile-goal-undo-owner-conflict', 'budget-recurring', 'budget-frequency-history', 'budget-two-tab', 'budget-empty-onboarding', 'budget-create-month', 'budget-archive-history', 'budget-history-controls', 'transaction-splits-commitments', 'form-drafts', 'form-cancel', 'refresh-edit', 'snapshot-races', 'operation-restart', 'operation-reload-recovery', 'accessibility-tree', '__self-check-pageerror', '__self-check-assertion']);
@@ -83,7 +84,7 @@ export async function runBrowserCase(name) {
     });
     await page.goto(`http://127.0.0.1:${port}/`);
     await page.locator('#app .shell').waitFor({ timeout: 10000 });
-    await page.waitForFunction(()=>{const heading=document.querySelector('.empty-dashboard h2')?.textContent;return heading!=='Loading your private records…'&&heading!=='Ledger could not load your records';});assert.deepEqual(await page.locator('#profile-select option').allTextContents(),['Combined Budget','Peter','Maddie'],'top-level profile selector has only the three requested views');
+    await page.waitForFunction(()=>{const heading=document.querySelector('.empty-dashboard h2')?.textContent;return heading!=='Loading your private records…'&&heading!=='Ledger could not load your records';});assert.deepEqual(await page.locator('#profile-select option').allTextContents(),['Household','Peter','Maddie','Joint'],'profile selector exposes each supported household view');
     const peterCases=new Set(['budget-recurring','budget-frequency-history','budget-two-tab','budget-empty-onboarding','budget-create-month','budget-archive-history','budget-history-controls','transaction-splits-commitments','form-drafts','accessibility-tree','profile-goal-undo-owner-conflict']);
     if(peterCases.has(name)){await page.locator('#profile-select').selectOption('peter');await page.waitForFunction(()=>new URL(location.href).searchParams.get('profile')==='peter');}
 
@@ -122,17 +123,32 @@ export async function runBrowserCase(name) {
     if (name === 'sample-transaction-filters') {
       const month=monthInChicago(),start=month+'-20',end=month+'-25',rows=()=>page.locator('#transaction-table tbody tr').count();
       await page.getByRole('button',{name:'Explore sample data'}).click();
-      await page.locator('[data-view="transactions"]').first().click();
+      await page.setViewportSize({width:390,height:844});
+      await page.locator('#mobile-page-select').selectOption('transactions');
       await page.waitForFunction(()=>document.querySelectorAll('#transaction-table tbody tr').length===22);
+      const filterDisclosure=page.locator('.transaction-filter-details');
+      assert.equal(await filterDisclosure.evaluate(element=>element.open),false,'mobile transaction filters start collapsed on first entry');
+      assert.match(await filterDisclosure.locator('summary').innerText(),/0 active/,'collapsed filter summary reports the empty state');
+      await filterDisclosure.locator('summary').click();
       await page.locator('#category-filter').selectOption({label:'Dining'});
       await page.waitForFunction(()=>document.querySelectorAll('#transaction-table tbody tr').length===4);
+      assert.equal(await filterDisclosure.evaluate(element=>element.open),true,'filter panel stays open after a filter rerender');
+      assert.match(await filterDisclosure.locator('summary').innerText(),/1 active/,'filter summary reports the active category');
       await page.locator('#account-filter').selectOption('credit');
       assert.equal(await rows(),4,'category and account filters combine');
       assert.ok((await page.locator('#transaction-table').innerText()).includes('Rewards Credit'),'all matching rows retain the selected account');
       await page.locator('#clear-transaction-filters').click();
       await page.waitForFunction(()=>document.querySelectorAll('#transaction-table tbody tr').length===22);
+      assert.equal(await filterDisclosure.evaluate(element=>element.open),true,'clear-filter rerender preserves the open panel');
+      assert.match(await filterDisclosure.locator('summary').innerText(),/0 active/,'clear filters resets the active count');
+      await filterDisclosure.locator('summary').click();
+      const firstTransactionTop=await page.locator('#transaction-table tbody tr').first().evaluate(element=>element.getBoundingClientRect().top);
+      assert.ok(firstTransactionTop<=560,`first transaction appears above the mobile fold: ${firstTransactionTop}px`);
+      const transactionAxe=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();
+      assert.deepEqual(transactionAxe.violations.map(item=>({id:item.id,impact:item.impact})),[],'populated mobile Transactions passes WCAG A/AA axe checks');
       await page.locator('#search').fill('Meijer');
       await page.waitForFunction(()=>document.querySelectorAll('#transaction-table tbody tr').length===2);
+      await filterDisclosure.locator('summary').click();
       await page.locator('#clear-transaction-filters').click();
       await page.locator('#date-from').fill(start);await page.locator('#date-from').dispatchEvent('change');
       await page.locator('#date-to').fill(end);await page.locator('#date-to').dispatchEvent('change');
@@ -148,9 +164,12 @@ export async function runBrowserCase(name) {
       assert.match(reviewText.split(/\r?\n/,1)[0],/Account$/,'export preserves account attribution in its CSV header');
       await page.locator('#clear-transaction-filters').click();
       const sampleDownload=page.waitForEvent('download');await page.locator('#export').click();const sampleText=await readFile(await (await sampleDownload).path(),'utf8');assert.match(sampleText,/^Date,Merchant,Category,Amount,Currency,Status,Account/m);assert.match(sampleText,/Everyday Checking/);assert.match(sampleText,/Rewards Credit/,'sample CSV export retains the account for each source row');
-      await page.locator('[data-view="budgets"]').first().click();
-      const stop=page.getByRole('button',{name:/Stop future funding/}).first();
-      assert.equal(await stop.isDisabled(),true,'sample preview marks stop-funding as unavailable');
+      await page.locator('#mobile-page-select').selectOption('budgets');
+      const mobileBudgetResultTop=await page.locator('.mobile-budget-result').evaluate(element=>element.getBoundingClientRect().top);
+      assert.ok(mobileBudgetResultTop<=600,`planned result appears above the mobile fold: ${mobileBudgetResultTop}px`);
+      const budgetAxe=await new AxeBuilder({page}).withTags(['wcag2a','wcag2aa','wcag21a','wcag21aa']).analyze();
+      assert.deepEqual(budgetAxe.violations.map(item=>({id:item.id,impact:item.impact})),[],'populated mobile Budgets passes WCAG A/AA axe checks');
+      await page.setViewportSize({width:1440,height:1000});
       assert.equal(await page.locator('[data-budget-stop]').count(),0,'read-only sample cannot start a live mutation');
       assert.deepEqual(sampleWrites,[],'filtering, export, and read-only budget controls do not mutate saved data');
       await page.locator('[data-exit-demo]').first().click();await page.locator('[data-view="transactions"]').first().click();await page.locator('#import').click();
@@ -161,7 +180,7 @@ export async function runBrowserCase(name) {
       const importedAccounts=await page.evaluate(async()=>{const [state,result]=await Promise.all([fetch('/api/state').then(response=>response.json()),fetch('/api/transactions?search=Synthetic').then(response=>response.json())]);return result.transactions.filter(row=>row.merchant.startsWith('Synthetic checking')||row.merchant.startsWith('Synthetic card')).map(row=>({merchant:row.merchant,account:state.accounts.find(account=>account.id===row.accountId)?.name})).sort((a,b)=>a.merchant.localeCompare(b.merchant));});assert.deepEqual(importedAccounts,[{merchant:'Synthetic card',account:'Rewards Credit'},{merchant:'Synthetic checking',account:'Everyday Checking'}],'CSV import preserves each row’s account attribution');
       await importDialog.getByRole('button',{name:'Undo this import'}).click();await importDialog.getByText('This import batch was undone.').waitFor();
       assert.deepEqual(browserErrors,[]);assert.deepEqual(consoleErrors,[]);
-      console.log('Browser case passed: sample-transaction-filters (search, category, account, date, review, filtered export, and read-only sample budget action).');return;
+      console.log(`Browser case passed: sample-transaction-filters (first transaction ${firstTransactionTop}px, planned budget result ${mobileBudgetResultTop}px, populated Transactions/Budgets axe clean).`);return;
     }
 
     if(name==='profile-two-tab'){
@@ -220,7 +239,7 @@ export async function runBrowserCase(name) {
       const categoryViews=await page.evaluate(async()=>Promise.all(['combined','peter','maddie','joint'].map(async profile=>({profile,state:await fetch('/api/state?profile='+profile).then(response=>response.json())}))));assert.equal(categoryViews.find(row=>row.profile==='peter').state.categoryCatalog.filter(category=>category.name==='Synthetic household custom bucket').length,1,'Peter sees his category');assert.equal(categoryViews.find(row=>row.profile==='maddie').state.categoryCatalog.filter(category=>category.name==='Synthetic household custom bucket').length,1,'Maddie sees her same-named but independent category');assert.equal(categoryViews.find(row=>row.profile==='joint').state.categoryCatalog.filter(category=>category.name==='Synthetic household custom bucket').length,0,'Joint does not see Peter or Maddie custom categories');assert.equal(categoryViews.find(row=>row.profile==='combined').state.categoryCatalog.filter(category=>category.name==='Synthetic household custom bucket').length,2,'Combined preserves both category identities');
       const householdSummary=page.waitForResponse(response=>{const url=new URL(response.url());return url.pathname==='/api/household-summary'&&url.searchParams.get('month')===monthInChicago()&&url.searchParams.get('profile')==='combined';});await page.locator('[data-view="budgets"]').first().click();await householdSummary;await page.getByRole('heading',{name:'Household budget for '+monthInChicago()}).waitFor();const groceries=page.locator('.household-budget-rollup tbody tr').filter({hasText:'Groceries'});await groceries.locator('td').nth(3).filter({hasText:'$600.00'}).waitFor();assert.equal((await groceries.locator('td').nth(0).innerText()).includes('$100.00'),true,'Peter plan appears in Combined');assert.equal((await groceries.locator('td').nth(1).innerText()).includes('$200.00'),true,'Maddie plan appears in Combined');assert.equal((await groceries.locator('td').nth(2).innerText()).includes('$300.00'),true,'Joint plan appears in Combined');assert.equal((await groceries.locator('td').nth(3).innerText()).includes('$600.00'),true,'Combined household plan reconciles exactly');
       await groceries.locator('[data-edit-budget-profile="maddie"]').click();await page.waitForFunction(()=>new URL(location.href).searchParams.get('profile')==='maddie');await page.locator('[data-budget-id="system:groceries"]').waitFor();assert.equal(await page.locator('#profile-select').inputValue(),'maddie','the edit target is explicit before the personal plan opens');
-      assert.deepEqual(await page.locator('#profile-select option').evaluateAll(options=>options.map(option=>option.value)),['combined','peter','maddie'],'the primary selector has exactly the three requested views');
+      assert.deepEqual(await page.locator('#profile-select option').evaluateAll(options=>options.map(option=>option.value)),['combined','peter','maddie','joint'],'the primary selector exposes Combined and all three household profiles');
       await page.locator('[data-view="accounts"]').first().click();await page.locator('#add-account').click();await page.locator('#add-manual').click();const discardedDialog=page.getByRole('dialog');await discardedDialog.locator('#manual-name').fill('Discarded profile-switch draft');page.once('dialog',dialog=>dialog.accept());await page.locator('#profile-select').selectOption('peter');await page.waitForFunction(()=>new URL(location.href).searchParams.get('profile')==='peter');assert.equal(await page.getByRole('dialog').count(),0,'accepting the discard prompt closes the dirty dialog');assert.equal(await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>state.accounts.some(account=>account.name==='Discarded profile-switch draft'))),false,'switching profiles never saves a discarded account draft');
       await page.locator('#add-account').click();await page.locator('#add-manual').click();const keptDialog=page.getByRole('dialog');await keptDialog.locator('#manual-name').fill('Preserved profile-switch draft');page.once('dialog',dialog=>dialog.dismiss());await page.locator('#profile-select').selectOption('maddie');assert.equal(await page.locator('#profile-select').inputValue(),'peter','canceling profile navigation keeps the current view');assert.equal(await keptDialog.locator('#manual-name').inputValue(),'Preserved profile-switch draft','canceling profile navigation preserves the unsaved form');await keptDialog.getByRole('button',{name:'Cancel'}).click();
       assert.deepEqual(browserErrors,[]);assert.deepEqual(consoleErrors,[]);console.log('Browser case passed: combined-budget-rollup (Peter/Maddie/Joint totals reconcile and edit links open the named profile).');return;
@@ -249,7 +268,7 @@ export async function runBrowserCase(name) {
 
     if(name==='budget-history-controls'){
       const setup=await page.evaluate(async month=>{for(const payload of [{categoryId:'system:groceries',amount:10000,mode:'template',month},{categoryId:'system:groceries',amount:20000,mode:'template',month:'2027-01'},{categoryId:'system:groceries',amount:30000,mode:'month',month:'2027-03'}]){const state=await fetch('/api/state').then(response=>response.json()),response=await fetch('/api/budget',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...payload,revision:state.revision})});if(!response.ok)throw new Error(await response.text());}return fetch('/api/state').then(response=>response.json());},monthInChicago());
-      await page.goto(`http://127.0.0.1:${port}/?page=budgets&month=${monthInChicago()}&profile=peter`);await page.locator('[data-budget-stop="system:groceries"]').waitFor();
+      await page.goto(`http://127.0.0.1:${port}/?page=budgets&month=${monthInChicago()}&profile=peter`);await page.locator('[data-budget-edit="system:groceries"]').click();await page.locator('[data-budget-stop="system:groceries"]').waitFor();
       const revisionBeforeCancel=(await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()))).revision;
       await page.locator('[data-budget-stop="system:groceries"]').click();await page.getByText('2027-01',{exact:false}).waitFor();await page.getByRole('button',{name:'Cancel'}).click();
       assert.equal((await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()))).revision,revisionBeforeCancel,'cancelling the future-funding preview writes nothing');
@@ -264,7 +283,7 @@ export async function runBrowserCase(name) {
       const transaction=await page.evaluate(async testDate=>{const state=await fetch('/api/state').then(response=>response.json()),csv=`Date,Merchant,Amount,Category\n${testDate},Synthetic shared purchase,100.00,Other`;const result=await fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv,account:'Synthetic split account',profileId:'peter',revision:state.revision,confirmOverlaps:true})});if(!result.ok)throw new Error(await result.text());return fetch('/api/transactions?page=1&limit=100&profile=peter').then(response=>response.json()).then(saved=>saved.transactions.find(row=>row.merchant==='Synthetic shared purchase'));},testDate);
       assert.ok(transaction?.id);const ownerReview=await page.evaluate(async id=>{const state=await fetch('/api/state').then(response=>response.json()),response=await fetch('/api/transaction-owner',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,profileId:'peter',revision:state.revision})});return{status:response.status,body:await response.json()};},transaction.id);assert.equal(ownerReview.status,200,JSON.stringify(ownerReview.body),'the synthetic transaction receives an explicit owner before profile-owned edits');await page.goto(`http://127.0.0.1:${port}/?page=transactions&profile=peter`);const row=page.locator('[data-split-transaction="'+transaction.id+'"]').locator('..').locator('..');await page.locator('[data-split-transaction="'+transaction.id+'"]').click();let dialog=page.getByRole('dialog');await dialog.locator('select[name="categoryId"]').nth(0).selectOption('system:groceries');await dialog.locator('input[name="amount"]').nth(0).fill('60.00');await dialog.locator('select[name="categoryId"]').nth(1).selectOption('system:dining');await dialog.locator('input[name="amount"]').nth(1).fill('40.00');const splitResponsePromise=page.waitForResponse(response=>response.url().endsWith('/api/transaction-split')&&response.request().method()==='POST');await dialog.getByRole('button',{name:'Save split'}).click();const splitResponse=await splitResponsePromise;assert.equal(splitResponse.status(),200,await splitResponse.text());await page.waitForFunction(async id=>{const state=await fetch('/api/state?profile=peter').then(response=>response.json());return state.transactionSplits?.some(row=>row.transactionId===id);},transaction.id);let saved=await page.evaluate(async()=>fetch('/api/state?profile=peter').then(response=>response.json()));assert.equal(saved.transactionSplits.find(row=>row.transactionId===transaction.id).allocations.reduce((sum,item)=>sum+item.amount,0),10000);let summary=await page.evaluate(async()=>fetch('/api/budget-summary?profile=peter').then(response=>response.json()));assert.equal(summary.actuals.categories['system:groceries'],6000,'profile budget actuals include the saved transaction split');assert.equal(summary.actuals.categories['system:dining'],4000,JSON.stringify(summary.actuals));
       await page.locator('[data-split-transaction="'+transaction.id+'"]').click();dialog=page.getByRole('dialog');await dialog.locator('[data-undo-split]').click();await page.waitForTimeout(100);saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.transactionSplits.length,0,'split undo restores unsplit state without changing parent');
-      const refund=await page.evaluate(async date=>{const state=await fetch('/api/state').then(response=>response.json()),result=await fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv:`Date,Merchant,Amount,Category\n${date},Synthetic shared purchase refund,-25.00,Other`,account:'Synthetic split account',revision:state.revision,confirmOverlaps:true})});if(!result.ok)throw new Error(await result.text());return fetch('/api/transactions?search=Synthetic%20shared%20purchase%20refund').then(response=>response.json()).then(value=>value.transactions[0]);},nextMonth(monthInChicago())+'-02');await page.reload();await page.locator('[data-reimbursement="'+transaction.id+'"]').click();dialog=page.getByRole('dialog');await dialog.locator('[name=transactionId]').selectOption(refund.id);await dialog.locator('[name=amount]').fill('25.00');await dialog.locator('[name=confirmed]').check();const reimbursementPromise=page.waitForResponse(response=>response.url().endsWith('/api/transaction-reimbursement'));await dialog.getByRole('button',{name:'Save reimbursement link'}).click();const reimbursementResponse=await reimbursementPromise;assert.equal(reimbursementResponse.status(),200,await reimbursementResponse.text());saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.transactionReimbursements[0].transactionId,refund.id);assert.equal(saved.transactionReimbursements[0].reimbursesTransactionId,transaction.id);await dialog.locator('[data-unlink]').click();await page.waitForFunction(()=>document.querySelector('[data-reimbursement-links]')?.textContent?.includes('Removed'));saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.transactionReimbursements[0].status,'unlinked','the explicit remove action preserves an audited link record');await dialog.getByRole('button',{name:'Cancel'}).click();
+      const refund=await page.evaluate(async date=>{const state=await fetch('/api/state').then(response=>response.json()),result=await fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv:`Date,Merchant,Amount,Category\n${date},Synthetic shared purchase refund,-25.00,Other`,account:'Synthetic split account',revision:state.revision,confirmOverlaps:true})});if(!result.ok)throw new Error(await result.text());return fetch('/api/transactions?search=Synthetic%20shared%20purchase%20refund').then(response=>response.json()).then(value=>value.transactions[0]);},nextMonth(monthInChicago())+'-02');await page.reload();await page.locator('[data-reimbursement="'+transaction.id+'"]').click();dialog=page.getByRole('dialog');await dialog.locator('[name=transactionId]').selectOption(refund.id);await dialog.locator('[name=amount]').fill('25.00');await dialog.locator('[name=confirmed]').check();const reimbursementPromise=page.waitForResponse(response=>response.url().endsWith('/api/transaction-reimbursement'));await dialog.getByRole('button',{name:'Save reimbursement link'}).click();const reimbursementResponse=await reimbursementPromise;assert.equal(reimbursementResponse.status(),200,await reimbursementResponse.text());saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.transactionReimbursements[0].transactionId,refund.id);assert.equal(saved.transactionReimbursements[0].reimbursesTransactionId,transaction.id);await dialog.locator('[data-unlink]').click();await page.waitForFunction(()=>document.querySelector('[data-reimbursement-links]')?.textContent?.includes('Removed'));saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.transactionReimbursements[0].status,'unlinked','the explicit remove action preserves an audited link record');page.once('dialog',confirmation=>confirmation.accept());await dialog.getByRole('button',{name:'Cancel'}).click();
       await page.locator('[data-view="commitments"]').first().click();const commitmentForm=page.locator('[data-commitment-create]');await commitmentForm.locator('[name=name]').fill('Synthetic Internet');await commitmentForm.locator('[name=amount]').fill('100.00');await commitmentForm.locator('[name=frequency]').selectOption('monthly');await commitmentForm.locator('[name=startDate]').fill(testDate);await commitmentForm.locator('[name=dayOfMonth]').fill('12');await commitmentForm.getByRole('button',{name:'Save commitment'}).click();await page.waitForTimeout(100);saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.commitments.length,1);
       await page.locator('[data-view="transactions"]').first().click();await page.locator('[data-link-commitment="'+transaction.id+'"]').click();dialog=page.getByRole('dialog');await dialog.locator('[name=commitmentId]').selectOption(saved.commitments[0].id);await dialog.locator('[name=dueDate]').selectOption(testDate);await dialog.locator('[name=confirmed]').check();const matchResponsePromise=page.waitForResponse(response=>response.url().includes('/api/commitment-match'));await dialog.getByRole('button',{name:'Confirm match'}).click();const matchResponse=await matchResponsePromise;assert.equal(matchResponse.status(),200,await matchResponse.text());const matchResult=await page.evaluate(async()=>fetch('/api/commitments?from=2026-01-01&to=2027-12-31').then(response=>response.json()));assert.equal(matchResult.matches[0].status,'user-confirmed');const actualRows=await page.evaluate(async()=>fetch('/api/transactions?page=1&limit=20').then(response=>response.json()));assert.equal(actualRows.transactions.find(row=>row.id===transaction.id)?.amount,10000);
       assert.deepEqual(browserErrors,[]);assert.deepEqual(consoleErrors,[]);console.log('Browser case passed: transaction-splits-commitments (UI exact-cent split, audit undo, dated commitment, and explicit payment match).');return;
@@ -409,7 +428,7 @@ export async function runBrowserCase(name) {
         assert.equal(seen[1].clientOperationId,seen[0].clientOperationId,`${path} reuses its operation ID for the retry`);
         assert.deepEqual(seen[1],seen[0],`${path} retries the identical payload`);
         await page.unroute(`**/api/${path}`);
-        if(closeAfter)await page.keyboard.press('Escape');
+        if(closeAfter){page.once('dialog',dialog=>dialog.accept());await page.keyboard.press('Escape');}
       }
 
       await page.locator('[data-view="budgets"]').first().click();
@@ -567,6 +586,15 @@ export async function runBrowserCase(name) {
       await dialog.locator('[name="downPayment"]').fill('25000');
       await dialog.locator('[name="termMonths"]').fill('360');
       await dialog.locator('[name="noteRatePercent"]').fill('6.5');
+      const saveChecklist=dialog.locator('#scenario-save-requirements');
+      assert.match(await saveChecklist.innerText(),/Fees financed into loan[\s\S]*PMI monthly estimate[\s\S]*Cash closing costs/,'required costs are listed before the save action');
+      await dialog.locator('details').filter({hasText:'Household fit'}).locator('summary').click();
+      await dialog.locator('[name="netMonthlyIncome"]').fill('5000');
+      assert.match(await saveChecklist.innerText(),/Current non-housing commitments[\s\S]*Current housing cost[\s\S]*Planned monthly savings/,'net income activates conditional household requirements');
+      await dialog.locator('[name="netMonthlyIncome"]').fill('');
+      await dialog.locator('details').filter({hasText:'Ownership costs and escrow'}).locator('summary').click();
+      await dialog.locator('[name="pmiExplicitNone"]').check();
+      assert.doesNotMatch(await saveChecklist.innerText(),/PMI monthly estimate/,'explicit no-PMI removes the amount requirement');
       while(await dialog.locator('details:not([open]) > summary').count())await dialog.locator('details:not([open]) > summary').first().click();
       for(const field of ['financedFees','propertyTaxMonthly','homeownersInsuranceMonthly','supplementaryInsuranceMonthly','hoaMonthly','maintenanceReserveMonthly','subordinateDebtMonthly','closingCosts','prepaids','credits','earnestPaid','movingCosts','initialRepairs','retainedReserve','pointsCents'])await dialog.locator(`[name="${field}"]`).fill('0');
       await dialog.locator('[name="pmiExplicitNone"]').check();
@@ -586,7 +614,7 @@ export async function runBrowserCase(name) {
       assert.equal(duplicateSubmitRequests,1,'two concurrent submissions of the same scenario payload produce one request');
       assert.equal(await dialog.locator('[name="name"]').inputValue(),'Retained synthetic scenario','the conflicted double-submit keeps its draft');
       await page.unroute('**/api/scenario');
-      await page.keyboard.press('Escape');
+      page.once('dialog',dialog=>dialog.accept());await page.keyboard.press('Escape');
 
       assert.deepEqual(browserErrors,[],'form retries and preserved drafts have no uncaught browser errors');
       assert.deepEqual(consoleErrors,[],'form retries and preserved drafts have no browser console errors');
@@ -604,12 +632,21 @@ export async function runBrowserCase(name) {
       await allocationForm.getByRole('alert').filter({hasText:'Synthetic allocation conflict'}).waitFor();
       assert.equal(await allocationForm.locator('[data-allocation-account]').inputValue(),'25','allocation conflict retains the proposed amount');
       assert.equal(await allocationForm.evaluate(dialog=>dialog.contains(document.activeElement)),true,'allocation conflict keeps keyboard focus inside its dialog');await page.unroute('**/api/goal-allocations');
-      await allocationForm.locator('#cancel-allocation').click();
+      page.once('dialog',dialog=>dialog.accept());await allocationForm.locator('#cancel-allocation').click();
       await page.locator('[data-view="transactions"]').first().click();
       await page.locator('#search').fill('Synthetic row');
       const importedBulkRow=page.locator('#transaction-table tr').filter({hasText:'Synthetic row'});await importedBulkRow.waitFor();
       await importedBulkRow.locator('[data-select-transaction]').check();
+      const selectedMonth=await page.locator('#month').inputValue(),priorSelectedMonth=selectedMonth.slice(5)==='01'?`${Number(selectedMonth.slice(0,4))-1}-12`:`${selectedMonth.slice(0,4)}-${String(Number(selectedMonth.slice(5))-1).padStart(2,'0')}`;
+      await page.locator('#month').evaluate((select,value)=>{const option=document.createElement('option');option.value=value;option.textContent=value;select.append(option);select.value=value;select.dispatchEvent(new Event('change',{bubbles:true}));},priorSelectedMonth);
+      await page.locator('#toast').filter({hasText:'Month changed. Selection cleared.'}).waitFor();
+      assert.equal(await page.locator('.bulk-category-controls').count(),0,'month change clears the selected transaction and review confirmation');
+      await page.locator('#month').selectOption(selectedMonth);
+      await importedBulkRow.waitFor();
+      await importedBulkRow.locator('[data-select-transaction]').check();
       await page.locator('#bulk-category').selectOption('system:shopping');
+      await page.locator('#review-selected').click();
+      await page.locator('[data-confirm-bulk-review]').click();
       const beforeBulkConflict=await page.evaluate(async()=>fetch('/api/transactions?search=Synthetic%20row').then(response=>response.json()).then(result=>result.transactions[0]));
       await page.route('**/api/category-bulk',route=>route.fulfill({status:409,contentType:'application/json',body:JSON.stringify({error:'Synthetic bulk category conflict.'})}));
       await page.locator('#apply-bulk-category').click();
@@ -656,7 +693,7 @@ export async function runBrowserCase(name) {
       await dismissConfirmation(()=>page.locator(`[data-archive-goal="${goal.id}"]`).click(),/Archive.*Synthetic cancel goal/);
       await page.locator(`[data-allocate-goal="${goal.id}"]`).click();
       const allocationDialog=page.getByRole('dialog');await allocationDialog.locator('[data-allocation-account]').fill('12.34');
-      await allocationDialog.locator('#cancel-allocation').click();await allocationDialog.waitFor({state:'detached'});
+      page.once('dialog',dialog=>dialog.accept());await allocationDialog.locator('#cancel-allocation').click();await allocationDialog.waitFor({state:'detached'});
       await page.locator('[data-view="home"]').first().click();
       await cancelByButton(()=>page.locator('#new-property').click(),'[data-close]');
       await page.locator(`[data-edit-property="${property.id}"]`).click();

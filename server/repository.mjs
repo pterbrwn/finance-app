@@ -19,6 +19,7 @@ export const blankState = () => ({
   mortgageSnapshots: [],
   scenarios: [],
   balanceSheetSnapshots: [],
+  annualIncomeRecords: [],
   customCategories: [],
   budgets: {},
   budgetChangeHistory: [],
