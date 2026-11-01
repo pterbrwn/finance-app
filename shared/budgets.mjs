@@ -62,6 +62,20 @@ export function resolveIncomePlan(templates = [], monthOverrides = {}, month) {
     : { amount: null, source: 'none', month };
 }
 
+export function annualIncomeAmount(records = [], { year, profileId } = {}) {
+  const selectedYear = String(year ?? '');
+  const selectedProfile = String(profileId ?? '');
+  const matches = (Array.isArray(records) ? records : []).filter(row => String(row?.year ?? '') === selectedYear && String(row?.profileId ?? '') === selectedProfile);
+  const amount = matches.reduce((total, row) => total + (Number.isSafeInteger(row?.amount) ? row.amount : 0), 0);
+  return matches.length ? amount : null;
+}
+
+export function annualToMonthlyCents(annualCents) {
+  if (annualCents === null || annualCents === undefined) return null;
+  const amount = Math.round(annualCents / 12);
+  return Number.isSafeInteger(amount) ? amount : null;
+}
+
 const cents = (value, label) => {
   if (value !== null && value !== undefined && (!Number.isSafeInteger(value) || Math.abs(value) > Number.MAX_SAFE_INTEGER)) {
     throw new TypeError(`${label} must be integer cents or unknown.`);
