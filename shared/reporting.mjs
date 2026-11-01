@@ -25,10 +25,32 @@ export function categoryFor(transaction) {
   })[primary] || 'Other';
 }
 
+function providerCounterparties(transaction) {
+  const rows = Array.isArray(transaction.counterparties) ? transaction.counterparties : [];
+  const cleaned = rows.flatMap(counterparty => {
+    if (!counterparty || typeof counterparty !== 'object') return [];
+    const name = typeof counterparty.name === 'string' ? counterparty.name.normalize('NFKC').trim().slice(0, 200) : '';
+    const type = typeof counterparty.type === 'string' ? counterparty.type.slice(0, 40) : null;
+    const confidence = typeof counterparty.confidence_level === 'string' ? counterparty.confidence_level.slice(0, 40) : null;
+    return name || type ? [{ ...(name ? { name } : {}), ...(type ? { type } : {}), ...(confidence ? { confidence } : {}) }] : [];
+  });
+  return cleaned.length ? cleaned : undefined;
+}
+
+function providerCategory(transaction) {
+  const category = transaction.personal_finance_category;
+  if (!category || typeof category !== 'object') return undefined;
+  const primary = typeof category.primary === 'string' ? category.primary.slice(0, 80) : null;
+  const detailed = typeof category.detailed === 'string' ? category.detailed.slice(0, 120) : null;
+  const confidence = typeof category.confidence_level === 'string' ? category.confidence_level.slice(0, 40) : null;
+  return primary || detailed ? { ...(primary ? { primary } : {}), ...(detailed ? { detailed } : {}), ...(confidence ? { confidence } : {}) } : undefined;
+}
+
 export function fromPlaid(transaction, itemId) {
   if (!Number.isFinite(transaction.amount)) throw new Error('Invalid transaction amount');
   const amount=Math.round(transaction.amount*100);
   if(!Number.isSafeInteger(amount))throw new RangeError('Provider transaction amount exceeds the safe integer-cent range.');
+  const personalFinanceCategory=providerCategory(transaction), counterparties=providerCounterparties(transaction);
   return {
     id: transaction.transaction_id,
     itemId,
@@ -38,7 +60,9 @@ export function fromPlaid(transaction, itemId) {
     amount,
     category: categoryFor(transaction),
     pending: !!transaction.pending,
-    currency: transaction.iso_currency_code || transaction.unofficial_currency_code || 'UNKNOWN'
+    currency: transaction.iso_currency_code || transaction.unofficial_currency_code || 'UNKNOWN',
+    ...(personalFinanceCategory ? { personalFinanceCategory } : {}),
+    ...(counterparties ? { counterparties } : {})
   };
 }
 

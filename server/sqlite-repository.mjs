@@ -314,7 +314,7 @@ export function createSqliteRepository(db) {
     if(accountId){clauses.push('transactions.account_id=?');values.push(accountId);}
     if(from){clauses.push("json_extract(payload_json,'$.date')>=?");values.push(from);}
     if(to){clauses.push("json_extract(payload_json,'$.date')<=?");values.push(to);}
-    if(review)clauses.push("(json_extract(payload_json,'$.review')=1 OR (json_type(payload_json,'$.confidence') IS NOT NULL AND CAST(json_extract(payload_json,'$.confidence') AS REAL)<0.5) OR coalesce(json_extract(payload_json,'$.override'),json_extract(payload_json,'$.category'))='Other')");
+    if(review)clauses.push("(json_extract(payload_json,'$.review')=1 OR (json_type(payload_json,'$.review') IS NULL AND ((json_type(payload_json,'$.confidence') IS NOT NULL AND CAST(json_extract(payload_json,'$.confidence') AS REAL)<0.5) OR coalesce(json_extract(payload_json,'$.override'),json_extract(payload_json,'$.category'))='Other')))");
     const owner=profileClause(viewProfile,values);if(owner)clauses.push(owner);
     const where=clauses.length?`WHERE ${clauses.join(' AND ')}`:'';
     const total=db.prepare(`SELECT COUNT(*) AS count FROM transactions ${where}`).get(...values).count;

@@ -8,6 +8,7 @@ import { cents } from '../shared/money.mjs';
 import { accountRecord, investmentHoldings, providerAccountKey } from '../shared/investments.mjs';
 import { addSafeCents, categoryFor, fromPlaid, totals } from '../shared/reporting.mjs';
 import { applyChanges, applySyncPages } from '../shared/reconciliation.mjs';
+import { applyCategoryRules, matchingCategoryRules, refreshReviewFlags, markTransactionsReviewed, reconcileTransactionAutomation, seedDefaultCategoryRules, categoryRuleScore } from '../shared/rules.mjs';
 import { eligibleCashAccounts, summarizeGoals } from '../shared/goals.mjs';
 import { amortizeFixedRate, compareAmortization, summarizeProperties } from '../shared/mortgages.mjs';
 import { calculateHomeScenario, SCENARIO_CALCULATION_VERSION, validateScenarioInput } from '../shared/scenarios.mjs';
@@ -34,6 +35,81 @@ function categoryCatalog(state) {
   return [...systemCategories, ...customs].sort((a,b) => a.order-b.order || a.name.localeCompare(b.name));
 }
 const categories = state => categoryCatalog(state).filter(category => !category.archivedAt).map(category => category.name);
+function categoryRuleCategory(state, input) {
+  return categoryCatalog(state).find(category => category.id === input?.categoryId && !category.archivedAt) || categoryCatalog(state).find(category => category.name === input?.category && !category.archivedAt);
+}
+function normalizeCategoryRule(state, input = {}, existing = null) {
+  const merchant = typeof input.merchant === 'string' ? input.merchant.normalize('NFKC').trim().replace(/\s+/g, ' ') : '';
+  const counterparty = typeof input.counterparty === 'string' ? input.counterparty.normalize('NFKC').trim().replace(/\s+/g, ' ') : '';
+  if (!merchant && !counterparty) throw apiError('Add merchant or counterparty text for this rule to match.');
+  if (merchant.length > 200 || counterparty.length > 200) throw apiError('Rule text must be 200 characters or fewer.');
+  const accountId = typeof input.accountId === 'string' && input.accountId ? input.accountId : null;
+  if (accountId && !(state.accounts || []).some(account => account.id === accountId)) throw apiError('Choose one of your accounts for this rule.');
+  let amount = null;
+  if (input.amount !== undefined && input.amount !== null) {
+    if (!Number.isSafeInteger(input.amount) || input.amount === 0) throw apiError('Rule amounts must be a non-zero whole number of cents.');
+    amount = input.amount;
+  }
+  let monthFrom = null;
+  if (input.monthFrom !== undefined && input.monthFrom !== null) {
+    if (typeof input.monthFrom !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(input.monthFrom)) throw apiError('Rule monthFrom must be YYYY-MM.');
+    monthFrom = input.monthFrom;
+  }
+  let monthTo = null;
+  if (input.monthTo !== undefined && input.monthTo !== null) {
+    if (typeof input.monthTo !== 'string' || !/^\d{4}-(0[1-9]|1[0-2])$/.test(input.monthTo)) throw apiError('Rule monthTo must be YYYY-MM.');
+    monthTo = input.monthTo;
+  }
+  if (monthFrom && monthTo && monthFrom > monthTo) throw apiError('Rule monthFrom must be on or before monthTo.');
+  let sources = null;
+  if (input.sources !== undefined && input.sources !== null) {
+    if (!Array.isArray(input.sources) || input.sources.some(s => typeof s !== 'string' || !s.trim())) throw apiError('Rule sources must be an array of source strings.');
+    const cleaned = [...new Set(input.sources.map(s => s.trim()))];
+    if (cleaned.length > 10) throw apiError('A rule can filter on at most 10 sources.');
+    sources = cleaned.length ? cleaned : null;
+  }
+  const category = categoryRuleCategory(state, input);
+  if (!category || !['expense','income','transfer'].includes(category.kind) || state.budgetItemSettings?.[category.id]?.itemType === 'allocation') throw apiError('Choose a valid transaction category for this rule.');
+  const profileId = category.system ? null : (category.profileId || 'peter');
+  return { merchant, counterparty, accountId, amount, category: category.name, categoryId: category.id, profileId,
+    monthFrom, monthTo, sources,
+    ...(existing ? { id: existing.id, createdAt: existing.createdAt } : {}) };
+}
+function ruleOwner(state, transaction) {
+  return transaction?.profileId ?? (state.accounts || []).find(account => account.id === transaction?.accountId)?.profileId ?? null;
+}
+function seedRules(state) {
+  return seedDefaultCategoryRules(state, categoryCatalog(state));
+}
+function categoryRulesForState(state) {
+  return [...(state.categoryRules || [])].sort((left, right) => Number(left.enabled === false) - Number(right.enabled === false)
+    || categoryRuleScore(right) - categoryRuleScore(left)
+    || String(left.createdAt || '').localeCompare(String(right.createdAt || ''))
+    || String(left.id || '').localeCompare(String(right.id || '')));
+}
+function previewCategoryRuleChanges(state, candidate = null) {
+  const rules = [...(state.categoryRules || [])];
+  if (candidate) {
+    const index = candidate.id ? rules.findIndex(rule => rule.id === candidate.id) : -1;
+    if (index >= 0) rules[index] = { ...rules[index], ...candidate, enabled: candidate.enabled !== false };
+    else rules.push({ ...candidate, id: candidate.id || 'preview', enabled: candidate.enabled !== false });
+  }
+  const enabled = rules.filter(rule => rule.enabled !== false);
+  const changes = [];
+  for (const transaction of state.transactions || []) {
+    if (Number.isSafeInteger(transaction.categoryEditVersion) && transaction.categoryEditVersion > 0) continue;
+    const owner = ruleOwner(state, transaction);
+    const match = matchingCategoryRules(transaction, enabled).find(rule => !rule.profileId || rule.profileId === owner) || null;
+    const beforeOverride = transaction.override ?? null, beforeOverrideCategoryId = transaction.overrideCategoryId ?? null, beforeRuleId = transaction.ruleId ?? null;
+    if (match) {
+      if (beforeOverride === match.category && beforeOverrideCategoryId === match.categoryId && beforeRuleId === match.id) continue;
+      changes.push({ id: transaction.id, date: transaction.date, merchant: transaction.merchant, amount: transaction.amount, from: beforeOverride || transaction.category || null, to: match.category, ruleId: match.id === 'preview' ? null : match.id });
+    } else if (beforeRuleId) {
+      changes.push({ id: transaction.id, date: transaction.date, merchant: transaction.merchant, amount: transaction.amount, from: beforeOverride || transaction.category || null, to: transaction.category ?? null, ruleId: null, cleared: true });
+    }
+  }
+  return changes;
+}
 function replaceProviderAccounts(state,itemId,accounts){
   const existing=state.accounts.filter(a=>a.itemId===itemId),previous=new Map(existing.map(a=>[a.providerAccountId||a.id,a]));
   const providerToLocal=new Map(),nextAccounts=accounts.map(raw=>{const next=accountRecord(raw,itemId),old=previous.get(raw.account_id);if(old){next.id=old.id;next.includeInReporting=old.includeInReporting;next.archivedAt=old.archivedAt;if(old.profileId!==undefined)next.profileId=old.profileId;if(old.profileEditVersion!==undefined)next.profileEditVersion=old.profileEditVersion;if(old.profileAttributionHistory!==undefined)next.profileAttributionHistory=old.profileAttributionHistory;}providerToLocal.set(next.id===providerAccountKey(itemId,raw.account_id)?next.id:providerAccountKey(itemId,raw.account_id),next.id);return next;});
@@ -358,6 +434,7 @@ async function runSyncJob(env,jobId){
           assertSyncOwner(s,jobId);
           const liveItem=s.items.find(i=>i.id===item.id);if(!liveItem||liveItem.lifecycle==='unlinked')return;
           applySyncPages(s,item.id,result.pages);liveItem.cursor=result.cursor;liveItem.lastSync=new Date().toISOString();liveItem.lastSuccess=liveItem.lastSync;liveItem.error=null;
+          reconcileTransactionAutomation(s,{seed:seedRules});
           const oldAccountIds=s.accounts.filter(account=>account.itemId===item.id).map(account=>account.id);
           const providerToLocal=replaceProviderAccounts(s,item.id,accountData.accounts);remapProviderAccountReferences(s,item.id,providerToLocal);
           const remainingAccountIds=new Set(s.accounts.filter(account=>account.itemId===item.id).map(account=>account.id));s._deleteAccountIds=oldAccountIds.filter(id=>!remainingAccountIds.has(id));
@@ -623,10 +700,22 @@ export default {
       }
       if (path === '/api/state' && request.method === 'GET') return response(await publicState(state, env));
       if(path==='/api/sync-status'&&request.method==='GET')return response({job:await syncStatus(env)});
+      if(path==='/api/category-rules'&&request.method==='GET'){
+        const viewProfile=requestedViewProfile(url),rules=categoryRulesForState(state).filter(rule=>viewProfile==='combined'||!rule.profileId||rule.profileId===viewProfile);
+        return response({rules,revision:Number.isSafeInteger(state.revision)?state.revision:0,defaultsVersion:state.categoryRuleDefaultsVersion||0});
+      }
+      if(path==='/api/category-rules'&&request.method==='POST'){
+        const input=await body(request),action=input.action==='delete'?'delete':'save',replay=await findOperationReplay(env,state,'category-rules',input);if(replay.found)return response(replay.response);
+        const existing=action==='delete'||input.id?(state.categoryRules||[]).find(rule=>rule.id===input.id)||null:null;
+        if((action==='delete'||input.id)&&!existing)throw apiError('Category rule not found.',404);
+        const normalized=action==='save'?normalizeCategoryRule(state,input,existing):null;let savedRule=null;
+        const mutation=await mutateWithReplay(env,'category-rules',input,s=>{checkRevision(s,input);s.categoryRules||=[];const live=input.id?s.categoryRules.find(rule=>rule.id===input.id)||null:null;if(input.id&&!live)throw apiError('Category rule not found.',404);if(action==='delete')s.categoryRules=s.categoryRules.filter(rule=>rule.id!==input.id);else{savedRule={...(live||{}),...normalized,id:live?.id||crypto.randomUUID(),createdAt:live?.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),enabled:input.enabled!==false};if(live)Object.assign(live,savedRule);else s.categoryRules.push(savedRule);}reconcileTransactionAutomation(s,{seed:seedRules});},(s,revision)=>({ok:true,revision,rule:savedRule,reviewCount:(s.transactions||[]).filter(transaction=>transaction.review===true).length}),null);
+        return response(mutation.result);
+      }
       if(path==='/api/transactions'&&request.method==='GET'){
         const query=url.searchParams,page=Number(query.get('page')||1),limit=Math.min(100,Math.max(1,Number(query.get('limit')||50))),search=(query.get('search')||'').slice(0,120).toLocaleLowerCase('en-US'),category=query.get('category')||'',accountId=query.get('account')||'',from=query.get('from')||'',to=query.get('to')||'',review=query.get('review')==='true';
         if(!Number.isSafeInteger(page)||page<1||!Number.isSafeInteger(limit)||from&&!validDateOnly(from)||to&&!validDateOnly(to))throw apiError('Choose a valid transaction page and date range.');if(from&&to&&from>to)throw apiError('Start date must be on or before end date.');
-        const matches=state.transactions.filter(t=>(!search||String(t.merchant||'').toLocaleLowerCase('en-US').includes(search))&&(!category||transactionMatchesCategory(t,category))&&(!accountId||t.accountId===accountId)&&(!from||t.date>=from)&&(!to||t.date<=to)&&(!review||t.review===true||t.confidence!==undefined&&t.confidence<0.5||(t.override||t.category)==='Other')).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
+        const matches=state.transactions.filter(t=>(!search||String(t.merchant||'').toLocaleLowerCase('en-US').includes(search))&&(!category||transactionMatchesCategory(t,category))&&(!accountId||t.accountId===accountId)&&(!from||t.date>=from)&&(!to||t.date<=to)&&(!review||t.review===true||t.review===undefined&&(t.confidence!==undefined&&t.confidence<0.5||(t.override||t.category)==='Other'))).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
         return response({page,limit,total:matches.length,transactions:matches.slice((page-1)*limit,page*limit),revision:state.revision});
       }
       if(path==='/api/annual-income'&&request.method==='POST'){
@@ -796,14 +885,28 @@ export default {
         const category = categoryCatalog(state).find(c => c.id === input.categoryId && !c.archivedAt) || categoryCatalog(state).find(c => c.name === input.category && !c.archivedAt);
         if (!category || !['expense','income','transfer'].includes(category.kind) || state.budgetItemSettings?.[category.id]?.itemType === 'allocation') throw apiError('Choose a valid transaction category.');
         const transaction=state.transactions.find(row=>row.id===input.id);if(!transaction)throw apiError('Transaction not found.',404);const transactionOwner=transaction.profileId??state.accounts.find(account=>account.id===transaction.accountId)?.profileId??null;if(!category.system&&(category.profileId||'peter')!==transactionOwner)throw apiError('Assign this transaction to the category owner before using that custom category.');
-        const saved = await mutateWithReplay(env,'category',input,s => { checkRevision(s,input); const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); const live = categoryCatalog(s).find(c => c.id === category.id && !c.archivedAt); if (!live) throw apiError('That category is no longer available.', 409); t.override = live.name; t.overrideCategoryId = live.id;t.categoryEditVersion=(Number.isSafeInteger(t.categoryEditVersion)?t.categoryEditVersion:0)+1; },(s,revision)=>({ok:true,revision}),[input.id]);
+        const saved = await mutateWithReplay(env,'category',input,s => { checkRevision(s,input); const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); const live = categoryCatalog(s).find(c => c.id === category.id && !c.archivedAt); if (!live) throw apiError('That category is no longer available.', 409); t.override = live.name; t.overrideCategoryId = live.id;delete t.ruleId;delete t.ruleAppliedAt;t.categoryEditVersion=(Number.isSafeInteger(t.categoryEditVersion)?t.categoryEditVersion:0)+1;if (live.name === 'Transfers') refreshReviewFlags(s,{full:true}); else refreshReviewFlags(s,{full:false,onlyIds:new Set([t.id])}); },(s,revision)=>({ok:true,revision}),[input.id]);
         return response(saved.result);
+      }
+      if(path==='/api/category-rules'&&request.method==='POST'){
+        const input=await body(request),action=input.action==='delete'?'delete':'save',replay=await findOperationReplay(env,state,'category-rules',input);if(replay.found)return response(replay.response);
+        const existing=action==='delete'||input.id?(state.categoryRules||[]).find(rule=>rule.id===input.id)||null:null;
+        if((action==='delete'||input.id)&&!existing)throw apiError('Category rule not found.',404);
+        const normalized=action==='save'?normalizeCategoryRule(state,input,existing):null;let savedRule=null;
+        const mutation=await mutateWithReplay(env,'category-rules',input,s=>{checkRevision(s,input);s.categoryRules||=[];const live=input.id?s.categoryRules.find(rule=>rule.id===input.id)||null:null;if(input.id&&!live)throw apiError('Category rule not found.',404);if(action==='delete')s.categoryRules=s.categoryRules.filter(rule=>rule.id!==input.id);else{savedRule={...(live||{}),...normalized,id:live?.id||crypto.randomUUID(),createdAt:live?.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),enabled:input.enabled!==false};if(live)Object.assign(live,savedRule);else s.categoryRules.push(savedRule);}reconcileTransactionAutomation(s,{seed:seedRules});},(s,revision)=>({ok:true,revision,rule:savedRule,reviewCount:(s.transactions||[]).filter(transaction=>transaction.review===true).length}),null);
+        return response(mutation.result);
+      }
+      if(path==='/api/transactions'&&request.method==='GET'){
+        if(typeof input.reviewed!=='boolean')throw apiError('Choose whether these transactions are reviewed.');
+        const replay=await findOperationReplay(env,state,'transactions-review',input);if(replay.found)return response(replay.response);
+        const mutation=await mutateWithReplay(env,'transactions-review',input,s=>{checkRevision(s,input);const selected=s.transactions.filter(row=>ids.includes(row.id));if(selected.length!==ids.length)throw apiError('One or more selected transactions are no longer available.',409);markTransactionsReviewed(selected,{reviewed:input.reviewed});refreshReviewFlags(s,{full:false,onlyIds:new Set(ids)});},(s,revision)=>({ok:true,revision,count:ids.length,remaining:(s.transactions||[]).filter(transaction=>transaction.review===true).length}),ids);
+        return response(mutation.result);
       }
       if(path==='/api/category-bulk'&&request.method==='POST'){
         const input=await body(request),ids=Array.isArray(input.ids)?[...new Set(input.ids)]:[],category=categoryCatalog(state).find(c=>c.id===input.categoryId&&!c.archivedAt);
         if(!ids.length||ids.length>100||ids.some(id=>typeof id!=='string')||!category||!['expense','income','transfer'].includes(category.kind)||state.budgetItemSettings?.[category.id]?.itemType==='allocation')throw apiError('Choose up to 100 transactions and a valid transaction category.');
         const selectedRows=state.transactions.filter(row=>ids.includes(row.id));if(!category.system&&selectedRows.some(transaction=>(transaction.profileId??state.accounts.find(account=>account.id===transaction.accountId)?.profileId??null)!==(category.profileId||'peter')))throw apiError('Assign selected transactions to the custom category owner before using that category.');
-        const id=crypto.randomUUID(),mutation=await mutateWithReplay(env,'category-bulk',input,s=>{checkRevision(s,input);const selected=s.transactions.filter(t=>ids.includes(t.id));if(selected.length!==ids.length)throw apiError('One or more selected transactions are no longer available.',409);s.categoryEditBatches||=[];const changes=selected.map(t=>({id:t.id,override:t.override,overrideCategoryId:t.overrideCategoryId}));for(const [index,t] of selected.entries()){t.override=category.name;t.overrideCategoryId=category.id;t.categoryEditVersion=(Number.isSafeInteger(t.categoryEditVersion)?t.categoryEditVersion:0)+1;changes[index].afterVersion=t.categoryEditVersion;}s.categoryEditBatches.push({id,categoryId:category.id,createdAt:new Date().toISOString(),changes});},(s,revision)=>({ok:true,batchId:id,count:ids.length,revision}),ids);
+        const id=crypto.randomUUID(),mutation=await mutateWithReplay(env,'category-bulk',input,s=>{checkRevision(s,input);const selected=s.transactions.filter(t=>ids.includes(t.id));if(selected.length!==ids.length)throw apiError('One or more selected transactions are no longer available.',409);s.categoryEditBatches||=[];const changes=selected.map(t=>({id:t.id,override:t.override,overrideCategoryId:t.overrideCategoryId}));for(const [index,t] of selected.entries()){t.override=category.name;t.overrideCategoryId=category.id;delete t.ruleId;delete t.ruleAppliedAt;t.categoryEditVersion=(Number.isSafeInteger(t.categoryEditVersion)?t.categoryEditVersion:0)+1;changes[index].afterVersion=t.categoryEditVersion;}refreshReviewFlags(s,{full:false,onlyIds:new Set(ids)});s.categoryEditBatches.push({id,categoryId:category.id,createdAt:new Date().toISOString(),changes});},(s,revision)=>({ok:true,batchId:id,count:ids.length,revision}),ids);
         return response(mutation.result);
       }
       if(path==='/api/category-bulk-undo'&&request.method==='POST'){
@@ -811,6 +914,32 @@ export default {
         const batch=state.categoryEditBatches?.find(item=>item.id===input.batchId);if(!batch)throw apiError('Bulk edit undo record not found.',404);const scopeConflicts=batchOwnershipConflicts(state,batch.changes.map(change=>change.id),[],input.profileId);if(scopeConflicts.length)throw apiError(scopeConflicts.join(' '),409);
         let undone=0;const saved=await mutateWithReplay(env,'category-bulk-undo',input,s=>{checkRevision(s,input);const index=s.categoryEditBatches.findIndex(item=>item.id===input.batchId);if(index<0)throw apiError('Bulk edit undo record not found.',404);const record=s.categoryEditBatches[index],conflicts=batchOwnershipConflicts(s,record.changes.map(change=>change.id),[],input.profileId);if(conflicts.length)throw apiError(conflicts.join(' '),409);s.categoryEditBatches.splice(index,1);for(const prior of record.changes){const transaction=s.transactions.find(t=>t.id===prior.id);if(!transaction||transaction.overrideCategoryId!==record.categoryId||prior.afterVersion!==undefined&&transaction.categoryEditVersion!==prior.afterVersion)continue;if(prior.override===undefined)delete transaction.override;else transaction.override=prior.override;if(prior.overrideCategoryId===undefined)delete transaction.overrideCategoryId;else transaction.overrideCategoryId=prior.overrideCategoryId;transaction.categoryEditVersion=(Number.isSafeInteger(transaction.categoryEditVersion)?transaction.categoryEditVersion:0)+1;undone++;}},(s,revision)=>({ok:true,revision,undone,skipped:batch.changes.length-undone}),batch.changes.map(change=>change.id));
         return response(saved.result);
+      }
+      if(path==='/api/category-rules'&&request.method==='POST'){
+        const input=await body(request),action=input.action==='delete'?'delete':'save',replay=await findOperationReplay(env,state,'category-rules',input);if(replay.found)return response(replay.response);
+        const existing=action==='delete'||input.id?(state.categoryRules||[]).find(rule=>rule.id===input.id)||null:null;
+        if((action==='delete'||input.id)&&!existing)throw apiError('Category rule not found.',404);
+        const normalized=action==='save'?normalizeCategoryRule(state,input,existing):null;let savedRule=null;
+        const mutation=await mutateWithReplay(env,'category-rules',input,s=>{checkRevision(s,input);s.categoryRules||=[];const live=input.id?s.categoryRules.find(rule=>rule.id===input.id)||null:null;if(input.id&&!live)throw apiError('Category rule not found.',404);if(action==='delete')s.categoryRules=s.categoryRules.filter(rule=>rule.id!==input.id);else{savedRule={...(live||{}),...normalized,id:live?.id||crypto.randomUUID(),createdAt:live?.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),enabled:input.enabled!==false};if(live)Object.assign(live,savedRule);else s.categoryRules.push(savedRule);}reconcileTransactionAutomation(s,{seed:seedRules});},(s,revision)=>({ok:true,revision,rule:savedRule,reviewCount:(s.transactions||[]).filter(transaction=>transaction.review===true).length}),null);
+        return response(mutation.result);
+      }
+      if(path==='/api/category-rules-preview'&&(request.method==='POST'||request.method==='GET')){
+        let candidate=null;
+        if(request.method==='POST'){const input=await body(request);if(input.rule&&typeof input.rule==='object'){const existing=input.rule.id?(state.categoryRules||[]).find(rule=>rule.id===input.rule.id)||null:null;candidate={...normalizeCategoryRule(state,input.rule,existing),id:existing?.id||input.rule.id||'preview',enabled:input.rule.enabled!==false,createdAt:existing?.createdAt||''};}}
+        const changes=previewCategoryRuleChanges(state,candidate);return response({changes:changes.slice(0,500),count:changes.length,revision:Number.isSafeInteger(state.revision)?state.revision:0});
+      }
+      if(path==='/api/category-rules-apply'&&request.method==='POST'){
+        const input=await body(request),replay=await findOperationReplay(env,state,'category-rules-apply',input);if(replay.found)return response(replay.response);let summary=null;
+        const mutation=await mutateWithReplay(env,'category-rules-apply',input,s=>{checkRevision(s,input);summary=reconcileTransactionAutomation(s,{seed:seedRules});},(s,revision)=>({ok:true,revision,...(summary||{}),reviewCount:(s.transactions||[]).filter(transaction=>transaction.review===true).length}),null);
+        return response(mutation.result);
+      }
+      if(path==='/api/transactions-review'&&request.method==='POST'){
+        const input=await body(request),ids=Array.isArray(input.ids)?[...new Set(input.ids)]:typeof input.id==='string'?[input.id]:[];
+        if(!ids.length||ids.length>100||ids.some(id=>typeof id!=='string'))throw apiError('Choose up to 100 transactions to mark reviewed.');
+        if(typeof input.reviewed!=='boolean')throw apiError('Choose whether these transactions are reviewed.');
+        const replay=await findOperationReplay(env,state,'transactions-review',input);if(replay.found)return response(replay.response);
+        const mutation=await mutateWithReplay(env,'transactions-review',input,s=>{checkRevision(s,input);const selected=s.transactions.filter(row=>ids.includes(row.id));if(selected.length!==ids.length)throw apiError('One or more selected transactions are no longer available.',409);markTransactionsReviewed(selected,{reviewed:input.reviewed});refreshReviewFlags(s,{full:false,onlyIds:new Set(ids)});},(s,revision)=>({ok:true,revision,count:ids.length,remaining:(s.transactions||[]).filter(transaction=>transaction.review===true).length}),ids);
+        return response(mutation.result);
       }
       if(path==='/api/import-preview'&&request.method==='POST'){
         const input=await body(request);if(input.profileId!==undefined&&input.profileId!==null&&!['peter','maddie','joint'].includes(input.profileId))throw apiError('Choose Peter, Maddie, Joint, or Needs ownership review for the imported account.');const preview=await prepareCsvImport(input,state);
@@ -833,6 +962,7 @@ export default {
           const ids=new Set(s.transactions.map(t=>t.id)),transactionIds=[];
           preview.rows.forEach((row,index)=>{const id='csv:'+preview.fileId+':'+index;if(ids.has(id)){skipped++;return;}const {unknownCategory,sourceRow,accountName,...transaction}=row;s.transactions.push({...transaction,...(sourceRow?{sourceRow}:{}),id,accountId:row.accountId,itemId:null,source:'csv',importBatchId:preview.fileId});transactionIds.push(id);imported++;});
           s.importBatches.push({id:preview.fileId,accountId:preview.accountId,accountIds:[...new Set(preview.rows.map(row=>row.accountId))],createdAt:new Date().toISOString(),transactionIds,imported,skipped});
+          reconcileTransactionAutomation(s,{seed:seedRules});
         },(s,revision)=>({imported,skipped,batchId:preview.fileId,revision,month:preview.rows.map(t=>t.date.slice(0,7)).sort().at(-1)}),plannedIds);
         return response(saved.result);
       }

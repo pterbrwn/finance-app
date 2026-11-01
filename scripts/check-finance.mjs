@@ -692,3 +692,88 @@ assert.ok(monthBudgetHtml.includes('Decide how much to set aside for each catego
 const rolloverBudgetHtml=await clientPage('https://ledger.test/?page=budgets&month='+thisMonth+'&profile=peter',{...pageBase,month:thisMonth,categories:[{id:'system:housing',name:'Housing',kind:'expense',system:true,order:0,archivedAt:null}],categoryCatalog:[{id:'system:housing',name:'Housing',kind:'expense',system:true,order:0,archivedAt:null}],budgetTemplates:[{categoryId:'system:housing',amount:50000,effectiveFrom:thisMonth}],budgetRollovers:{'system:housing':10000},budgetHistoryUnavailableBefore:thisMonth,actuals:{income:0,categories:{},activity:{}}});
 assert.ok(rolloverBudgetHtml.includes('$600.00 available · $100.00 carried over'),'Budgets visibly adds the rollover to this month’s plan');
 console.log('Finance checks passed: totals, refunds/transfers, currencies, pending replacements, CSV validation/idempotency, authentication, encryption, incremental sync, persistence, disconnect, and client render.');
+
+// --- Rules engine improvements (P3) ---
+const rulesModule = await import('../dist/shared/rules.mjs');
+const { reviewReasonFor, reviewFingerprint, applyCategoryRules, seedDefaultCategoryRules, categoryRuleMatches, matchingCategoryRules, categoryRuleScore, refreshReviewFlags, markTransactionsReviewed, reconcileTransactionAutomation, DEFAULT_CATEGORY_RULES, CATEGORY_RULE_DEFAULTS_VERSION } = rulesModule;
+
+// rule-assigned Other is NOT flagged as Uncategorized
+{
+  const tx = { id:'r1', amount:37500, date:'2026-10-01', merchant:'Venmo', override:'Other', overrideCategoryId:'system:other', ruleId:'default:venmo-other', category:'Transfers' };
+  assert.equal(reviewReasonFor(tx,{counterLeg:false}), null, 'rule-assigned Other must not be flagged');
+}
+
+// rule-assigned Transfers is NOT flagged
+{
+  const tx = { id:'r2', amount:10000, date:'2026-10-01', merchant:'Fidelity', override:'Transfers', overrideCategoryId:'system:transfers', ruleId:'default:fidelity-transfer', category:'Transfers' };
+  assert.equal(reviewReasonFor(tx,{counterLeg:false}), null, 'rule-assigned Transfers must not be flagged');
+}
+
+// P2P Venmo without rule is flagged
+{
+  const tx = { id:'r3', amount:-8200, date:'2026-10-01', merchant:'Venmo', category:'Transfers' };
+  delete tx.ruleId;
+  assert.equal(reviewReasonFor(tx,{counterLeg:false}), 'Peer-to-peer transfer needs a category', 'P2P without rule flagged');
+}
+
+// Transfer with no counter-leg and no rule is flagged
+{
+  const tx = { id:'r4', amount:10000, date:'2026-10-01', merchant:'Online Transfer', category:'Transfers' };
+  delete tx.ruleId;
+  assert.equal(reviewReasonFor(tx,{counterLeg:false}), 'Transfer has no matching account leg', 'no-counter-leg flagged');
+}
+
+// Transfer with counter-leg is not flagged
+{
+  const tx = { id:'r5', amount:10000, date:'2026-10-01', merchant:'Online Transfer', category:'Transfers' };
+  delete tx.ruleId;
+  assert.equal(reviewReasonFor(tx,{counterLeg:true}), null, 'transfer with counter-leg not flagged');
+}
+
+// manual edit protection: categoryEditVersion > 0 blocks rule application
+{
+  const state = { transactions:[{id:'m1',merchant:'Fidelity',amount:40000,date:'2026-10-01',category:'Transfers',override:'Dining',overrideCategoryId:'system:dining',categoryEditVersion:1,accountId:'a1'}], categoryRules:[{id:'r-fid',merchant:'Fidelity',category:'Transfers',categoryId:'system:transfers',profileId:null,enabled:true,createdAt:'2026-10-01'}], accounts:[{id:'a1',profileId:'peter'}] };
+  const before = state.transactions[0].override;
+  applyCategoryRules(state);
+  assert.equal(state.transactions[0].override, before, 'manual edit protected from rule overwrite');
+}
+
+// specificity: amount rule beats longer merchant rule
+{
+  const tx = { merchant:'Venmo', amount:85000, category:'Transfers' };
+  const rules = [
+    { id:'g', merchant:'Venmo', category:'Entertainment', categoryId:'system:entertainment', enabled:true, createdAt:'2026-10-01' },
+    { id:'s', merchant:'Venmo', amount:85000, category:'Housing', categoryId:'system:housing', enabled:true, createdAt:'2026-10-02' }
+  ];
+  const matches = matchingCategoryRules(tx, rules);
+  assert.equal(matches[0].id, 's', 'amount-specific rule wins over generic merchant rule');
+}
+
+// defaults seeding version marker
+{
+  const state = { categoryRules:[], categoryCatalog:[{id:'system:income',name:'Income',archivedAt:null,system:true,profileId:'peter'}] };
+  const added = seedDefaultCategoryRules(state, state.categoryCatalog);
+  assert.ok(added >= 0, 'seedDefaultCategoryRules returns count');
+  const again = seedDefaultCategoryRules(state, state.categoryCatalog);
+  assert.equal(again, 0, 'defaults not re-added after version marker');
+}
+
+// month scoping
+{
+  const tx = { merchant:'Venmo', amount:85000, date:'2026-10-01', category:'Transfers' };
+  const rule = { id:'m', merchant:'Venmo', amount:85000, category:'Housing', categoryId:'system:housing', enabled:true, monthFrom:'2026-11', createdAt:'2026-10-01' };
+  assert.equal(categoryRuleMatches(rule, tx), false, 'monthFrom excludes out-of-range transactions');
+  const rule2 = { ...rule, monthFrom:'2026-10', monthTo:'2026-10' };
+  assert.equal(categoryRuleMatches(rule2, tx), true, 'in-range month matches');
+}
+
+// confidence included in fingerprint
+{
+  const tx = { amount:100, date:'2026-10-01', merchant:'x', accountId:'a', override:'Dining', overrideCategoryId:'system:dining', ruleId:'r', confidence:0.9 };
+  const fp1 = reviewFingerprint(tx);
+  tx.confidence = 0.3;
+  const fp2 = reviewFingerprint(tx);
+  assert.notEqual(fp1, fp2, 'confidence changes alter fingerprint');
+}
+
+console.log('Rules engine improvement tests: PASS');

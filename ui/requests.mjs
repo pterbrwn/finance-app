@@ -1,9 +1,10 @@
 const REPLAY_SAFE_WRITE_PATHS = new Set([
-  'account-update', 'budget', 'budget-history-revert', 'budget-outlook', 'budget-reset', 'budget-stop-future', 'category', 'category-bulk', 'category-bulk-undo', 'category-create', 'category-update', 'goal', 'goal-allocation-undo',
+  'account-update', 'budget', 'budget-history-revert', 'budget-outlook', 'budget-reset', 'budget-stop-future', 'category', 'category-bulk', 'category-bulk-undo', 'category-create', 'category-update', 'category-rules', 'category-rules-apply', 'category-rules-preview',
+  'goal', 'goal-allocation-undo',
   'income-plan', 'income-plan-reset',
   'goal-allocations', 'import', 'import-undo', 'manual-account',
   'mortgage', 'property', 'scenario', 'scenario-budget', 'scenario-goal',
-  'transaction-split', 'transaction-reimbursement', 'commitments', 'commitment-match', 'statement-reconciliation'
+  'transaction-split', 'transaction-reimbursement', 'commitments', 'commitment-match', 'transaction-review'
 ]);
 export const PENDING_OPERATIONS_KEY=['ledger','pending-operations','v1'].join('.');
 function browserSessionStore(){try{return globalThis.sessionStorage||null;}catch{return null;}}

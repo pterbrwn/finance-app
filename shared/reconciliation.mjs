@@ -5,7 +5,10 @@ export function applyChanges(state, itemId, added, modified, removed) {
 const overrides = new Map(state.transactions.filter(transaction => transaction.override).map(transaction => [transaction.id, {
     override: transaction.override,
     ...(transaction.overrideCategoryId ? { overrideCategoryId: transaction.overrideCategoryId } : {}),
-    ...(Number.isSafeInteger(transaction.categoryEditVersion) ? { categoryEditVersion: transaction.categoryEditVersion } : {})
+    ...(Number.isSafeInteger(transaction.categoryEditVersion) ? { categoryEditVersion: transaction.categoryEditVersion } : {}),
+    ...(transaction.ruleId ? { ruleId: transaction.ruleId } : {}),
+    ...(transaction.ruleAppliedAt ? { ruleAppliedAt: transaction.ruleAppliedAt } : {}),
+    ...(transaction.reviewedAt ? { reviewedAt: transaction.reviewedAt, reviewFingerprint: transaction.reviewFingerprint } : {})
   }]));
   for (const transaction of removed) transactions.delete(transaction.transaction_id);
   for (const transaction of [...added, ...modified]) {
