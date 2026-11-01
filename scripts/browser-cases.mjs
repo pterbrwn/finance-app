@@ -296,6 +296,9 @@ export async function runBrowserCase(name) {
     if(name==='budget-empty-onboarding'){
       await page.locator('[data-view="budgets"]').first().click();
       await page.locator('.budget-page').waitFor();
+      assert.equal(await page.locator('[data-budget="Housing"]').count(),0,'unused built-in categories start hidden');
+      await page.locator('[data-toggle-unused-budgets]').click();
+      await page.locator('[data-budget="Housing"]').first().waitFor();
       assert.ok(await page.locator('[data-budget="Housing"]').count()>0,'an unused system category must be available for its first budget plan');
       await page.locator('[data-new-category]').first().click();
       await page.locator('#new-category-name').fill('Synthetic blank plan');
@@ -435,6 +438,7 @@ export async function runBrowserCase(name) {
       await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'no horizontal overflow on a phone');await page.locator('#add-transaction').click();assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'dialog fits a phone');await page.keyboard.press('Escape');await page.setViewportSize({width:1440,height:1000});
       await page.reload();await page.locator('[data-view="transactions"]').first().click();await page.locator('#search').fill('Synthetic coffee');await row.waitFor();
       confirmNext(page,'accept');await row.locator('[data-remove-transaction]').click();await row.waitFor({state:'detached'});
+      await page.locator('[data-view="budgets"]').first().click();const toggle=page.locator('[data-toggle-unused-budgets]');await toggle.waitFor();assert.match(await toggle.innerText(),/Show \d+ unused categor/,'unused built-in categories are hidden behind a button');const hiddenRows=await page.locator('.budget-line').count();await toggle.click();await page.waitForFunction(count=>document.querySelectorAll('.budget-line').length>count,hiddenRows);assert.match(await page.locator('[data-toggle-unused-budgets]').innerText(),/Hide \d+ unused categor/);await page.locator('[data-toggle-unused-budgets]').click();await page.waitForFunction(count=>document.querySelectorAll('.budget-line').length===count,hiddenRows);
       assertBrowserClean();console.log('Browser case passed: manual-transaction (add account, validation, save, persistence, phone layout, remove).');return;
     }
     if (name === 'form-drafts') {
