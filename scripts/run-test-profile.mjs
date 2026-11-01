@@ -13,7 +13,7 @@ const profile = process.argv[2];
 const node = process.env.LEDGER_NODE_BIN || process.execPath;
 assert.match(process.version, /^v24\.22\.1$/, 'profiles require pinned Node 24.22.1');
 const scripts = {
-  fast: ['scripts/validate-artifact.mjs', 'scripts/check-finance.mjs', 'scripts/check-budget.mjs', 'scripts/check-statement-reconciliation.mjs', 'scripts/check-transaction-splits.mjs', 'scripts/check-commitments.mjs'],
+  fast: ['scripts/validate-artifact.mjs', 'scripts/check-finance.mjs', 'scripts/check-budget.mjs', 'scripts/check-statement-reconciliation.mjs', 'scripts/check-transaction-splits.mjs', 'scripts/check-commitments.mjs', 'scripts/check-manual-transactions.mjs'],
   integration: ['scripts/check-dev.mjs', 'scripts/check-sqlite.mjs', 'scripts/check-backup.mjs', 'scripts/check-runtime-status.mjs', 'scripts/check-portable-export.mjs'],
   browser: ['scripts/check-browser.mjs', 'scripts/check-browser-harness.mjs'],
   recovery: ['scripts/check-backup.mjs', 'scripts/check-encrypted-backup.mjs'],

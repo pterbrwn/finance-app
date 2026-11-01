@@ -70,9 +70,9 @@ for (const size of sizes) {
   await repository.mutate(state => {
     state.owner = 'synthetic-owner'; state.revision = 0;
     state.items = [{id:'synthetic-item',cursor:'before-sync',lifecycle:'connected'}];
-    state.accounts = Array.from({ length: 8 }, (_, index) => ({ id: `manual-${index}`, itemId: null, type: 'depository', subtype: 'checking', name: `Synthetic checking ${index + 1}`, balance: 1000000, available: 900000, currency: 'USD', source: 'manual', manual: true, balanceAsOf: '2026-10-25' }));
+    state.accounts = Array.from({ length: 8 }, (_, index) => ({ id: `manual-${index}`, itemId: null, type: 'depository', subtype: 'checking', name: `Synthetic checking ${index + 1}`, profileId: 'peter', balance: 1000000, available: 900000, currency: 'USD', source: 'manual', manual: true, balanceAsOf: '2026-10-25' }));
     state.transactions = rows;
-    state.goals = [{ id: 'goal-emergency', name: 'Synthetic emergency fund', target: 500000, targetDate: '2027-12-31' }];
+    state.goals = [{ id: 'goal-emergency', name: 'Synthetic emergency fund', target: 500000, targetDate: '2027-12-31', profileId: 'peter' }];
     state.goalAllocations = [{ id: 'goal-allocation-1', goalId: 'goal-emergency', accountId: 'manual-0', amount: 25000, active: true }];
     state.properties = [{ id: 'property-synthetic', name: 'Synthetic home', nickname: 'Synthetic home', ownershipBps: 10000, valuation: 32000000, valuationAsOf: '2026-10-01' }];
     state.mortgages = Array.from({ length: 5 }, (_, index) => ({
@@ -144,7 +144,7 @@ for (const size of sizes) {
   }, 1));
   results.push(await measure('goal_edit', async () => {
     const current = (await jsonCall(env, 'state')).value;
-    return jsonCall(env, 'goal', { id: 'goal-emergency', name: 'Synthetic emergency fund', target: 500000, targetDate: '2027-12-31', priority: 1, monthlyContribution: 1000, apyBps: 0, revision: current.revision });
+    return jsonCall(env, 'goal', { profileId: 'peter', id: 'goal-emergency', name: 'Synthetic emergency fund', target: 500000, targetDate: '2027-12-31', priority: 1, monthlyContribution: 1000, apyBps: 0, revision: current.revision });
   }, 1));
   results.push(await measure('manual_account_edit', async () => {
     const current = (await jsonCall(env, 'state')).value, account = current.accounts.find(row => row.id === 'manual-0');

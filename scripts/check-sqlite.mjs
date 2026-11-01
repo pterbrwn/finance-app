@@ -19,6 +19,7 @@ try {
   const databasePath = join(directory, 'ledger.sqlite');
   const repository = await createSqliteRepositoryAt(databasePath);
   await repository.mutate(state => {
+    state.budgetHistoryUnavailableBefore='2026-01';
     state.owner = 'synthetic-owner';
     state.items.push({ id: 'item-1', token: { data: 'synthetic-ciphertext', iv: 'synthetic-iv' }, cursor: 'cursor-x' });
     state.accounts.push({ id: 'account-1', itemId: 'item-1', source: 'provider', balance: 12345, profileId:'peter' });

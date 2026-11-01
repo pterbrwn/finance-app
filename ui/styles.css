@@ -77,6 +77,8 @@
 .setup-panel .commitment-date-row>span>b,.setup-panel .property-example-row>span>b{display:block;color:#233b33;font-size:14px;font-weight:600;line-height:1.35}
 .setup-panel .commitment-date-row small,.setup-panel .property-example-row small{display:block;margin-top:3px;color:var(--muted);font-size:12px;line-height:1.45}
 .setup-panel .commitment-date-amount,.setup-panel .property-example-row>strong{white-space:nowrap;text-align:right;font-size:14px;font-variant-numeric:tabular-nums}
+.setup-panel .commitment-date-row>span.commitment-date-actions{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+.setup-panel .commitment-date-row>span.commitment-date-actions>b{display:block;font-weight:600}
 @media(max-width:420px){.setup-panel .commitment-date-row,.setup-panel .property-example-row{gap:10px;padding:11px 0}.setup-panel .commitment-date-row>span>b,.setup-panel .property-example-row>span>b{font-size:13px}.setup-panel .commitment-date-row small,.setup-panel .property-example-row small{font-size:11px}.setup-panel .commitment-date-amount,.setup-panel .property-example-row>strong{font-size:13px}}
 .overview-period-toggle{display:flex;gap:3px;padding:3px;border:1px solid var(--border);border-radius:8px;background:#edf0e8}
 .overview-period-toggle .btn{min-height:38px;padding:8px 12px;border-color:transparent;background:transparent}
@@ -148,3 +150,20 @@
 .scenario-save-requirements{margin:14px 0;padding:12px 14px;background:#f7f8f3;border:1px solid var(--border);border-radius:10px}.scenario-save-requirements h3{font-size:14px;margin:0 0 6px}.scenario-save-requirements p,.scenario-save-requirements li{font-size:12px;line-height:1.45;color:#425548}.scenario-save-requirements ul{margin:8px 0 0;padding-left:18px}.scenario-save-requirements li+li{margin-top:4px}
 .transaction-filter-details summary{list-style:none}.transaction-filter-details summary::-webkit-details-marker{display:none}.transaction-filter-details summary::after{content:'Show';margin-left:8px;color:var(--muted);font-weight:500}.transaction-filter-details[open] summary::after{content:'Hide'}
 @media(max-width:600px){.topbar{height:40px}.pagehead{margin:8px 0 8px;gap:8px}h1{font-size:23px}.card{padding:11px 12px}.budget-heading>div>p{font-size:12px;line-height:1.45}.transaction-filters{gap:6px}.transaction-filter-details{gap:6px}.transaction-filter-details summary{min-height:44px;display:flex;align-items:center;padding:8px 10px}.transaction-filter-details .btn,.transaction-filter-details select,.transaction-filter-details input{min-height:44px}.mobile-budget-result{margin:6px 0 9px;padding:10px 12px}.budget-income-summary{gap:6px;padding:8px 0;margin-bottom:4px}.budget-income-summary span{font-size:11px}.budget-lines{margin-top:10px}#transaction-count{margin-bottom:8px!important}}
+.first-run-steps{list-style:none;margin:18px 0;padding:0;display:grid;gap:14px}
+.first-run-steps li{display:grid;grid-template-columns:34px minmax(0,1fr);gap:14px;align-items:start}
+.first-run-steps p{margin:4px 0 10px;color:var(--muted)}
+.first-run-number{width:34px;height:34px;border-radius:50%;display:grid;place-items:center;background:#e4ebdc;color:#233b33;font-weight:700}
+.first-run-steps li.done .first-run-number{background:#2f5d4a;color:#fff}
+.first-run-steps li.done{opacity:.8}
+.first-run-steps .btn{margin-right:8px}
+.budget-answer{margin:14px 0 4px;font-size:17px;line-height:1.4;color:#233b33}
+details.budget-confidence summary{cursor:pointer;font-weight:600;padding:8px 0}
+details.settings-technical>summary{cursor:pointer;font-weight:600;padding:12px 0;color:#233b33}
+dialog.confirm-dialog{width:min(92vw,28rem);border:1px solid #d9dfd3;border-radius:14px;padding:24px;box-shadow:0 20px 50px rgba(20,40,32,.25)}
+dialog.confirm-dialog::backdrop{background:rgba(20,40,32,.45)}
+dialog.confirm-dialog h2{margin:0 0 10px;font-size:18px}
+dialog.confirm-dialog p{margin:0 0 20px;line-height:1.5;color:#233b33}
+dialog.confirm-dialog .controls{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
+dialog.confirm-dialog .btn{min-height:44px;padding:0 18px}
+dialog.confirm-dialog .btn.danger{background:#8a3b2d;border-color:#8a3b2d;color:#fff}

@@ -32,7 +32,7 @@ export function summarizeBalanceSheet(accounts=[],items=[],propertySummary={prop
   });
   const assets=addSafeCents(addSafeCents(addSafeCents(totals.cash,totals.investments,'Balance sheet asset total'),totals.otherAssets,'Balance sheet asset total'),totals.property,'Balance sheet asset total'),netWorth=addSafeCents(assets,-totals.debts,'Net worth');
   const incomplete=coverage.unknownBalanceAccounts>0||coverage.nonUsdAccounts>0||coverage.missingPropertyValuations>0||coverage.incompletePropertyDebt>0||coverage.missingMortgageBalances>0||coverage.staleAccounts>0||coverage.stalePropertyValuations>0||coverage.staleMortgageBalances>0;
-  return{asOf:now.toISOString(),totals:{...totals,assets,liabilities:totals.debts,netWorth},includedAccounts,excludedAccounts,properties:propertyRows,coverage,incomplete,netWorthLabel:incomplete?'Known net worth · partial coverage':'Net worth · recorded USD records'};
+  return{asOf:now.toISOString(),totals:{...totals,assets,liabilities:totals.debts,netWorth},includedAccounts,excludedAccounts,properties:propertyRows,coverage,incomplete,netWorthLabel:incomplete?'Known net worth · partial coverage':'Net worth (from the accounts you have entered)'};
 }
 
 export function makeBalanceSheetSnapshot(summary,date){

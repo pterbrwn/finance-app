@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { chromium } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { installConfirmResponder, confirmNext, assertConfirmClean } from './confirm-responder.mjs';
 
 if (process.env.BROWSER_CASE) {
   const { runBrowserCase } = await import('./browser-cases.mjs');
@@ -31,9 +32,8 @@ try{
   browser=await chromium.launch({headless:true});
   context=await browser.newContext({viewport:{width:1440,height:1000}});page=await context.newPage();
   await context.tracing.start({screenshots:true,snapshots:true,sources:true});traceStarted=true;
-  let expectedDialog=null;
-  page.on('dialog',async dialog=>{const expected=expectedDialog;expectedDialog=null;if(!expected){logs+='\nunexpected dialog ('+dialog.type()+'): '+dialog.message();await dialog.dismiss();return;}try{assert.match(dialog.message(),expected.pattern,'confirmation names the requested action');await dialog[expected.action]();expected.resolve();}catch(error){expected.reject(error);}});
-  async function withDialog(pattern,action,trigger){assert.equal(expectedDialog,null,'no previous confirmation is pending');let resolve,reject;const handled=new Promise((yes,no)=>{resolve=yes;reject=no;});expectedDialog={pattern,action,resolve,reject};await trigger();await handled;}
+  installConfirmResponder(page);
+  async function withDialog(pattern,action,trigger){const handled=confirmNext(page,action,pattern);await trigger();await handled;}
   page.on('pageerror',error=>{browserErrors.push(error.message);logs+=`\npageerror: ${error.message}`;});
   page.on('response',response=>{const url=new URL(response.url());if(url.pathname.startsWith('/api/')&&response.status()>=400)apiFailures.push({method:response.request().method(),path:url.pathname,status:response.status()});});page.on('console',message=>{if(message.type()==='error'){const text=message.text();if(!text.startsWith('Failed to load resource:'))consoleErrors.push(text);logs+=`\nconsole: ${text}`;}});
   page.on('request',request=>{if(request.url().includes('/api/category-bulk'))observedRequests.push(request.method()+' '+request.url());if(request.url().includes('/api/')&&request.method()==='POST')sampleWrites.push(request.method()+' '+request.url());});
@@ -52,7 +52,7 @@ try{
   const observationParts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()),observationDate=observationParts.find(part=>part.type==='year').value+'-'+observationParts.find(part=>part.type==='month').value+'-'+observationParts.find(part=>part.type==='day').value;
   await audit('overview');
   for(const view of ['transactions','budgets','commitments','accounts','investments','goals','home','settings'])await visit(view);
-  const settingsText=await page.locator('body').innerText();assert.match(settingsText,/Sync timer[\s\S]*bank data sync timer/i,'Settings explains that sync scheduling refers to bank data sync');assert.match(settingsText,/Backup timer[\s\S]*Next backup run|Backup timer[\s\S]*No backup run is scheduled/i,'Settings labels the separate local backup timer and its next run');
+  await page.locator('details.settings-technical > summary').click();const settingsText=await page.locator('body').innerText();assert.match(settingsText,/Sync timer[\s\S]*bank data sync timer/i,'Settings explains that sync scheduling refers to bank data sync');assert.match(settingsText,/Backup timer[\s\S]*Next backup run|Backup timer[\s\S]*No backup run is scheduled/i,'Settings labels the separate local backup timer and its next run');
 
   await page.locator('[data-view="overview"]').first().click();
   const beforeSample=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,snapshots:state.balanceSheetSnapshots.length})));
@@ -109,8 +109,8 @@ try{
   await importDialog.locator('#import-account').fill('Synthetic browser account');
   await importDialog.locator('#csv-file').setInputFiles({name:'browser.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category\n'+testDate+',Synthetic Market,24.50,Groceries\n')});
   await importDialog.getByRole('button',{name:'Preview file'}).click();
-  await importDialog.getByText('1 rows · 1 account(s)').waitFor();
-  await importDialog.getByRole('button',{name:'Commit 1 rows'}).click();
+  await importDialog.getByText('1 row · 1 account').waitFor();
+  await importDialog.getByRole('button',{name:'Commit 1 row'}).click();
   await importDialog.getByText('1 transactions imported').waitFor();
   await importDialog.getByRole('button',{name:'Undo this import'}).click();
   await importDialog.getByText('This import batch was undone.').waitFor();
@@ -122,7 +122,7 @@ try{
   await bulkImportDialog.locator('#import-account').fill('Synthetic bulk account');await bulkImportDialog.locator('[name=profileId]').selectOption('peter');
   await bulkImportDialog.locator('#csv-file').setInputFiles({name:'bulk.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category\n'+selectedMonth+'-13,Synthetic bulk market,18.75,Groceries\n'+selectedMonth+'-14,Synthetic source market,12.50,Groceries\n')});
   await bulkImportDialog.getByRole('button',{name:'Preview file'}).click();
-  await bulkImportDialog.getByText('2 rows · 1 account(s)').waitFor();
+  await bulkImportDialog.getByText('2 rows · 1 account').waitFor();
   const bulkCommitResponse=page.waitForResponse(response=>response.url().endsWith('/api/import')&&response.request().method()==='POST');
   await bulkImportDialog.getByRole('button',{name:'Commit 2 rows'}).click();
   const bulkImportBatch=await(await bulkCommitResponse).json();
@@ -198,7 +198,7 @@ try{
   await acceptanceImport.locator('#import-account').fill('Synthetic full-save account');
   await acceptanceImport.locator('#csv-file').setInputFiles({name:'bulk-acceptance.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category\n'+bulkAcceptanceRows+'\n')});
   await acceptanceImport.getByRole('button',{name:'Preview file'}).click();
-  await acceptanceImport.getByText('121 rows · 1 account(s)').waitFor();
+  await acceptanceImport.getByText('121 rows · 1 account').waitFor();
   await acceptanceImport.getByRole('button',{name:'Commit 121 rows'}).click();
   await acceptanceImport.getByText('121 transactions imported').waitFor();
   await page.keyboard.press('Escape');
@@ -630,6 +630,7 @@ try{
   if(logs.includes('unexpected dialog'))throw new Error(logs.slice(logs.indexOf('unexpected dialog')));
   if(failures.length)throw new Error('Serious accessibility violations: '+JSON.stringify(failures));
   await context.tracing.stop();traceStarted=false;
+  assertConfirmClean();
   console.log('Browser acceptance passed: 1440/390/320 px layout, 720 CSS px at 200% zoom, import preview/commit/undo, category and budget edits, goal/scenario saves, keyboard workflows, and zero serious/critical axe violations across tested views.');
 }catch(error){
   const artifactRoot=process.env.LEDGER_BROWSER_ARTIFACTS||join(tmpdir(),'ledger-browser-failures');

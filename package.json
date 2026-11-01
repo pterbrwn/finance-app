@@ -23,6 +23,7 @@
     "check:portable-export": "bash scripts/run-node.sh scripts/check-portable-export.mjs",
     "check:encrypted-backup": "bash scripts/run-node.sh scripts/check-encrypted-backup.mjs",
     "check:transaction-splits": "bash scripts/run-node.sh scripts/check-transaction-splits.mjs",
+    "check:manual-transactions": "bash scripts/run-node.sh scripts/check-manual-transactions.mjs",
     "check:commitments": "bash scripts/run-node.sh scripts/check-commitments.mjs",
     "measure:performance": "bash scripts/run-node.sh scripts/measure-performance.mjs",
     "import:legacy": "bash scripts/run-node.sh scripts/import-legacy-json.mjs",

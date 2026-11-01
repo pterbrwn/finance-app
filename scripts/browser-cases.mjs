@@ -6,9 +6,10 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { chromium } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { installConfirmResponder, confirmNext, autoConfirm, assertConfirmClean } from './confirm-responder.mjs';
 
 const appRoot = resolve(import.meta.dirname, '..');
-export const availableBrowserCases = Object.freeze(['sample-isolation', 'sample-transaction-filters', 'combined-budget-rollup', 'profile-two-tab', 'profile-csv-roundtrip', 'profile-account-reassignment', 'profile-goal-undo-owner-conflict', 'budget-recurring', 'budget-frequency-history', 'budget-two-tab', 'budget-empty-onboarding', 'budget-create-month', 'budget-archive-history', 'budget-history-controls', 'transaction-splits-commitments', 'form-drafts', 'form-cancel', 'refresh-edit', 'snapshot-races', 'operation-restart', 'operation-reload-recovery', 'accessibility-tree', '__self-check-pageerror', '__self-check-assertion']);
+export const availableBrowserCases = Object.freeze(['sample-isolation', 'sample-transaction-filters', 'combined-budget-rollup', 'profile-two-tab', 'profile-csv-roundtrip', 'profile-account-reassignment', 'profile-goal-undo-owner-conflict', 'budget-recurring', 'budget-frequency-history', 'budget-two-tab', 'budget-empty-onboarding', 'budget-create-month', 'budget-archive-history', 'budget-history-controls', 'transaction-splits-commitments', 'manual-transaction', 'form-drafts', 'form-cancel', 'refresh-edit', 'snapshot-races', 'operation-restart', 'operation-reload-recovery', 'accessibility-tree', '__self-check-pageerror', '__self-check-assertion']);
 
 function monthInChicago(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', year: 'numeric', month: '2-digit' }).formatToParts(date);
@@ -59,12 +60,14 @@ export async function runBrowserCase(name) {
   const restartServer=async()=>{await closeChild(child);child=spawnServer();await waitServer();};
   let browser, context, page, traceStarted = false;
   const browserErrors = [], consoleErrors = [], apiFailures = [], failures = [], sampleWrites = [];
-  const assertBrowserClean = () => { assert.deepEqual(browserErrors, [], 'no uncaught browser errors'); assert.deepEqual(consoleErrors, [], 'no unexpected browser console errors'); };
+  const assertBrowserClean = () => { assertConfirmClean(); assert.deepEqual(browserErrors, [], 'no uncaught browser errors'); assert.deepEqual(consoleErrors, [], 'no unexpected browser console errors'); };
   try {
     await waitServer();
     browser = await chromium.launch({ headless: true });
     context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
     page = await context.newPage();
+    installConfirmResponder(page);
+    if (['sample-transaction-filters', 'form-drafts'].includes(name)) { await context.clock.setFixedTime(new Date(monthInChicago() + '-28T18:00:00Z')); }
     await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
     traceStarted = true;
     page.on('pageerror', error => { browserErrors.push(error.message); logs += `\npageerror: ${error.message}`; });
@@ -84,8 +87,8 @@ export async function runBrowserCase(name) {
     });
     await page.goto(`http://127.0.0.1:${port}/`);
     await page.locator('#app .shell').waitFor({ timeout: 10000 });
-    await page.waitForFunction(()=>{const heading=document.querySelector('.empty-dashboard h2')?.textContent;return heading!=='Loading your private records…'&&heading!=='Ledger could not load your records';});assert.deepEqual(await page.locator('#profile-select option').allTextContents(),['Household','Peter','Maddie','Joint'],'profile selector exposes each supported household view');
-    const peterCases=new Set(['budget-recurring','budget-frequency-history','budget-two-tab','budget-empty-onboarding','budget-create-month','budget-archive-history','budget-history-controls','transaction-splits-commitments','form-drafts','accessibility-tree','profile-goal-undo-owner-conflict']);
+    await page.waitForFunction(()=>{const heading=document.querySelector('.empty-dashboard h2')?.textContent;return heading!=='Loading your records…'&&heading!=='Ledger could not load your records';});assert.deepEqual(await page.locator('#profile-select option').allTextContents(),['Household','Peter','Maddie','Joint'],'profile selector exposes each supported household view');
+    const peterCases=new Set(['budget-recurring','budget-frequency-history','budget-two-tab','budget-empty-onboarding','budget-create-month','budget-archive-history','budget-history-controls','transaction-splits-commitments','manual-transaction','form-drafts','accessibility-tree','profile-goal-undo-owner-conflict']);
     if(peterCases.has(name)){await page.locator('#profile-select').selectOption('peter');await page.waitForFunction(()=>new URL(location.href).searchParams.get('profile')==='peter');}
 
     if (name === '__self-check-pageerror') {
@@ -176,7 +179,7 @@ export async function runBrowserCase(name) {
       const importDialog=page.getByRole('dialog');await importDialog.locator('#csv-file').setInputFiles({name:'account-roundtrip.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category,Currency,Status,Account\n'+month+'-02,Synthetic checking,12.34,Groceries,USD,Posted,Everyday Checking\n'+month+'-03,Synthetic card,5.67,Dining,USD,Posted,Rewards Credit\n')});
       await page.waitForFunction(()=>document.querySelector('[name="accountColumn"]')?.value==='Account');
       assert.equal(await importDialog.locator('[name="accountColumn"]').inputValue(),'Account','the Account column is detected automatically');assert.equal(await importDialog.locator('[name="account"]').evaluate(element=>element.required),false,'per-row Account data removes the default-account requirement');
-      await importDialog.getByRole('button',{name:'Preview file'}).click();await importDialog.getByText('2 rows · 2 account(s)').waitFor();await importDialog.getByRole('button',{name:'Commit 2 rows'}).click();await importDialog.getByText('2 transactions imported').waitFor();
+      await importDialog.getByRole('button',{name:'Preview file'}).click();await importDialog.getByText('2 rows · 2 accounts').waitFor();await importDialog.getByRole('button',{name:'Commit 2 rows'}).click();await importDialog.getByText('2 transactions imported').waitFor();
       const importedAccounts=await page.evaluate(async()=>{const [state,result]=await Promise.all([fetch('/api/state').then(response=>response.json()),fetch('/api/transactions?search=Synthetic').then(response=>response.json())]);return result.transactions.filter(row=>row.merchant.startsWith('Synthetic checking')||row.merchant.startsWith('Synthetic card')).map(row=>({merchant:row.merchant,account:state.accounts.find(account=>account.id===row.accountId)?.name})).sort((a,b)=>a.merchant.localeCompare(b.merchant));});assert.deepEqual(importedAccounts,[{merchant:'Synthetic card',account:'Rewards Credit'},{merchant:'Synthetic checking',account:'Everyday Checking'}],'CSV import preserves each row’s account attribution');
       await importDialog.getByRole('button',{name:'Undo this import'}).click();await importDialog.getByText('This import batch was undone.').waitFor();
       assert.deepEqual(browserErrors,[]);assert.deepEqual(consoleErrors,[]);
@@ -206,7 +209,7 @@ export async function runBrowserCase(name) {
         await page.locator('#profile-select').selectOption(profile);await page.waitForFunction(value=>document.querySelector('#profile-select')?.value===value,profile);
         await page.locator('[data-view="transactions"]').first().click();await page.locator('#import').click();const dialog=page.getByRole('dialog');
         await dialog.locator('#import-owner').selectOption(profile);await dialog.locator('#csv-file').setInputFiles({name:profile+'-profile.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category,Account\n'+date+','+merchant+','+amount+',Groceries,'+account+'\n')});
-        await page.waitForFunction(()=>document.querySelector('[name="accountColumn"]')?.value==='Account');await dialog.getByRole('button',{name:'Preview file'}).click();await dialog.getByText('1 rows · 1 account(s)').waitFor();await dialog.getByRole('button',{name:'Commit 1 rows'}).click();await dialog.getByText('1 transactions imported').waitFor();await dialog.locator('#cancel-import').click();
+        await page.waitForFunction(()=>document.querySelector('[name="accountColumn"]')?.value==='Account');await dialog.getByRole('button',{name:'Preview file'}).click();await dialog.getByText('1 row · 1 account').waitFor();await dialog.getByRole('button',{name:'Commit 1 row'}).click();await dialog.getByText('1 transactions imported').waitFor();await dialog.locator('#cancel-import').click();
       }
       await importFor('peter','Peter CSV account','Synthetic Peter CSV owner',11.25);await importFor('maddie','Maddie CSV account','Synthetic Maddie CSV owner',22.50);
       const owners=await page.evaluate(async month=>Promise.all(['peter','maddie','combined'].map(async profile=>{const rows=await fetch('/api/transactions?profile='+profile+'&search=Synthetic').then(response=>response.json());return[profile,rows.transactions.map(row=>row.merchant).sort()];})),month);
@@ -219,7 +222,7 @@ export async function runBrowserCase(name) {
     }
 
     if(name==='profile-account-reassignment'){
-      const confirmations=[];page.on('dialog',async dialog=>{confirmations.push(dialog.message());await dialog.accept();});
+      const confirmations=autoConfirm(page,[]);
       let state=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));const created=await page.evaluate(async revision=>{const response=await fetch('/api/manual-account',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Synthetic reassignment cash',type:'depository',profileId:'peter',balance:300000,currency:'USD',asOf:new Date().toISOString().slice(0,10),revision})});return{status:response.status,body:await response.json()};},state.revision);assert.equal(created.status,200,JSON.stringify(created.body));
       state=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));const goalSaved=await page.evaluate(async revision=>{const response=await fetch('/api/goal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'Synthetic reassignment reserve',target:100000,targetDate:'2027-12-31',profileId:'peter',revision})});return{status:response.status,body:await response.json()};},state.revision);assert.equal(goalSaved.status,200,JSON.stringify(goalSaved.body));
       state=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));const allocated=await page.evaluate(async input=>{const response=await fetch('/api/goal-allocations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goalId:input.goalId,allocations:[{accountId:input.accountId,amount:50000}],revision:input.revision})});return{status:response.status,body:await response.json()};},{goalId:goalSaved.body.goal.id,accountId:created.body.account.id,revision:state.revision});assert.equal(allocated.status,200,JSON.stringify(allocated.body));
@@ -240,8 +243,8 @@ export async function runBrowserCase(name) {
       const householdSummary=page.waitForResponse(response=>{const url=new URL(response.url());return url.pathname==='/api/household-summary'&&url.searchParams.get('month')===monthInChicago()&&url.searchParams.get('profile')==='combined';});await page.locator('[data-view="budgets"]').first().click();await householdSummary;await page.getByRole('heading',{name:'Household budget for '+monthInChicago()}).waitFor();const groceries=page.locator('.household-budget-rollup tbody tr').filter({hasText:'Groceries'});await groceries.locator('td').nth(3).filter({hasText:'$600.00'}).waitFor();assert.equal((await groceries.locator('td').nth(0).innerText()).includes('$100.00'),true,'Peter plan appears in Combined');assert.equal((await groceries.locator('td').nth(1).innerText()).includes('$200.00'),true,'Maddie plan appears in Combined');assert.equal((await groceries.locator('td').nth(2).innerText()).includes('$300.00'),true,'Joint plan appears in Combined');assert.equal((await groceries.locator('td').nth(3).innerText()).includes('$600.00'),true,'Combined household plan reconciles exactly');
       await groceries.locator('[data-edit-budget-profile="maddie"]').click();await page.waitForFunction(()=>new URL(location.href).searchParams.get('profile')==='maddie');await page.locator('[data-budget-id="system:groceries"]').waitFor();assert.equal(await page.locator('#profile-select').inputValue(),'maddie','the edit target is explicit before the personal plan opens');
       assert.deepEqual(await page.locator('#profile-select option').evaluateAll(options=>options.map(option=>option.value)),['combined','peter','maddie','joint'],'the primary selector exposes Combined and all three household profiles');
-      await page.locator('[data-view="accounts"]').first().click();await page.locator('#add-account').click();await page.locator('#add-manual').click();const discardedDialog=page.getByRole('dialog');await discardedDialog.locator('#manual-name').fill('Discarded profile-switch draft');page.once('dialog',dialog=>dialog.accept());await page.locator('#profile-select').selectOption('peter');await page.waitForFunction(()=>new URL(location.href).searchParams.get('profile')==='peter');assert.equal(await page.getByRole('dialog').count(),0,'accepting the discard prompt closes the dirty dialog');assert.equal(await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>state.accounts.some(account=>account.name==='Discarded profile-switch draft'))),false,'switching profiles never saves a discarded account draft');
-      await page.locator('#add-account').click();await page.locator('#add-manual').click();const keptDialog=page.getByRole('dialog');await keptDialog.locator('#manual-name').fill('Preserved profile-switch draft');page.once('dialog',dialog=>dialog.dismiss());await page.locator('#profile-select').selectOption('maddie');assert.equal(await page.locator('#profile-select').inputValue(),'peter','canceling profile navigation keeps the current view');assert.equal(await keptDialog.locator('#manual-name').inputValue(),'Preserved profile-switch draft','canceling profile navigation preserves the unsaved form');await keptDialog.getByRole('button',{name:'Cancel'}).click();
+      await page.locator('[data-view="accounts"]').first().click();await page.locator('#add-account').click();await page.locator('#add-manual').click();const discardedDialog=page.getByRole('dialog');await discardedDialog.locator('#manual-name').fill('Discarded profile-switch draft');confirmNext(page,'accept');await page.locator('#profile-select').selectOption('peter');await page.waitForFunction(()=>new URL(location.href).searchParams.get('profile')==='peter');assert.equal(await page.getByRole('dialog').count(),0,'accepting the discard prompt closes the dirty dialog');assert.equal(await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>state.accounts.some(account=>account.name==='Discarded profile-switch draft'))),false,'switching profiles never saves a discarded account draft');
+      await page.locator('#add-account').click();await page.locator('#add-manual').click();const keptDialog=page.getByRole('dialog');await keptDialog.locator('#manual-name').fill('Preserved profile-switch draft');confirmNext(page,'dismiss');await page.locator('#profile-select').selectOption('maddie');assert.equal(await page.locator('#profile-select').inputValue(),'peter','canceling profile navigation keeps the current view');assert.equal(await keptDialog.locator('#manual-name').inputValue(),'Preserved profile-switch draft','canceling profile navigation preserves the unsaved form');await keptDialog.getByRole('button',{name:'Cancel'}).click();
       assert.deepEqual(browserErrors,[]);assert.deepEqual(consoleErrors,[]);console.log('Browser case passed: combined-budget-rollup (Peter/Maddie/Joint totals reconcile and edit links open the named profile).');return;
     }
 
@@ -261,7 +264,7 @@ export async function runBrowserCase(name) {
       const saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.deepEqual(saved.accounts.filter(account=>account.name==='Synthetic recovery account').map(account=>account.id),[accountId],'reload recovery confirms one committed account after a local server restart');
       const beforeUnknownCheck=sampleWrites.length;await page.evaluate(revision=>sessionStorage.setItem('ledger.pending-operations.v1',JSON.stringify([{operationId:'00000000-0000-4000-8000-000000000777',scope:'manual-account',baseRevision:revision,startedAt:new Date().toISOString()}])),saved.revision);await page.reload();
       await page.locator('.operation-recovery').filter({hasText:'does not prove the save failed'}).waitFor();assert.equal(sampleWrites.length,beforeUnknownCheck,'an unknown status never triggers a new write');assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('ledger.pending-operations.v1')||'[]').length),1,'unknown status remains available for explicit resolution');
-      page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Clear reference after review'}).click();assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('ledger.pending-operations.v1')||'[]').length),0,'clearing the unknown reference requires an explicit user action');
+      const clearHandled=confirmNext(page,'accept');await page.getByRole('button',{name:'Clear reference after review'}).click();await clearHandled;await page.waitForFunction(()=>JSON.parse(sessionStorage.getItem('ledger.pending-operations.v1')||'[]').length===0,null,{timeout:10000}).catch(()=>{});assert.equal(await page.evaluate(()=>JSON.parse(sessionStorage.getItem('ledger.pending-operations.v1')||'[]').length),0,'clearing the unknown reference requires an explicit user action');
       assert.deepEqual(browserErrors,[]);assert.deepEqual(consoleErrors,[]);
       console.log('Browser case passed: operation-reload-recovery (two lost responses, page reload, server restart, committed and unknown status handling, minimal session metadata, one confirmed account).');return;
     }
@@ -283,9 +286,10 @@ export async function runBrowserCase(name) {
       const transaction=await page.evaluate(async testDate=>{const state=await fetch('/api/state').then(response=>response.json()),csv=`Date,Merchant,Amount,Category\n${testDate},Synthetic shared purchase,100.00,Other`;const result=await fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv,account:'Synthetic split account',profileId:'peter',revision:state.revision,confirmOverlaps:true})});if(!result.ok)throw new Error(await result.text());return fetch('/api/transactions?page=1&limit=100&profile=peter').then(response=>response.json()).then(saved=>saved.transactions.find(row=>row.merchant==='Synthetic shared purchase'));},testDate);
       assert.ok(transaction?.id);const ownerReview=await page.evaluate(async id=>{const state=await fetch('/api/state').then(response=>response.json()),response=await fetch('/api/transaction-owner',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,profileId:'peter',revision:state.revision})});return{status:response.status,body:await response.json()};},transaction.id);assert.equal(ownerReview.status,200,JSON.stringify(ownerReview.body),'the synthetic transaction receives an explicit owner before profile-owned edits');await page.goto(`http://127.0.0.1:${port}/?page=transactions&profile=peter`);const row=page.locator('[data-split-transaction="'+transaction.id+'"]').locator('..').locator('..');await page.locator('[data-split-transaction="'+transaction.id+'"]').click();let dialog=page.getByRole('dialog');await dialog.locator('select[name="categoryId"]').nth(0).selectOption('system:groceries');await dialog.locator('input[name="amount"]').nth(0).fill('60.00');await dialog.locator('select[name="categoryId"]').nth(1).selectOption('system:dining');await dialog.locator('input[name="amount"]').nth(1).fill('40.00');const splitResponsePromise=page.waitForResponse(response=>response.url().endsWith('/api/transaction-split')&&response.request().method()==='POST');await dialog.getByRole('button',{name:'Save split'}).click();const splitResponse=await splitResponsePromise;assert.equal(splitResponse.status(),200,await splitResponse.text());await page.waitForFunction(async id=>{const state=await fetch('/api/state?profile=peter').then(response=>response.json());return state.transactionSplits?.some(row=>row.transactionId===id);},transaction.id);let saved=await page.evaluate(async()=>fetch('/api/state?profile=peter').then(response=>response.json()));assert.equal(saved.transactionSplits.find(row=>row.transactionId===transaction.id).allocations.reduce((sum,item)=>sum+item.amount,0),10000);let summary=await page.evaluate(async()=>fetch('/api/budget-summary?profile=peter').then(response=>response.json()));assert.equal(summary.actuals.categories['system:groceries'],6000,'profile budget actuals include the saved transaction split');assert.equal(summary.actuals.categories['system:dining'],4000,JSON.stringify(summary.actuals));
       await page.locator('[data-split-transaction="'+transaction.id+'"]').click();dialog=page.getByRole('dialog');await dialog.locator('[data-undo-split]').click();await page.waitForTimeout(100);saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.transactionSplits.length,0,'split undo restores unsplit state without changing parent');
-      const refund=await page.evaluate(async date=>{const state=await fetch('/api/state').then(response=>response.json()),result=await fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv:`Date,Merchant,Amount,Category\n${date},Synthetic shared purchase refund,-25.00,Other`,account:'Synthetic split account',revision:state.revision,confirmOverlaps:true})});if(!result.ok)throw new Error(await result.text());return fetch('/api/transactions?search=Synthetic%20shared%20purchase%20refund').then(response=>response.json()).then(value=>value.transactions[0]);},nextMonth(monthInChicago())+'-02');await page.reload();await page.locator('[data-reimbursement="'+transaction.id+'"]').click();dialog=page.getByRole('dialog');await dialog.locator('[name=transactionId]').selectOption(refund.id);await dialog.locator('[name=amount]').fill('25.00');await dialog.locator('[name=confirmed]').check();const reimbursementPromise=page.waitForResponse(response=>response.url().endsWith('/api/transaction-reimbursement'));await dialog.getByRole('button',{name:'Save reimbursement link'}).click();const reimbursementResponse=await reimbursementPromise;assert.equal(reimbursementResponse.status(),200,await reimbursementResponse.text());saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.transactionReimbursements[0].transactionId,refund.id);assert.equal(saved.transactionReimbursements[0].reimbursesTransactionId,transaction.id);await dialog.locator('[data-unlink]').click();await page.waitForFunction(()=>document.querySelector('[data-reimbursement-links]')?.textContent?.includes('Removed'));saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.transactionReimbursements[0].status,'unlinked','the explicit remove action preserves an audited link record');page.once('dialog',confirmation=>confirmation.accept());await dialog.getByRole('button',{name:'Cancel'}).click();
-      await page.locator('[data-view="commitments"]').first().click();const commitmentForm=page.locator('[data-commitment-create]');await commitmentForm.locator('[name=name]').fill('Synthetic Internet');await commitmentForm.locator('[name=amount]').fill('100.00');await commitmentForm.locator('[name=frequency]').selectOption('monthly');await commitmentForm.locator('[name=startDate]').fill(testDate);await commitmentForm.locator('[name=dayOfMonth]').fill('12');await commitmentForm.getByRole('button',{name:'Save commitment'}).click();await page.waitForTimeout(100);saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.commitments.length,1);
+      const refund=await page.evaluate(async date=>{const state=await fetch('/api/state').then(response=>response.json()),result=await fetch('/api/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({csv:`Date,Merchant,Amount,Category\n${date},Synthetic shared purchase refund,-25.00,Other`,account:'Synthetic split account',revision:state.revision,confirmOverlaps:true})});if(!result.ok)throw new Error(await result.text());return fetch('/api/transactions?search=Synthetic%20shared%20purchase%20refund').then(response=>response.json()).then(value=>value.transactions[0]);},nextMonth(monthInChicago())+'-02');await page.reload();await page.locator('[data-reimbursement="'+transaction.id+'"]').click();dialog=page.getByRole('dialog');await dialog.locator('[name=transactionId]').selectOption(refund.id);await dialog.locator('[name=amount]').fill('25.00');await dialog.locator('[name=confirmed]').check();const reimbursementPromise=page.waitForResponse(response=>response.url().endsWith('/api/transaction-reimbursement'));await dialog.getByRole('button',{name:'Save reimbursement link'}).click();const reimbursementResponse=await reimbursementPromise;assert.equal(reimbursementResponse.status(),200,await reimbursementResponse.text());saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.transactionReimbursements[0].transactionId,refund.id);assert.equal(saved.transactionReimbursements[0].reimbursesTransactionId,transaction.id);await dialog.locator('[data-unlink]').click();await page.waitForFunction(()=>document.querySelector('[data-reimbursement-links]')?.textContent?.includes('Removed'));saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.transactionReimbursements[0].status,'unlinked','the explicit remove action preserves an audited link record');confirmNext(page,'accept');await dialog.getByRole('button',{name:'Cancel'}).click();
+      await page.locator('[data-view="commitments"]').first().click();const commitmentForm=page.locator('[data-commitment-create]');await commitmentForm.locator('[name=name]').fill('Synthetic Internet');await commitmentForm.locator('[name=amount]').fill('100.00');await commitmentForm.locator('[name=frequency]').selectOption('monthly');await commitmentForm.locator('[name=startDate]').fill(testDate);await commitmentForm.locator('[name=dayOfMonth]').fill('12');await commitmentForm.getByRole('button',{name:'Save commitment'}).click();await page.waitForFunction(async()=>{const state=await fetch('/api/state').then(response=>response.json());return state.commitments?.length===1;},null,{timeout:15000});saved=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()));assert.equal(saved.commitments.length,1);
       await page.locator('[data-view="transactions"]').first().click();await page.locator('[data-link-commitment="'+transaction.id+'"]').click();dialog=page.getByRole('dialog');await dialog.locator('[name=commitmentId]').selectOption(saved.commitments[0].id);await dialog.locator('[name=dueDate]').selectOption(testDate);await dialog.locator('[name=confirmed]').check();const matchResponsePromise=page.waitForResponse(response=>response.url().includes('/api/commitment-match'));await dialog.getByRole('button',{name:'Confirm match'}).click();const matchResponse=await matchResponsePromise;assert.equal(matchResponse.status(),200,await matchResponse.text());const matchResult=await page.evaluate(async()=>fetch('/api/commitments?from=2026-01-01&to=2027-12-31').then(response=>response.json()));assert.equal(matchResult.matches[0].status,'user-confirmed');const actualRows=await page.evaluate(async()=>fetch('/api/transactions?page=1&limit=20').then(response=>response.json()));assert.equal(actualRows.transactions.find(row=>row.id===transaction.id)?.amount,10000);
+      await page.locator('[data-view="commitments"]').first().click();const unlinkButton=page.locator('[data-unlink-commitment]').first();await unlinkButton.waitFor();confirmNext(page,'accept');const unlinkResponse=page.waitForResponse(response=>response.url().includes('/api/commitment-match'));await unlinkButton.click();assert.equal((await unlinkResponse).status(),200);await page.waitForFunction(()=>document.querySelectorAll('[data-unlink-commitment]').length===0,null,{timeout:10000}).catch(()=>{});assert.equal(await page.locator('[data-unlink-commitment]').count(),0,'an unlinked payment offers no unlink action');
       assert.deepEqual(browserErrors,[]);assert.deepEqual(consoleErrors,[]);console.log('Browser case passed: transaction-splits-commitments (UI exact-cent split, audit undo, dated commitment, and explicit payment match).');return;
     }
 
@@ -411,6 +415,28 @@ export async function runBrowserCase(name) {
       return;
     }
 
+    if (name === 'manual-transaction') {
+      const date=monthInChicago()+'-01';
+      await page.locator('[data-view="overview"]').first().click();await page.locator('#refresh-data').click();await page.locator('#toast').filter({hasText:'nothing new to fetch'}).waitFor();
+      await page.locator('[data-view="transactions"]').first().click();
+      await page.locator('#add-transaction').click();
+      let dialog=page.getByRole('dialog');await dialog.getByText('Add an account first').waitFor();
+      await dialog.getByRole('button',{name:'Add an account'}).click();
+      dialog=page.getByRole('dialog');await dialog.locator('#manual-name').fill('Synthetic wallet');await dialog.locator('#manual-owner').selectOption('peter');
+      await dialog.getByRole('button',{name:'Save account'}).click();await page.getByRole('dialog').waitFor({state:'detached'});
+      await page.locator('[data-view="transactions"]').first().click();
+      await page.locator('#add-transaction').click();dialog=page.getByRole('dialog');
+      await dialog.locator('#add-tx-merchant').fill('Synthetic coffee');await dialog.locator('#add-tx-amount').fill('abc');await dialog.getByRole('button',{name:'Save'}).click();
+      await dialog.getByText('Enter an amount like 12.50.').waitFor();
+      await dialog.locator('#add-tx-amount').fill('4.75');await dialog.locator('#add-tx-date').fill(date);await dialog.getByRole('button',{name:'Save'}).click();
+      await page.getByRole('dialog').waitFor({state:'detached'});
+      await page.locator('#search').fill('Synthetic coffee');
+      const row=page.locator('#transaction-table tr').filter({hasText:'Synthetic coffee'});await row.waitFor();assert.match(await row.innerText(),/4\.75/);
+      await page.setViewportSize({width:390,height:844});assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'no horizontal overflow on a phone');await page.locator('#add-transaction').click();assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'dialog fits a phone');await page.keyboard.press('Escape');await page.setViewportSize({width:1440,height:1000});
+      await page.reload();await page.locator('[data-view="transactions"]').first().click();await page.locator('#search').fill('Synthetic coffee');await row.waitFor();
+      confirmNext(page,'accept');await row.locator('[data-remove-transaction]').click();await row.waitFor({state:'detached'});
+      assertBrowserClean();console.log('Browser case passed: manual-transaction (add account, validation, save, persistence, phone layout, remove).');return;
+    }
     if (name === 'form-drafts') {
       async function assertReplaySafeFailure(path, status, contentType, alert, verifyDraft, closeAfter=true) {
         const seen=[];
@@ -428,7 +454,7 @@ export async function runBrowserCase(name) {
         assert.equal(seen[1].clientOperationId,seen[0].clientOperationId,`${path} reuses its operation ID for the retry`);
         assert.deepEqual(seen[1],seen[0],`${path} retries the identical payload`);
         await page.unroute(`**/api/${path}`);
-        if(closeAfter){page.once('dialog',dialog=>dialog.accept());await page.keyboard.press('Escape');}
+        if(closeAfter){confirmNext(page,'accept');await page.keyboard.press('Escape');}
       }
 
       await page.locator('[data-view="budgets"]').first().click();
@@ -493,7 +519,7 @@ export async function runBrowserCase(name) {
 
       await page.locator('[data-view="transactions"]').first().click();await page.locator('#import').click();
       let importDialog=page.getByRole('dialog');await importDialog.locator('#import-account').fill('Synthetic failed import');
-      await importDialog.locator('#csv-file').setInputFiles({name:'synthetic-draft.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category\n2026-10-03,Synthetic row,12.34,Groceries\n')});
+      await importDialog.locator('#csv-file').setInputFiles({name:'synthetic-draft.csv',mimeType:'text/csv',buffer:Buffer.from('Date,Merchant,Amount,Category\n'+monthInChicago()+'-03,Synthetic row,12.34,Groceries\n')});
       await page.route('**/api/import-preview',route=>route.fulfill({status:500,contentType:'application/json',body:JSON.stringify({error:'Synthetic import preview failure.'})}));
       await importDialog.getByRole('button',{name:'Preview file'}).click();await importDialog.locator('#import-error').filter({hasText:'Synthetic import preview failure'}).waitFor();
       assert.equal(await importDialog.locator('#import-account').inputValue(),'Synthetic failed import','failed preview keeps the import account name');
@@ -502,7 +528,7 @@ export async function runBrowserCase(name) {
       assert.equal(await importDialog.locator('[name="amountMode"]').inputValue(),'positive-spending','failed preview keeps the amount convention');
       await page.unroute('**/api/import-preview');
       await importDialog.getByRole('button',{name:'Preview file'}).click();await importDialog.locator('#import-preview').waitFor();
-      await importDialog.getByRole('button',{name:'Commit 1 rows'}).click();await page.getByText('1 transactions imported',{exact:false}).waitFor();
+      await importDialog.getByRole('button',{name:'Commit 1 row'}).click();await page.getByText('1 transactions imported',{exact:false}).waitFor();
       await page.keyboard.press('Escape');await page.locator('[data-view="transactions"]').first().click();
       const importedRow=page.locator('#transaction-table tr').filter({hasText:'Synthetic row'}),categorySelect=importedRow.locator('[data-category]');await categorySelect.waitFor();
       await page.route('**/api/category',route=>route.abort());await categorySelect.selectOption({label:'Shopping'});
@@ -614,7 +640,7 @@ export async function runBrowserCase(name) {
       assert.equal(duplicateSubmitRequests,1,'two concurrent submissions of the same scenario payload produce one request');
       assert.equal(await dialog.locator('[name="name"]').inputValue(),'Retained synthetic scenario','the conflicted double-submit keeps its draft');
       await page.unroute('**/api/scenario');
-      page.once('dialog',dialog=>dialog.accept());await page.keyboard.press('Escape');
+      confirmNext(page,'accept');await page.keyboard.press('Escape');
 
       assert.deepEqual(browserErrors,[],'form retries and preserved drafts have no uncaught browser errors');
       assert.deepEqual(consoleErrors,[],'form retries and preserved drafts have no browser console errors');
@@ -632,7 +658,7 @@ export async function runBrowserCase(name) {
       await allocationForm.getByRole('alert').filter({hasText:'Synthetic allocation conflict'}).waitFor();
       assert.equal(await allocationForm.locator('[data-allocation-account]').inputValue(),'25','allocation conflict retains the proposed amount');
       assert.equal(await allocationForm.evaluate(dialog=>dialog.contains(document.activeElement)),true,'allocation conflict keeps keyboard focus inside its dialog');await page.unroute('**/api/goal-allocations');
-      page.once('dialog',dialog=>dialog.accept());await allocationForm.locator('#cancel-allocation').click();
+      confirmNext(page,'accept');await allocationForm.locator('#cancel-allocation').click();
       await page.locator('[data-view="transactions"]').first().click();
       await page.locator('#search').fill('Synthetic row');
       const importedBulkRow=page.locator('#transaction-table tr').filter({hasText:'Synthetic row'});await importedBulkRow.waitFor();
@@ -676,7 +702,7 @@ export async function runBrowserCase(name) {
       const writesBeforeCancellation=sampleWrites.length;
       const baseline=await page.evaluate(async()=>{const state=await fetch('/api/state').then(response=>response.json());return{revision:state.revision,accounts:state.accounts.map(row=>row.id),goals:state.goals.map(row=>row.id),properties:state.properties.map(row=>row.id),mortgages:(state.mortgages||[]).map(row=>row.id),scenarios:(state.scenarios||[]).map(row=>row.id),categories:state.categoryCatalog.map(row=>row.id)};});
       async function cancelByButton(open,button){await open();const dialog=page.getByRole('dialog');await dialog.waitFor();await dialog.locator(button).click();await dialog.waitFor({state:'detached'});}
-      async function dismissConfirmation(trigger,expected){let message='';page.once('dialog',async dialog=>{message=dialog.message();await dialog.dismiss();});await trigger();assert.match(message,expected,'the canceled confirmation describes its action');}
+      async function dismissConfirmation(trigger,expected){const handled=confirmNext(page,'dismiss',expected);await trigger();await handled;}
       await page.locator('[data-view="transactions"]').first().click();
       await cancelByButton(()=>page.locator('#import').click(),'#cancel-import');
       await cancelByButton(()=>page.locator('[data-new-category]').first().click(),'#cancel-category');
@@ -693,7 +719,7 @@ export async function runBrowserCase(name) {
       await dismissConfirmation(()=>page.locator(`[data-archive-goal="${goal.id}"]`).click(),/Archive.*Synthetic cancel goal/);
       await page.locator(`[data-allocate-goal="${goal.id}"]`).click();
       const allocationDialog=page.getByRole('dialog');await allocationDialog.locator('[data-allocation-account]').fill('12.34');
-      page.once('dialog',dialog=>dialog.accept());await allocationDialog.locator('#cancel-allocation').click();await allocationDialog.waitFor({state:'detached'});
+      confirmNext(page,'accept');await allocationDialog.locator('#cancel-allocation').click();await allocationDialog.waitFor({state:'detached'});
       await page.locator('[data-view="home"]').first().click();
       await cancelByButton(()=>page.locator('#new-property').click(),'[data-close]');
       await page.locator(`[data-edit-property="${property.id}"]`).click();
@@ -860,7 +886,7 @@ export async function runBrowserCase(name) {
       await importDialog.locator('#import-account').fill('Synthetic restart import account');
       await importDialog.locator('#csv-file').setInputFiles({name:'synthetic-restart-import.csv',mimeType:'text/csv',buffer:Buffer.from(importCsv)});
       await importDialog.getByRole('button',{name:'Preview file'}).click();
-      await importDialog.getByText('1 rows · 1 account(s)').waitFor();
+      await importDialog.getByText('1 row · 1 account').waitFor();
       const revisionBeforeImport=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>state.revision));
       let importAttempts=0,committedImportResult=null;const importOperationIds=[];
       await page.route('**/api/import',async route=>{
@@ -868,7 +894,7 @@ export async function runBrowserCase(name) {
         if(importAttempts===1){const upstream=await route.fetch();committedImportResult={status:upstream.status(),body:await upstream.json()};await restartServer();await route.abort();}
         else await route.continue();
       });
-      await importDialog.getByRole('button',{name:'Commit 1 rows'}).click();
+      await importDialog.getByRole('button',{name:'Commit 1 row'}).click();
       await importDialog.getByText('1 transactions imported',{exact:false}).waitFor();
       await page.unroute('**/api/import');
       assert.equal(committedImportResult?.status,200,'the synthetic import committed before its first response was dropped');

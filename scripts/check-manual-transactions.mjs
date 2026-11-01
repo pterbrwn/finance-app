@@ -1,0 +1,27 @@
+import assert from 'node:assert/strict';
+import { randomUUID, webcrypto } from 'node:crypto';
+import { totals } from '../shared/reporting.mjs';
+globalThis.crypto ||= webcrypto;
+const {default:worker}=await import('../dist/server/index.js');
+const today=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());
+let state={version:1,owner:'owner',revision:1,items:[],accounts:[{id:'cash',name:'Wallet',type:'depository',manual:true,source:'manual',profileId:'peter',balance:10000,currency:'USD'},{id:'bank',name:'Bank',type:'depository',itemId:'item-1',source:'provider',profileId:'peter',balance:20000,currency:'USD'}],transactions:[{id:'csv-1',accountId:'cash',date:today,merchant:'Imported',amount:500,category:'Other',currency:'USD',source:'csv',pending:false}],commitments:[],commitmentMatches:[]};
+const ops=new Map(),repo={schemaVersion:9,async read(){return{state:structuredClone(state)};},async readIdentity(){return{owner:state.owner,version:1};},async readOperationResult(id){return ops.get(id)||null;},async mutateWithOperation(op,update){const draft=structuredClone(state),record=await update(draft);state=draft;ops.set(op.id,record);return{state:structuredClone(state),result:record.response};}};
+const request=async(path,payload,opId=randomUUID())=>worker.fetch(new Request('https://ledger.test/api/'+path,{method:payload?'POST':'GET',headers:{'oai-authenticated-user-id':'owner',...(payload?{'content-type':'application/json'}:{})},...(payload?{body:JSON.stringify({revision:state.revision,clientOperationId:opId,...payload})}:{})}),{REPOSITORY:repo,LOCAL_ONLY:true});
+const base={accountId:'cash',date:today,merchant:'  Coffee  ',amount:475,direction:'spent',category:'Dining'};
+const before=totals(state.transactions).spend;
+const added=await request('transaction-add',base);assert.equal(added.status,200,await added.clone().text());
+const tx=(await added.json()).transaction;assert.equal(tx.merchant,'Coffee');assert.equal(tx.amount,475);assert.equal(tx.source,'manual');assert.equal(tx.category,'Dining');
+state.revision=Math.max(state.revision,2);assert.equal(totals(state.transactions).spend,before+475,'a hand-entered purchase counts in spending totals');
+const received=await request('transaction-add',{...base,merchant:'Refund from friend',amount:2000,direction:'received',category:undefined});assert.equal(received.status,200,await received.clone().text());const income=(await received.json()).transaction;assert.equal(income.amount,-2000);assert.equal(income.category,'Income');
+const replayId=randomUUID(),replayRevision=state.revision,first=await request('transaction-add',{...base,merchant:'Replay',revision:replayRevision},replayId),count=state.transactions.length,second=await request('transaction-add',{...base,merchant:'Replay',revision:replayRevision},replayId);assert.equal(first.status,200);assert.equal(second.status,200);assert.equal(state.transactions.length,count,'a repeated operation does not duplicate the transaction');
+for(const [label,payload,status] of [['provider account',{...base,accountId:'bank'},400],['missing account',{...base,accountId:'nope'},400],['future date',{...base,date:'2999-01-01'},400],['bad date',{...base,date:'tomorrow'},400],['empty description',{...base,merchant:'   '},400],['zero amount',{...base,amount:0},400],['fractional cents',{...base,amount:12.5},400],['unknown direction',{...base,direction:'swapped'},400],['unknown category',{...base,category:'Nonexistent'},400]]){const response=await request('transaction-add',payload);assert.equal(response.status,status,label+': '+await response.clone().text());}
+assert.equal((await request('transaction-add',base,randomUUID())).status,200);
+const stale=await worker.fetch(new Request('https://ledger.test/api/transaction-add',{method:'POST',headers:{'oai-authenticated-user-id':'owner','content-type':'application/json'},body:JSON.stringify({...base,revision:0,clientOperationId:randomUUID()})}),{REPOSITORY:repo,LOCAL_ONLY:true});assert.equal(stale.status,409,'a stale revision is rejected');
+assert.equal((await request('transaction-remove',{id:'csv-1',confirmed:true})).status,400,'imported transactions cannot be removed');
+assert.equal((await request('transaction-remove',{id:tx.id,confirmed:false})).status,400,'removal needs confirmation');
+state.commitmentMatches.push({commitmentId:'c',dueDate:today,transactionId:tx.id,status:'user-confirmed'});
+assert.equal((await request('transaction-remove',{id:tx.id,confirmed:true})).status,409,'a transaction linked to a bill cannot be removed');
+state.commitmentMatches[0].status='unlinked';
+const removed=await request('transaction-remove',{id:tx.id,confirmed:true});assert.equal(removed.status,200,await removed.clone().text());assert.ok(!state.transactions.some(row=>row.id===tx.id));
+assert.equal((await request('transaction-remove',{id:tx.id,confirmed:true})).status,404);
+console.log('Manual transaction add and remove checks passed: validation, signs, totals, replay, stale revision, and link protection.');
