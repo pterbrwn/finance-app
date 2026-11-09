@@ -167,3 +167,62 @@ dialog.confirm-dialog p{margin:0 0 20px;line-height:1.5;color:#233b33}
 dialog.confirm-dialog .controls{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
 dialog.confirm-dialog .btn{min-height:44px;padding:0 18px}
 dialog.confirm-dialog .btn.danger{background:#8a3b2d;border-color:#8a3b2d;color:#fff}
+/* Daily review, manual edit, and category-rule workflows. */
+.transaction-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px}
+.transaction-actions .btn{min-height:44px}
+.transaction-actions-note{font-size:12px;color:var(--muted);margin-left:auto}
+.review-inbox{background:#f7f8f3;border:1px solid #e4e9da;border-radius:10px;padding:16px 18px;margin:0 0 18px}
+.review-inbox .card-head{margin-bottom:10px;align-items:flex-start}
+.review-inbox .card-sub{font-size:12px;line-height:1.55}
+.review-inbox .controls{justify-content:flex-start;flex-wrap:wrap}
+.review-inbox .pill{margin-top:0;white-space:nowrap}
+.review-reason{color:#8a5a2b!important;font-size:11px!important}
+.review-accept{color:#2f6a4d!important;font-weight:650}
+.rule-list{display:grid;gap:8px;margin:14px 0 20px;max-height:35vh;overflow:auto}
+.rule-row{display:flex;gap:12px;justify-content:space-between;align-items:flex-start;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:#fafbf8}
+.rule-row b{font-size:13px;display:block;overflow-wrap:anywhere}
+.rule-row small{display:block;color:var(--muted);font-size:11px;line-height:1.45;margin-top:3px}
+.rule-row .pill{margin-top:6px}
+.rule-row-actions{display:flex;gap:2px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
+.rule-paused{opacity:.72}
+.danger-text{color:#994a3f!important}
+.rule-field-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+.rule-field-grid label{min-width:0;display:flex;flex-direction:column;gap:6px;margin:8px 0;font-size:13px}
+.rule-field-grid input,.rule-field-grid select{box-sizing:border-box;width:100%;min-width:0;min-height:44px;border:1px solid var(--border);border-radius:6px;padding:10px;background:#fff;color:inherit;font:inherit}
+.rule-field-grid input:focus-visible,.rule-field-grid select:focus-visible{outline:2px solid var(--green);outline-offset:2px}
+.overview-details{margin:20px 0}
+.content .overview-details>summary,.content .bill-create>summary{min-height:44px;cursor:pointer;font-weight:600;color:var(--green);gap:8px}
+.content .overview-details>summary::after,.content .bill-create>summary::after{content:'+';margin-left:auto}
+.content .overview-details[open]>summary::after,.content .bill-create[open]>summary::after{content:'−'}
+.overview-details>.card{margin-top:12px}
+.bill-create .commitment-form{margin-top:16px}
+.bill-schedule{grid-column:1/-1;margin:0}
+.rule-more{border-top:1px solid var(--border);margin-top:14px;padding-top:4px}
+.rule-more summary{cursor:pointer;color:#486553;font-size:12px;font-weight:600;padding:8px 0}
+.rule-sources-field{grid-column:1/-1}
+.rule-feedback{min-height:1.5em;font-size:12px;color:#4f6a55;line-height:1.5;margin-top:10px}
+dialog.rules-dialog{max-width:min(760px,calc(100% - 24px));width:min(760px,calc(100% - 24px))}
+@media(max-width:600px){.transaction-actions{gap:6px}.transaction-actions .btn{flex:1 1 calc(50% - 6px)}.transaction-actions .btn.primary{flex-basis:100%}.transaction-actions-note{display:none}.review-inbox{padding:12px}.review-inbox .card-head{flex-direction:column;gap:8px}.review-inbox .controls .btn{flex:1 1 auto}.rule-row{flex-direction:column}.rule-row-actions{width:100%;justify-content:flex-start}.rule-field-grid{grid-template-columns:1fr}.rules-dialog .controls .btn{flex:1 1 100%}}
+@media(max-width:420px){.transaction-actions .btn{flex-basis:100%}}
+/* Phone task polish: keep primary transaction actions and the first record in view. */
+@media(max-width:600px){
+  .transaction-actions{flex-wrap:nowrap;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:thin;padding-bottom:2px}
+  .transaction-actions .btn{flex:0 0 auto}
+  .transaction-actions .btn.primary{flex-basis:auto}
+  .pagehead .profile-context{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  .pagehead .profile-context+.profile-select{flex:1 1 calc(50% - 4px);width:auto;max-width:none}
+  .pagehead>.controls>.month{flex:1 1 calc(50% - 4px);width:auto;max-width:none}
+}
+/* Secondary disclosures keep a usable minimum target without competing with primary actions. */
+.content details>summary{min-height:24px;display:flex;align-items:center;flex-wrap:wrap;gap:4px}
+/* Recurring bill fields match the readable control sizing used elsewhere. */
+.commitment-form>label input,.commitment-form>label select{min-height:40px;border:1px solid var(--border);border-radius:6px;padding:8px 10px;background:#fff;color:inherit}
+@media(max-width:600px){.commitment-form>label input,.commitment-form>label select{min-height:44px}}
+/* Tablet-width transaction tables scroll inside their card instead of widening the page. */
+@media(min-width:601px) and (max-width:900px){.table-wrap.transaction-table{overflow-x:auto}}
+.content{min-width:0}
+@media(max-width:600px){.overview-period-toggle .btn{min-height:44px}}
+@media(max-width:600px){.transaction-owner-control{grid-template-columns:auto minmax(0,1fr)}.transaction-owner-control select{min-height:44px}}
+[data-commitment-month-picker]{min-height:40px}
+@media(max-width:600px){[data-commitment-month-picker]{min-height:44px}}
+.budget-limit{color:#65736b}

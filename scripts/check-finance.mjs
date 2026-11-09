@@ -663,14 +663,27 @@ const importingHtml=await clientPage('https://ledger.test/?page=accounts',{...pa
 assert.ok(importingHtml.includes('Waiting for the first successful sync'));
 assert.ok(importingHtml.includes('Accounts'),'the accounts page identifies its destination');
 const settingsHtml=await clientPage('https://ledger.test/?page=settings',{...pageBase,setup:{configured:false,localOnly:true,syncTimer:{state:'available',enabled:false,active:false},backup:{state:'success',recoveryState:'complete',recoveryStale:false,verification:{bundleChecksums:'verified',databaseIntegrity:'passed',tokens:'decrypted',restoreRehearsal:'not_performed'},lastAttempt:'2026-10-25T12:00:00.000Z',lastSuccess:'2026-10-25T12:00:00.000Z',lastCompleteRecovery:'2026-10-25T12:00:00.000Z',timer:{state:'available',enabled:true,active:true,nextRun:'tomorrow'}}},syncJob:{status:'succeeded',startedAt:'2026-10-25T12:00:00.000Z',completed:2,total:2,failures:[]}});
-assert.ok(settingsHtml.includes('Disabled · inactive'));
+assert.ok(settingsHtml.includes('Not scheduled'));assert.ok(settingsHtml.includes('Manual / CSV · no automatic bank updates'));
 assert.ok(settingsHtml.includes('Latest sync job'));
 assert.ok(settingsHtml.includes('succeeded'));
 assert.ok(settingsHtml.includes('Local recovery backups'));
-assert.ok(settingsHtml.includes('Verified bundle current; restore rehearsal not performed'));assert.ok(settingsHtml.includes('Database integrity'));assert.ok(settingsHtml.includes('Stored tokens'));assert.ok(settingsHtml.includes('Restore rehearsal'));
+assert.ok(settingsHtml.includes('Verified recovery backup current'));assert.ok(settingsHtml.includes('restore rehearsal not performed'));assert.ok(!settingsHtml.includes('Last saved recently'));assert.ok(settingsHtml.includes('Database integrity'));assert.ok(settingsHtml.includes('Stored tokens'));assert.ok(settingsHtml.includes('Restore rehearsal'));
 assert.ok(settingsHtml.includes('seven recent daily and four weekly'));
 const databaseOnlySettingsHtml=await clientPage('https://ledger.test/?page=settings',{...pageBase,setup:{configured:false,localOnly:true,backup:{state:'success',recoveryState:'database_only'}}});
-assert.ok(databaseOnlySettingsHtml.includes('Database backup only; recovery pair unavailable'));
+assert.ok(databaseOnlySettingsHtml.includes('Database backup only; recovery pair incomplete'));
+const statusPage=({backup,syncTimer,setup,...rest}={})=>{const base={...pageBase,items:[{id:'bank-item',name:'Bank',lastSuccess:'2026-10-25T12:00:00.000Z'}],lastSync:'2026-10-25T12:00:00.000Z',setup:{configured:true,localOnly:false,environment:'production',syncTimer:{state:'available',enabled:true,active:false,nextRun:'tomorrow'},backup:{state:'success',recoveryState:'complete',recoveryStale:false,verification:{bundleChecksums:'verified',databaseIntegrity:'passed',tokens:'decrypted',restoreRehearsal:'passed'},lastAttempt:'2026-10-25T12:00:00.000Z',lastSuccess:'2026-10-25T12:00:00.000Z',lastCompleteRecovery:'2026-10-25T12:00:00.000Z',timer:{state:'available',enabled:true,active:false,nextRun:'tomorrow'}}}};return clientPage('https://ledger.test/?page=settings',{...base,...rest,setup:{...base.setup,...setup,...(backup?{backup}:{}),...(syncTimer?{syncTimer}:{})}});};
+const currentStatusHtml=await statusPage({});assert.ok(currentStatusHtml.includes('Everything looks fine'),'current verified backup and successful sync are reported as healthy');assert.ok(currentStatusHtml.includes('Current · last successful'),'successful sync is distinguished from the schedule');assert.ok(currentStatusHtml.includes('Scheduled'),'the bank sync schedule is shown separately');assert.ok(!currentStatusHtml.includes('Last saved recently'),'the status never fabricates backup recency');
+const incompleteStatusHtml=await statusPage({backup:{state:'success',recoveryState:'incomplete',recoveryStale:false}});assert.ok(incompleteStatusHtml.includes('Needs attention'),'an incomplete recovery pair is not healthy');assert.ok(incompleteStatusHtml.includes('Database backup only; recovery pair incomplete'));assert.ok(incompleteStatusHtml.includes('class="settings-technical" open'),'unhealthy details open by default');
+const staleBackupHtml=await statusPage({backup:{state:'success',recoveryState:'complete',recoveryStale:true,verification:{bundleChecksums:'verified',databaseIntegrity:'passed',tokens:'decrypted',restoreRehearsal:'passed'},lastSuccess:'2026-10-25T12:00:00.000Z'}});assert.ok(staleBackupHtml.includes('Needs attention'));assert.ok(staleBackupHtml.includes('Verified recovery backup is stale'));
+const failedBackupHtml=await statusPage({backup:{state:'failed',failureCategory:'write',lastAttempt:'2026-10-25T12:00:00.000Z'}});assert.ok(failedBackupHtml.includes('Latest backup attempt failed'));assert.ok(failedBackupHtml.includes('Failure category: write'));
+const unverifiedBackupHtml=await statusPage({backup:{state:'success',recoveryState:'complete',recoveryStale:false,verification:{bundleChecksums:'missing',databaseIntegrity:'passed',tokens:'decrypted'},lastSuccess:'2026-10-25T12:00:00.000Z'}});assert.ok(unverifiedBackupHtml.includes('has not passed verification'));assert.ok(unverifiedBackupHtml.includes('Bundle checksums</span><b>Unknown'));
+ const noTimestampBackupHtml=await statusPage({backup:{state:'success',recoveryState:'complete',recoveryStale:false,verification:{bundleChecksums:'verified',databaseIntegrity:'passed',tokens:'decrypted'}}});assert.ok(noTimestampBackupHtml.includes('recency unavailable'),'missing success timestamps are described honestly');assert.ok(noTimestampBackupHtml.includes('Last verified success</span><b>None recorded'));assert.ok(noTimestampBackupHtml.includes('Needs attention'),'missing backup recency is not healthy');assert.ok(!noTimestampBackupHtml.includes('Last saved recently'));
+const unavailableTimerHtml=await statusPage({setup:{configured:true,localOnly:false,environment:'production',syncTimer:{state:'unavailable',enabled:null,active:null},backup:{state:'success',recoveryState:'complete',recoveryStale:false,verification:{bundleChecksums:'verified',databaseIntegrity:'passed',tokens:'decrypted',restoreRehearsal:'passed'},lastSuccess:'2026-10-25T12:00:00.000Z'}}});assert.ok(unavailableTimerHtml.includes('Schedule unavailable'),'an unavailable timer is not reported as enabled');assert.ok(unavailableTimerHtml.includes('Current · last successful'),'a recent successful sync remains evidence even when the schedule is unknown');
+const syncErrorHtml=await statusPage({items:[{id:'bank-item',name:'Bank',lastSuccess:'2026-10-25T12:00:00.000Z',error:'Reconnect needed'}]});assert.ok(syncErrorHtml.includes('Needs attention'));assert.ok(syncErrorHtml.includes('1 connection needs attention'));assert.ok(syncErrorHtml.includes('A bank connection needs attention. Open Accounts to reconnect.'));
+const neverRunBackupHtml=await statusPage({backup:{state:'not_run'}});assert.ok(neverRunBackupHtml.includes('No backup has run yet'));
+const unknownBackupHtml=await statusPage({backup:{state:'unavailable'}});assert.ok(unknownBackupHtml.includes('Local backup status is unavailable'));
+ const neverSyncedHtml=await statusPage({items:[{id:'bank-item',name:'Bank'}],lastSync:null});assert.ok(neverSyncedHtml.includes('No successful bank update yet'),'a configured schedule alone never implies a successful sync');
+ const mixedSyncHtml=await statusPage({items:[{id:'fresh-bank',name:'Fresh Bank',lastSuccess:new Date().toISOString()},{id:'old-bank',name:'Old Bank',lastSuccess:'2020-01-01T00:00:00.000Z'}]});assert.ok(mixedSyncHtml.includes('Stale'),'one fresh connection cannot hide another stale connection');
 const linkedEmptyHtml=await clientPage('https://ledger.test/',{...pageBase,items:[{id:'chase-item',name:'Chase'}],setup:{configured:true,localOnly:false,environment:'production'}});
 assert.ok(linkedEmptyHtml.includes('Your bank is connected'));
 assert.ok(linkedEmptyHtml.includes('first account and transaction data is still arriving'));
@@ -695,21 +708,44 @@ console.log('Finance checks passed: totals, refunds/transfers, currencies, pendi
 
 // --- Rules engine improvements (P3) ---
 const rulesModule = await import('../dist/shared/rules.mjs');
-const { reviewReasonFor, reviewFingerprint, applyCategoryRules, seedDefaultCategoryRules, categoryRuleMatches, matchingCategoryRules, categoryRuleScore, refreshReviewFlags, markTransactionsReviewed, reconcileTransactionAutomation, DEFAULT_CATEGORY_RULES, CATEGORY_RULE_DEFAULTS_VERSION } = rulesModule;
+const reportingModule = await import('../dist/shared/reporting.mjs');
+const { reviewReasonFor, reviewFingerprint, applyCategoryRules, seedDefaultCategoryRules, categoryRuleMatches, matchingCategoryRules, categoryRuleScore, refreshReviewFlags, markTransactionsReviewed, reconcileTransactionAutomation, buildCounterLegIndex, hasCounterLeg, counterLegIsAmbiguous, DEFAULT_CATEGORY_RULES, CATEGORY_RULE_DEFAULTS_VERSION } = rulesModule;
+const { normalizeConfidence, transactionConfidence, hasLowConfidence, LOW_CONFIDENCE_THRESHOLD } = reportingModule;
 
-// rule-assigned Other is NOT flagged as Uncategorized
+// Provider confidence is normalized once and low confidence enters review.
 {
-  const tx = { id:'r1', amount:37500, date:'2026-10-01', merchant:'Venmo', override:'Other', overrideCategoryId:'system:other', ruleId:'default:venmo-other', category:'Transfers' };
-  assert.equal(reviewReasonFor(tx,{counterLeg:false}), null, 'rule-assigned Other must not be flagged');
+  assert.equal(normalizeConfidence('LOW'),0.3,'provider LOW normalizes numerically');
+  assert.equal(normalizeConfidence('VERY_HIGH'),1,'provider VERY_HIGH normalizes numerically');
+  assert.equal(normalizeConfidence('UNKNOWN'),0,'provider UNKNOWN is an explicit low value');
+  assert.equal(normalizeConfidence(undefined),null,'missing confidence stays unknown rather than invented');
+  assert.equal(LOW_CONFIDENCE_THRESHOLD,0.5);
+  const low=fromPlaid({transaction_id:'plaid-low',account_id:'account',date:'2026-10-01',amount:42.5,name:'Synthetic Cafe',personal_finance_category:{primary:'FOOD_AND_DRINK',detailed:'FOOD_AND_DRINK_RESTAURANT',confidence_level:'LOW'}},'item');
+  assert.equal(low.confidence,0.3,'fromPlaid persists a numeric confidence');
+  assert.equal(low.personalFinanceCategory.confidence,'LOW','provider confidence text remains as provenance');
+  assert.equal(low.category,'Dining');
+  assert.equal(transactionConfidence(low),0.3);
+  assert.equal(hasLowConfidence(low),true);
+  assert.equal(reviewReasonFor(low,{counterLeg:false}),'Low-confidence category','LOW provider confidence is reviewable');
+  low.ruleId='rule-low';
+  assert.equal(reviewReasonFor(low,{counterLeg:false}),'Low-confidence category','a rule does not silently exempt low confidence');
+  const high=fromPlaid({transaction_id:'plaid-high',account_id:'account',date:'2026-10-01',amount:12,name:'Synthetic Cafe',personal_finance_category:{primary:'FOOD_AND_DRINK',detailed:'FOOD_AND_DRINK_RESTAURANT',confidence_level:'HIGH'}},'item');
+  assert.equal(high.confidence,0.9);
+  assert.equal(reviewReasonFor(high,{counterLeg:false}),null,'high confidence is not reviewable by itself');
 }
 
-// rule-assigned Transfers is NOT flagged
+// Rules never resolve review on their own.
 {
-  const tx = { id:'r2', amount:10000, date:'2026-10-01', merchant:'Fidelity', override:'Transfers', overrideCategoryId:'system:transfers', ruleId:'default:fidelity-transfer', category:'Transfers' };
-  assert.equal(reviewReasonFor(tx,{counterLeg:false}), null, 'rule-assigned Transfers must not be flagged');
+  const tx = { id:'r1', amount:37500, date:'2026-10-01', merchant:'Venmo', override:'Other', overrideCategoryId:'system:other', ruleId:'rule-venmo', category:'Transfers' };
+  assert.equal(reviewReasonFor(tx,{counterLeg:false}), 'Uncategorized', 'rule-assigned Other stays reviewable');
+}
+{
+  const tx = { id:'r2', amount:10000, date:'2026-10-01', currency:'USD', accountId:'a', merchant:'Fidelity', override:'Transfers', overrideCategoryId:'system:transfers', ruleId:'rule-fidelity', category:'Transfers' };
+  assert.equal(reviewReasonFor(tx,{counterLeg:false}), 'Transfer has no matching account leg', 'rule-assigned Transfers without a counterpart stays reviewable');
+  assert.equal(reviewReasonFor(tx,{counterLeg:true}), null, 'a rule-assigned transfer with a real counterpart is accepted');
+  assert.equal(reviewReasonFor(tx,{counterLeg:true,ambiguous:true}), 'Transfer matches more than one account leg', 'ambiguous transfer remains reviewable');
 }
 
-// P2P Venmo without rule is flagged
+// P2P Venmo without a rule is flagged
 {
   const tx = { id:'r3', amount:-8200, date:'2026-10-01', merchant:'Venmo', category:'Transfers' };
   delete tx.ruleId;
@@ -730,6 +766,36 @@ const { reviewReasonFor, reviewFingerprint, applyCategoryRules, seedDefaultCateg
   assert.equal(reviewReasonFor(tx,{counterLeg:true}), null, 'transfer with counter-leg not flagged');
 }
 
+// Counterpart pairing requires the same currency and one-to-one evidence.
+{
+  const usd={id:'leg-usd',amount:5000,date:'2026-10-01',currency:'USD',accountId:'checking',merchant:'Online Transfer',category:'Transfers'};
+  const cad={id:'leg-cad',amount:-5000,date:'2026-10-01',currency:'CAD',accountId:'credit',merchant:'Online Transfer',category:'Transfers'};
+  const cross=buildCounterLegIndex([usd,cad]);
+  assert.equal(hasCounterLeg(usd,cross),false,'raw cents do not pair across currencies');
+  assert.equal(hasCounterLeg(cad,cross),false);
+  const crossState={transactions:[{...usd},{...cad}],categoryRules:[],accounts:[]};
+  refreshReviewFlags(crossState,{full:true});
+  assert.equal(crossState.transactions.find(row=>row.id==='leg-usd').review,true,'cross-currency transfer stays in review');
+  assert.equal(crossState.transactions.find(row=>row.id==='leg-usd').reviewReason,'Transfer has no matching account leg');
+
+  const usdLeg={...usd,id:'leg-usd-2'},usdCounter={...cad,id:'leg-usd-counter',currency:'USD'};
+  const same=buildCounterLegIndex([usdLeg,usdCounter]);
+  assert.equal(hasCounterLeg(usdLeg,same),true,'same-currency opposite legs pair');
+  assert.equal(hasCounterLeg(usdCounter,same),true,'pairing is symmetric');
+
+  const ambiguousRows=[
+    {...usd,id:'amb-positive'},
+    {...usd,id:'amb-negative-a',amount:-5000,accountId:'savings'},
+    {...usd,id:'amb-negative-b',amount:-5000,accountId:'credit'}
+  ];
+  const ambiguous=buildCounterLegIndex(ambiguousRows);
+  assert.equal(hasCounterLeg(ambiguousRows[0],ambiguous),false,'ambiguous counterpart is not auto-paired');
+  assert.equal(counterLegIsAmbiguous(ambiguousRows[0],ambiguous),true);
+  const ambiguousState={transactions:ambiguousRows.map(row=>({...row})),categoryRules:[],accounts:[]};
+  refreshReviewFlags(ambiguousState,{full:true});
+  assert.equal(ambiguousState.transactions.find(row=>row.id==='amb-positive').reviewReason,'Transfer matches more than one account leg','ambiguous transfer remains visible for review');
+}
+
 // manual edit protection: categoryEditVersion > 0 blocks rule application
 {
   const state = { transactions:[{id:'m1',merchant:'Fidelity',amount:40000,date:'2026-10-01',category:'Transfers',override:'Dining',overrideCategoryId:'system:dining',categoryEditVersion:1,accountId:'a1'}], categoryRules:[{id:'r-fid',merchant:'Fidelity',category:'Transfers',categoryId:'system:transfers',profileId:null,enabled:true,createdAt:'2026-10-01'}], accounts:[{id:'a1',profileId:'peter'}] };
@@ -738,7 +804,7 @@ const { reviewReasonFor, reviewFingerprint, applyCategoryRules, seedDefaultCateg
   assert.equal(state.transactions[0].override, before, 'manual edit protected from rule overwrite');
 }
 
-// specificity: amount rule beats longer merchant rule
+// specificity: constraint count dominates, then amount beats a longer merchant
 {
   const tx = { merchant:'Venmo', amount:85000, category:'Transfers' };
   const rules = [
@@ -747,15 +813,34 @@ const { reviewReasonFor, reviewFingerprint, applyCategoryRules, seedDefaultCateg
   ];
   const matches = matchingCategoryRules(tx, rules);
   assert.equal(matches[0].id, 's', 'amount-specific rule wins over generic merchant rule');
+  const scopedTx={...tx,accountId:'checking',source:'plaid'};
+  const scoped={id:'scoped',merchant:'Venmo',accountId:'checking',amount:85000,sources:['plaid'],category:'Housing',categoryId:'system:housing',enabled:true,createdAt:'2026-10-01'};
+  const sourceOnly={id:'source-only',sources:['plaid'],category:'Transfers',categoryId:'system:transfers',enabled:true,createdAt:'2026-10-02'};
+  assert.ok(categoryRuleScore(scoped)>categoryRuleScore(sourceOnly),'more constraints outrank a source-only rule');
+  assert.equal(matchingCategoryRules(scopedTx,[sourceOnly,scoped])[0].id,'scoped','scoped merchant+account+amount rule wins deterministically');
 }
 
-// defaults seeding version marker
+// Shipped defaults are conservative and the previous auto-seeded rules retire.
 {
-  const state = { categoryRules:[], categoryCatalog:[{id:'system:income',name:'Income',archivedAt:null,system:true,profileId:'peter'}] };
-  const added = seedDefaultCategoryRules(state, state.categoryCatalog);
-  assert.ok(added >= 0, 'seedDefaultCategoryRules returns count');
-  const again = seedDefaultCategoryRules(state, state.categoryCatalog);
-  assert.equal(again, 0, 'defaults not re-added after version marker');
+  assert.equal(DEFAULT_CATEGORY_RULES.length,0,'distributable defaults contain no household-specific rules');
+  assert.equal(CATEGORY_RULE_DEFAULTS_VERSION,2);
+  const state={transactions:[{id:'fee',merchant:'Fidelity service fee',amount:2500,date:'2026-10-01',currency:'USD',accountId:'maddie-account',category:'Other'}],categoryRules:[],accounts:[{id:'maddie-account',profileId:'maddie'}]};
+  seedDefaultCategoryRules(state,[{id:'system:transfers',name:'Transfers',archivedAt:null,system:true}]);
+  applyCategoryRules(state);
+  assert.equal(state.transactions[0].override,undefined,'a fee is not recategorized by a shipped transfer default');
+  assert.equal(totals(state.transactions).spend,2500,'the service fee remains spending');
+
+  const migrated={categoryRuleDefaultsVersion:1,categoryRules:[
+     {id:'default:fidelity-transfer',defaultKey:'fidelity-transfer',merchant:'Fidelity',category:'Transfers',categoryId:'system:transfers',enabled:true,createdAt:'2026-10-01'},
+     {id:'default:venmo-rent-850',defaultKey:'venmo-rent-850',merchant:'Venmo',amount:85000,category:'Housing',categoryId:'system:housing',enabled:true,createdAt:'2026-10-01',updatedAt:'2026-10-02'}
+  ],transactions:[{id:'legacy-rent',merchant:'Venmo',amount:85000,date:'2026-10-01',currency:'USD',accountId:'checking',category:'Transfers',override:'Housing',overrideCategoryId:'system:housing',ruleId:'default:fidelity-transfer'}]};
+  const added=seedDefaultCategoryRules(migrated,[{id:'system:transfers',name:'Transfers',archivedAt:null,system:true}]);
+  assert.equal(added,0);
+  assert.deepEqual(migrated.categoryRules.map(rule=>rule.id),['default:venmo-rent-850'],'untouched auto-seeded rules retire; a user-edited rule is preserved');
+  assert.equal(migrated.transactions[0].override,'Housing','retiring a default preserves an existing historical classification');
+  assert.equal(migrated.transactions[0].ruleId,undefined,'retiring a default detaches its historical rule ownership');
+  assert.equal(migrated.transactions[0].categoryEditVersion,1,'preserved historical classification is protected from later rule passes');
+  assert.equal(seedDefaultCategoryRules(migrated,[]),0,'defaults are not re-added after the version marker');
 }
 
 // month scoping
@@ -774,6 +859,31 @@ const { reviewReasonFor, reviewFingerprint, applyCategoryRules, seedDefaultCateg
   tx.confidence = 0.3;
   const fp2 = reviewFingerprint(tx);
   assert.notEqual(fp1, fp2, 'confidence changes alter fingerprint');
+  tx.currency='CAD';
+  assert.notEqual(fp2, reviewFingerprint(tx), 'currency changes alter fingerprint');
+}
+
+// Household acceptance fixture: exact cents stay consistent across profile and combined views.
+{
+  const fixture=[
+    {id:'peter-payroll',profileId:'peter',merchant:'Synthetic payroll',amount:-450000,category:'Income',currency:'USD',date:'2026-10-01',accountId:'peter-checking'},
+    {id:'maddie-payroll',profileId:'maddie',merchant:'Synthetic payroll',amount:-300000,category:'Income',currency:'USD',date:'2026-10-02',accountId:'maddie-checking'},
+    {id:'joint-card-payment',profileId:'joint',merchant:'Synthetic card payment',amount:100000,category:'Transfers',currency:'USD',date:'2026-10-03',accountId:'joint-checking'},
+    {id:'peter-refund',profileId:'peter',merchant:'Synthetic refund',amount:-2500,category:'Groceries',currency:'USD',date:'2026-10-04',accountId:'peter-checking'},
+    {id:'maddie-split-groceries',profileId:'maddie',merchant:'Synthetic split purchase',amount:12000,category:'Groceries',currency:'USD',date:'2026-10-05',accountId:'maddie-checking'},
+    {id:'maddie-split-shopping',profileId:'maddie',merchant:'Synthetic split purchase',amount:8000,category:'Shopping',currency:'USD',date:'2026-10-05',accountId:'maddie-checking'},
+    {id:'peter-transfer-out',profileId:'peter',merchant:'Synthetic savings transfer',amount:50000,category:'Transfers',currency:'USD',date:'2026-10-06',accountId:'peter-checking'},
+    {id:'peter-transfer-in',profileId:'peter',merchant:'Synthetic savings transfer',amount:-50000,category:'Transfers',currency:'USD',date:'2026-10-06',accountId:'peter-savings'},
+    {id:'joint-recurring-bill',profileId:'joint',merchant:'Synthetic recurring bill',amount:150000,category:'Housing',currency:'USD',date:'2026-10-07',accountId:'joint-checking'},
+    {id:'pending-purchase',profileId:'joint',merchant:'Synthetic pending',amount:9999,category:'Groceries',currency:'USD',date:'2026-10-08',accountId:'joint-checking',pending:true},
+    {id:'foreign-purchase',profileId:'joint',merchant:'Synthetic foreign',amount:5000,category:'Groceries',currency:'CAD',date:'2026-10-09',accountId:'joint-checking'}
+  ];
+  assert.deepEqual(totals(fixture),{income:750000,spend:167500,categories:{Groceries:9500,Shopping:8000,Housing:150000}},'combined totals exclude transfers, pending rows, and non-USD rows while refunds reduce spending');
+  const scoped=profileId=>totals(fixture.filter(row=>profileId==='combined'?true:effectiveTransactionProfile(row,{profileId})===profileId));
+  assert.deepEqual(scoped('peter'),{income:450000,spend:-2500,categories:{Groceries:-2500}},'Peter’s payroll and refund reconcile independently while his own-account transfer is excluded');
+  assert.deepEqual(scoped('maddie'),{income:300000,spend:20000,categories:{Groceries:12000,Shopping:8000}},'Maddie’s split purchase keeps both category parts');
+  assert.deepEqual(scoped('joint'),{income:0,spend:150000,categories:{Housing:150000}},'Joint’s card payment and pending row do not inflate spending');
+  assert.deepEqual(scoped('combined'),totals(fixture),'the Household view equals the sum of the same exact-cent transactions');
 }
 
 console.log('Rules engine improvement tests: PASS');

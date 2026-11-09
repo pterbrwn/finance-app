@@ -2,6 +2,19 @@
 
 Code-only log. No production records, account names, credentials, private origins, or balances belong here.
 
+## R14 — Daily workflow clarity and browser verification (2026-11-09 UTC)
+
+**Status:** Implementation and automated verification complete; uncommitted and not deployed.
+
+- Overview now leads with actual monthly metrics and recent transactions; comparisons, income/account detail, and trends use disclosures. Planned income and category allowance are explicitly distinguished from recorded deposits and account cash.
+- Bills shows upcoming dates before creation. First due date derives recurring day/month, with a schedule explanation; browser coverage verifies derivation, saving, matching, and preservation of a draft during delayed refresh.
+- Recovery uses plain-language uncertainty and explicit checking/dismissal actions. Rule editing uses a blank category choice, signed-amount guidance, and 44px controls.
+- Updated browser interactions for collapsed sections and new labels. Found and fixed two UTC-date fixtures that produced future balance dates after UTC midnight but before Chicago midnight; production date validation remains intact.
+- All five profiles PASS on identical 130-file candidate `009b2c4c6926d8b3d44700328c4fdb5792988dde3782caa379539b0ff6f9a2e3`: fast (8 suites including build), integration (6), recovery (3), browser (3 suites plus all 23 workflows), release (4). Reports: `~/.cache/ledger-ux-final-{fast,integration,recovery,browser,release}.json`.
+- Broad browser acceptance passed responsive layouts, keyboard flows, and its Axe severity gate. Fresh desktop/390px screenshots of Overview, Bills creation, and rule editing were inspected in `~/.cache/ledger-ux-final/`; visible rule inputs/selects measure 44px. Temporary screenshot server and its synthetic records were removed.
+- Mechanical design scan reported only the incumbent Inter font warning; retained intentionally under DESIGN.md. `git diff --check` passed.
+- Physical assistive-technology/mobile-keyboard checks, uncoached household acceptance, real bank-workflow selection, and off-device encrypted backup/restore acceptance still require household participation. Existing critique score is historical, not a new score for this pass.
+
 ## T00 — Safe implementation baseline
 
 **Status:** Complete. Source baseline, synthetic test baseline, and private backup/restore rehearsal are recorded.
@@ -534,3 +547,32 @@ Code-only log. No production records, account names, credentials, private origin
 - Activation reports success; post-activation checks show `ledger.service` active and `/api/health` on `7b922e5`, schema 3. The sync timer remains inactive; no provider sync ran.
 
 **Next:** Continue the remaining B01/B02 and BP-F1/BP01–BP12 acceptance work recorded above; this release does not close those broader QA gaps.
+
+## R12 — Household-readiness plan: automation, review, status, and phone polish
+
+**Status:** Code-side stages A–D implemented in the worktree on top of `4143cf8`; all five profiles pass on the same tested candidate. Stage E–F operator and human gates remain blocked. No deployment, production migration, provider sync, or history rewrite occurred.
+
+- Corrected financial automation: one provider/import confidence contract, low-confidence review flags, currency-aware one-to-one transfer pairing with ambiguous candidates left reviewable, deterministic rule precedence, explicit profile/account scope, and empty distributable rule defaults. Rules no longer exempt records from review; manual category choices are protected by `categoryEditVersion`; untouched legacy auto-seeded rules retire while edited rules survive.
+- Completed the daily workflow: visible Add transaction, review inbox with reasons/counts/per-row acceptance/undo, manual amount/date/category/account/description editing with revision checks, received-money categories for income/refund/own-account transfer, and accessible rule create/preview/pause/enable/edit/delete with affected-record confirmation.
+- Centralized recovery and sync readiness for the Settings summary, banners, top bar, and details. Unknown, incomplete, unverified, never-run, failed, and stale states are distinct; a schedule is never treated as evidence of a successful bank update.
+- Phone polish keeps primary transaction actions and the first row visible, removes horizontal page overflow at 320/390/768/1440px, raises primary targets to 44px, fixes tablet table containment, and corrects an Overview budget contrast failure. Settled patterns are recorded in `DESIGN.md`.
+- Added an exact-cent household fixture covering Peter/Maddie/Joint payroll, credit-card payment, refund, split purchase, own-account transfer, recurring bill, pending row, and non-USD row. Existing focused cases cover two-person conflicts, lost responses, reload recovery, export reconciliation, and immutable release rehearsal.
+- Replaced the contradictory README production-code claims with one owner-reported deployment record and marked the readiness checkout as a candidate.
+
+**Verification:** Pinned Node `v24.22.1`, identical candidate SHA-256 `de5bbccead3171c63c7779a08754725e05a114c0a6cfb5e5fe0a999818b2dbdb` (129 files) before and after each profile. Fast PASS `14:33:23Z`, integration PASS `14:33:31Z`, recovery PASS `14:33:35Z`, browser PASS `14:39:46Z`, release PASS `14:39:59Z`. Browser acceptance includes 1440/768/390/320px layout, 720px zoom proxy, keyboard/dialog workflows, responsive overflow and touch-target checks, focused manual/review/rule coverage, and zero serious/critical Axe violations in tested states. `npm audit --omit=dev` reported zero vulnerabilities. Fresh populated screenshots for Overview, Transactions, Budgets, Bills, and Accounts at 1440/768/390/320px are under `~/.cache/ledger-readiness-screens-final`; they were generated by the passing browser run but not independently viewed.
+
+**Remaining blocked gates:** Off-device encrypted backup destination and restore rehearsal; live bank versus manual/CSV workflow choice and real acceptance; physical screen-reader and 200% zoom checks; uncoached Maddie/Peter phone tasks; full monthly statement reconciliation. Tailscale login remains Peter's task.
+
+**Next:** Peter completes the operator/human gates above, then the household runs one full monthly cycle. Re-run the five profiles on the exact committed candidate before any release activation.
+
+## R13 — Review follow-up: migration safety, rule controls, and readiness evidence
+
+**Status:** Review findings implemented and verified; no deployment or production data change occurred.
+
+- Retiring untouched distributable default rules now detaches their ownership while preserving and protecting existing historical classifications. Edited or disabled legacy rules remain available.
+- Editing a paused rule preserves its paused state. Pause and enable now preview affected records and ask for confirmation when existing records would change. Rule conflicts refresh the revision and rule list without discarding the open draft.
+- Rule amount filters accept signed cents so refunds and received money can be matched explicitly.
+- Backup readiness is not healthy without valid success recency evidence. Bank readiness evaluates every active connection, so a fresh connection cannot mask a stale or never-updated one.
+- Added regression coverage for migration preservation, missing backup recency, mixed bank freshness, paused-rule editing, and signed rule amounts.
+
+**Verification:** fast, integration, recovery, browser, and release profiles all PASS on candidate SHA-256 `76ec9f9763a3757bf8e165fb41a1c28f08a0b5ddfab96d788c9e3400e6375a8a` (129 files). `npm audit --omit=dev --audit-level=high` reports zero vulnerabilities.

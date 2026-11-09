@@ -52,7 +52,7 @@ try{
   const observationParts=new Intl.DateTimeFormat('en-CA',{timeZone:'America/Chicago',year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()),observationDate=observationParts.find(part=>part.type==='year').value+'-'+observationParts.find(part=>part.type==='month').value+'-'+observationParts.find(part=>part.type==='day').value;
   await audit('overview');
   for(const view of ['transactions','budgets','commitments','accounts','investments','goals','home','settings'])await visit(view);
-  await page.locator('details.settings-technical > summary').click();const settingsText=await page.locator('body').innerText();assert.match(settingsText,/Sync timer[\s\S]*bank data sync timer/i,'Settings explains that sync scheduling refers to bank data sync');assert.match(settingsText,/Backup timer[\s\S]*Next backup run|Backup timer[\s\S]*No backup run is scheduled/i,'Settings labels the separate local backup timer and its next run');
+  const settingsDetails=page.locator('details.settings-technical');if(!await settingsDetails.evaluate(element=>element.open))await settingsDetails.locator('summary').click();const settingsText=await page.locator('body').innerText();assert.match(settingsText,/Bank updates[\s\S]*Schedule[\s\S]*Last successful update/i,'Settings shows the bank update schedule separately from the last successful update');assert.match(settingsText,/A schedule is not evidence that a bank update succeeded/i,'Settings explains that scheduling does not establish a successful bank update');assert.match(settingsText,/Backup timer[\s\S]*Next backup run|Backup timer[\s\S]*No backup run is scheduled/i,'Settings labels the separate local backup timer and its next run');
 
   await page.locator('[data-view="overview"]').first().click();
   const beforeSample=await page.evaluate(async()=>fetch('/api/state').then(response=>response.json()).then(state=>({revision:state.revision,snapshots:state.balanceSheetSnapshots.length})));
@@ -128,6 +128,7 @@ try{
   const bulkImportBatch=await(await bulkCommitResponse).json();
   await page.keyboard.press('Escape');
   await page.locator('[data-view="overview"]').first().click();
+  await page.getByText('Compare personal and shared plans',{exact:true}).click();
   await page.locator('.household-comparison').waitFor();await page.locator('.household-category-comparison').waitFor();
   const overviewRecent=page.locator('.transactions tbody tr').filter({hasText:'Synthetic bulk market'}).locator('[data-category]');
   await overviewRecent.waitFor();
@@ -622,6 +623,37 @@ try{
   const zoomOverflow=await page.evaluate(()=>{const content=document.querySelector('.content');return{effectiveViewport:innerWidth,contentWidth:content?.clientWidth,contentScrollWidth:content?.scrollWidth,document:document.documentElement.scrollWidth};});
   assert.ok(zoomOverflow.contentScrollWidth<=zoomOverflow.contentWidth+1,`essential content overflows at 200% zoom-equivalent 720 CSS px: ${JSON.stringify(zoomOverflow)}`);
   await audit('category-200%-zoom');
+  const responsiveViews=['overview','transactions','budgets','commitments','accounts'];
+  for(const width of [1440,768,390,320]){
+    await page.setViewportSize({width,height:900});
+    for(const view of responsiveViews){
+      if(width<601)await page.locator('#mobile-page-select').selectOption(view);else await page.locator(`[data-view="${view}"]`).first().click();
+      await page.waitForTimeout(150);
+      const layout=await page.evaluate(minimumTarget=>{
+        const visible=element=>{const rect=element.getBoundingClientRect();return rect.width>0&&rect.height>0&&rect.bottom>0&&rect.top<document.documentElement.scrollHeight;};
+        const measured=selector=>[...document.querySelectorAll(selector)].filter(visible).map(element=>{const rect=element.getBoundingClientRect();return{label:(element.getAttribute('aria-label')||element.id||element.textContent||element.tagName).trim().slice(0,60),height:Math.round(rect.height)};});
+        const targets=measured('.content .btn,.content select,.content input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"])'),summaries=measured('.content summary');
+        const overflowing=[...document.querySelectorAll('.content *')].map(element=>{const rect=element.getBoundingClientRect();return{element,rect};}).filter(row=>row.rect.right>innerWidth+1||row.rect.left<-1).slice(0,8).map(row=>({tag:row.element.tagName,id:row.element.id,className:String(row.element.className).slice(0,80),left:Math.round(row.rect.left),right:Math.round(row.rect.right),width:Math.round(row.rect.width)}));
+        return{viewport:innerWidth,document:document.documentElement.scrollWidth,body:document.body.scrollWidth,smallTargets:targets.filter(target=>target.height<minimumTarget),smallSummaries:summaries.filter(target=>target.height<24),overflowing};
+      },width<=600?40:28);
+      assert.ok(layout.document<=layout.viewport+1&&layout.body<=layout.viewport+1,`${view} has no horizontal page overflow at ${width}px: ${JSON.stringify(layout)}`);
+      assert.deepEqual(layout.smallTargets,[],`${view} interactive controls have comfortable touch targets at ${width}px`);
+      assert.deepEqual(layout.smallSummaries,[],`${view} secondary disclosures keep a usable target at ${width}px`);
+      if(view==='transactions'&&width<=390){const addTransaction=await page.locator('#add-transaction').boundingBox();assert.ok(addTransaction&&addTransaction.y>=0&&addTransaction.y+addTransaction.height<=900,`Add transaction remains visible without scrolling at ${width}px: ${JSON.stringify(addTransaction)}`);}
+      if(width===390)await audit(`${view}-${width}px`);
+    }
+  }
+  if(process.env.LEDGER_CAPTURE_SCREENS_DIR){
+    const screens=process.env.LEDGER_CAPTURE_SCREENS_DIR;await mkdir(screens,{recursive:true,mode:0o700});
+    for(const width of [1440,768,390,320]){
+      await page.setViewportSize({width,height:900});
+      for(const view of responsiveViews){
+        if(width<601)await page.locator('#mobile-page-select').selectOption(view);else await page.locator(`[data-view="${view}"]`).first().click();
+        await page.waitForTimeout(150);
+        await page.screenshot({path:join(screens,`${view}-${width}.png`),fullPage:true});
+      }
+    }
+  }
   await page.setViewportSize({width:1440,height:1000});
   const actualApiFailures=apiFailures.map(row=>row.method+' '+row.path+' '+row.status).sort(),expectedApiFailures=['GET /api/month-summary 500','POST /api/budget 409','POST /api/category-update 409','POST /api/manual-account 409','POST /api/scenario-budget 500','POST /api/scenario-budget 500','POST /api/scenario-goal 500','POST /api/scenario-goal 500'].sort();
   assert.deepEqual(actualApiFailures,expectedApiFailures,'only the explicitly injected refresh, conflict, and replay-safe apply failures occur');

@@ -6,7 +6,7 @@ import { monthlyBudgetAmount, validateBudgetSchedule } from '../shared/budget-fr
 import { reportingDate } from '../shared/dates.mjs';
 import { cents } from '../shared/money.mjs';
 import { accountRecord, investmentHoldings, providerAccountKey } from '../shared/investments.mjs';
-import { addSafeCents, categoryFor, fromPlaid, totals } from '../shared/reporting.mjs';
+import { addSafeCents, categoryFor, fromPlaid, hasLowConfidence, totals } from '../shared/reporting.mjs';
 import { applyChanges, applySyncPages } from '../shared/reconciliation.mjs';
 import { applyCategoryRules, matchingCategoryRules, refreshReviewFlags, markTransactionsReviewed, reconcileTransactionAutomation, seedDefaultCategoryRules, categoryRuleScore } from '../shared/rules.mjs';
 import { eligibleCashAccounts, summarizeGoals } from '../shared/goals.mjs';
@@ -70,7 +70,9 @@ function normalizeCategoryRule(state, input = {}, existing = null) {
   }
   const category = categoryRuleCategory(state, input);
   if (!category || !['expense','income','transfer'].includes(category.kind) || state.budgetItemSettings?.[category.id]?.itemType === 'allocation') throw apiError('Choose a valid transaction category for this rule.');
-  const profileId = category.system ? null : (category.profileId || 'peter');
+  const requestedProfile = input.profileId === undefined ? (existing?.profileId ?? null) : input.profileId;
+  if (requestedProfile !== null && requestedProfile !== '' && !['peter','maddie','joint'].includes(requestedProfile)) throw apiError('Choose Household, Peter, Maddie, or Joint for this rule scope.');
+  const profileId = category.system ? (requestedProfile || null) : (category.profileId || 'peter');
   return { merchant, counterparty, accountId, amount, category: category.name, categoryId: category.id, profileId,
     monthFrom, monthTo, sources,
     ...(existing ? { id: existing.id, createdAt: existing.createdAt } : {}) };
@@ -473,7 +475,11 @@ async function publicState(state, env) {
   const goalSummary=summarizeGoals(state.goals||[],state.goalAllocations||[],state.accounts,state.items,new Date());
   const propertySummary=summarizeProperties(state.properties||[],state.mortgages||[],state.accounts,state.items||[]);
   let balanceSheet=summarizeBalanceSheet(state.accounts,state.items,propertySummary,new Date());if(state.investmentOwnershipIncomplete)balanceSheet={...balanceSheet,incomplete:true,coverage:{...balanceSheet.coverage,incompleteInvestmentOwnership:true},netWorthLabel:'Known net worth · incomplete investment ownership'};
-  const {operationResults,budgetChangeHistory,...privateSafeState}=state;return { ...privateSafeState, revision:Number.isSafeInteger(state.revision)?state.revision:0, budgets, budgetTemplates: templates, monthlyBudgets: overrides, monthlyBudgetSchedules:state.monthlyBudgetSchedules||{}, budgetTemplateSchedules:state.budgetTemplateSchedules||{}, incomePlanTemplates:state.incomePlanTemplates||[], monthlyIncomePlans:state.monthlyIncomePlans||{}, monthlyBudgetOutlooks:state.monthlyBudgetOutlooks||{}, annualIncomeRecords:state.annualIncomeRecords||[], annualGrossIncomeRecords:state.annualGrossIncomeRecords||[], budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], goalSummary, propertySummary, balanceSheet, owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null}, backup: typeof env.getBackupStatus==='function'?await env.getBackupStatus():{state:'unavailable',timer:{state:'unavailable',enabled:null,active:null}} } };
+  const reviewRows=(state.transactions||[]).filter(transaction=>transaction.review===true||transaction.review===undefined&&(hasLowConfidence(transaction)||(transaction.override||transaction.category)==='Other'));
+  const reviewedRows=(state.transactions||[]).filter(transaction=>typeof transaction.reviewedAt==='string'&&transaction.reviewedAt);
+  const lastReviewedAt=reviewedRows.reduce((latest,transaction)=>transaction.reviewedAt>latest?transaction.reviewedAt:latest,'');
+  const lastReview=lastReviewedAt?{reviewedAt:lastReviewedAt,ids:reviewedRows.filter(transaction=>transaction.reviewedAt===lastReviewedAt).map(transaction=>transaction.id)}:null;
+  const {operationResults,budgetChangeHistory,...privateSafeState}=state;return { ...privateSafeState, revision:Number.isSafeInteger(state.revision)?state.revision:0, reviewCount:reviewRows.length, lastReview, budgets, budgetTemplates: templates, monthlyBudgets: overrides, monthlyBudgetSchedules:state.monthlyBudgetSchedules||{}, budgetTemplateSchedules:state.budgetTemplateSchedules||{}, incomePlanTemplates:state.incomePlanTemplates||[], monthlyIncomePlans:state.monthlyIncomePlans||{}, monthlyBudgetOutlooks:state.monthlyBudgetOutlooks||{}, annualIncomeRecords:state.annualIncomeRecords||[], annualGrossIncomeRecords:state.annualGrossIncomeRecords||[], budgetHistoryUnavailableBefore: state.budgetHistoryUnavailableBefore || currentBudgetMonth, categories: categories(state), categoryCatalog: categoryCatalog(state), holdings: state.holdings || [], goalSummary, propertySummary, balanceSheet, owner: undefined, lease: undefined, items: state.items.map(({ token, cursor, ...i }) => i), setup: { localOnly: !!env.LOCAL_ONLY, configured: ready(env), environment: env.PLAID_ENV || 'not configured', syncTimer: typeof env.getSyncTimerStatus==='function'?await env.getSyncTimerStatus():{state:'unavailable',enabled:null,active:null}, backup: typeof env.getBackupStatus==='function'?await env.getBackupStatus():{state:'unavailable',timer:{state:'unavailable',enabled:null,active:null}} } };
 }
 function budgetActuals(state,month){
   const aliases=new Map(Object.entries(state.budgetCategoryIds||{}).map(([id,name])=>[name,id]));
@@ -715,7 +721,7 @@ export default {
       if(path==='/api/transactions'&&request.method==='GET'){
         const query=url.searchParams,page=Number(query.get('page')||1),limit=Math.min(100,Math.max(1,Number(query.get('limit')||50))),search=(query.get('search')||'').slice(0,120).toLocaleLowerCase('en-US'),category=query.get('category')||'',accountId=query.get('account')||'',from=query.get('from')||'',to=query.get('to')||'',review=query.get('review')==='true';
         if(!Number.isSafeInteger(page)||page<1||!Number.isSafeInteger(limit)||from&&!validDateOnly(from)||to&&!validDateOnly(to))throw apiError('Choose a valid transaction page and date range.');if(from&&to&&from>to)throw apiError('Start date must be on or before end date.');
-        const matches=state.transactions.filter(t=>(!search||String(t.merchant||'').toLocaleLowerCase('en-US').includes(search))&&(!category||transactionMatchesCategory(t,category))&&(!accountId||t.accountId===accountId)&&(!from||t.date>=from)&&(!to||t.date<=to)&&(!review||t.review===true||t.review===undefined&&(t.confidence!==undefined&&t.confidence<0.5||(t.override||t.category)==='Other'))).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
+        const matches=state.transactions.filter(t=>(!search||String(t.merchant||'').toLocaleLowerCase('en-US').includes(search))&&(!category||transactionMatchesCategory(t,category))&&(!accountId||t.accountId===accountId)&&(!from||t.date>=from)&&(!to||t.date<=to)&&(!review||t.review===true||t.review===undefined&&(hasLowConfidence(t)||(t.override||t.category)==='Other'))).sort((a,b)=>b.date.localeCompare(a.date)||a.id.localeCompare(b.id));
         return response({page,limit,total:matches.length,transactions:matches.slice((page-1)*limit,page*limit),revision:state.revision});
       }
       if(path==='/api/annual-income'&&request.method==='POST'){
@@ -888,20 +894,6 @@ export default {
         const saved = await mutateWithReplay(env,'category',input,s => { checkRevision(s,input); const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); const live = categoryCatalog(s).find(c => c.id === category.id && !c.archivedAt); if (!live) throw apiError('That category is no longer available.', 409); t.override = live.name; t.overrideCategoryId = live.id;delete t.ruleId;delete t.ruleAppliedAt;t.categoryEditVersion=(Number.isSafeInteger(t.categoryEditVersion)?t.categoryEditVersion:0)+1;if (live.name === 'Transfers') refreshReviewFlags(s,{full:true}); else refreshReviewFlags(s,{full:false,onlyIds:new Set([t.id])}); },(s,revision)=>({ok:true,revision}),[input.id]);
         return response(saved.result);
       }
-      if(path==='/api/category-rules'&&request.method==='POST'){
-        const input=await body(request),action=input.action==='delete'?'delete':'save',replay=await findOperationReplay(env,state,'category-rules',input);if(replay.found)return response(replay.response);
-        const existing=action==='delete'||input.id?(state.categoryRules||[]).find(rule=>rule.id===input.id)||null:null;
-        if((action==='delete'||input.id)&&!existing)throw apiError('Category rule not found.',404);
-        const normalized=action==='save'?normalizeCategoryRule(state,input,existing):null;let savedRule=null;
-        const mutation=await mutateWithReplay(env,'category-rules',input,s=>{checkRevision(s,input);s.categoryRules||=[];const live=input.id?s.categoryRules.find(rule=>rule.id===input.id)||null:null;if(input.id&&!live)throw apiError('Category rule not found.',404);if(action==='delete')s.categoryRules=s.categoryRules.filter(rule=>rule.id!==input.id);else{savedRule={...(live||{}),...normalized,id:live?.id||crypto.randomUUID(),createdAt:live?.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),enabled:input.enabled!==false};if(live)Object.assign(live,savedRule);else s.categoryRules.push(savedRule);}reconcileTransactionAutomation(s,{seed:seedRules});},(s,revision)=>({ok:true,revision,rule:savedRule,reviewCount:(s.transactions||[]).filter(transaction=>transaction.review===true).length}),null);
-        return response(mutation.result);
-      }
-      if(path==='/api/transactions'&&request.method==='GET'){
-        if(typeof input.reviewed!=='boolean')throw apiError('Choose whether these transactions are reviewed.');
-        const replay=await findOperationReplay(env,state,'transactions-review',input);if(replay.found)return response(replay.response);
-        const mutation=await mutateWithReplay(env,'transactions-review',input,s=>{checkRevision(s,input);const selected=s.transactions.filter(row=>ids.includes(row.id));if(selected.length!==ids.length)throw apiError('One or more selected transactions are no longer available.',409);markTransactionsReviewed(selected,{reviewed:input.reviewed});refreshReviewFlags(s,{full:false,onlyIds:new Set(ids)});},(s,revision)=>({ok:true,revision,count:ids.length,remaining:(s.transactions||[]).filter(transaction=>transaction.review===true).length}),ids);
-        return response(mutation.result);
-      }
       if(path==='/api/category-bulk'&&request.method==='POST'){
         const input=await body(request),ids=Array.isArray(input.ids)?[...new Set(input.ids)]:[],category=categoryCatalog(state).find(c=>c.id===input.categoryId&&!c.archivedAt);
         if(!ids.length||ids.length>100||ids.some(id=>typeof id!=='string')||!category||!['expense','income','transfer'].includes(category.kind)||state.budgetItemSettings?.[category.id]?.itemType==='allocation')throw apiError('Choose up to 100 transactions and a valid transaction category.');
@@ -914,14 +906,6 @@ export default {
         const batch=state.categoryEditBatches?.find(item=>item.id===input.batchId);if(!batch)throw apiError('Bulk edit undo record not found.',404);const scopeConflicts=batchOwnershipConflicts(state,batch.changes.map(change=>change.id),[],input.profileId);if(scopeConflicts.length)throw apiError(scopeConflicts.join(' '),409);
         let undone=0;const saved=await mutateWithReplay(env,'category-bulk-undo',input,s=>{checkRevision(s,input);const index=s.categoryEditBatches.findIndex(item=>item.id===input.batchId);if(index<0)throw apiError('Bulk edit undo record not found.',404);const record=s.categoryEditBatches[index],conflicts=batchOwnershipConflicts(s,record.changes.map(change=>change.id),[],input.profileId);if(conflicts.length)throw apiError(conflicts.join(' '),409);s.categoryEditBatches.splice(index,1);for(const prior of record.changes){const transaction=s.transactions.find(t=>t.id===prior.id);if(!transaction||transaction.overrideCategoryId!==record.categoryId||prior.afterVersion!==undefined&&transaction.categoryEditVersion!==prior.afterVersion)continue;if(prior.override===undefined)delete transaction.override;else transaction.override=prior.override;if(prior.overrideCategoryId===undefined)delete transaction.overrideCategoryId;else transaction.overrideCategoryId=prior.overrideCategoryId;transaction.categoryEditVersion=(Number.isSafeInteger(transaction.categoryEditVersion)?transaction.categoryEditVersion:0)+1;undone++;}},(s,revision)=>({ok:true,revision,undone,skipped:batch.changes.length-undone}),batch.changes.map(change=>change.id));
         return response(saved.result);
-      }
-      if(path==='/api/category-rules'&&request.method==='POST'){
-        const input=await body(request),action=input.action==='delete'?'delete':'save',replay=await findOperationReplay(env,state,'category-rules',input);if(replay.found)return response(replay.response);
-        const existing=action==='delete'||input.id?(state.categoryRules||[]).find(rule=>rule.id===input.id)||null:null;
-        if((action==='delete'||input.id)&&!existing)throw apiError('Category rule not found.',404);
-        const normalized=action==='save'?normalizeCategoryRule(state,input,existing):null;let savedRule=null;
-        const mutation=await mutateWithReplay(env,'category-rules',input,s=>{checkRevision(s,input);s.categoryRules||=[];const live=input.id?s.categoryRules.find(rule=>rule.id===input.id)||null:null;if(input.id&&!live)throw apiError('Category rule not found.',404);if(action==='delete')s.categoryRules=s.categoryRules.filter(rule=>rule.id!==input.id);else{savedRule={...(live||{}),...normalized,id:live?.id||crypto.randomUUID(),createdAt:live?.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),enabled:input.enabled!==false};if(live)Object.assign(live,savedRule);else s.categoryRules.push(savedRule);}reconcileTransactionAutomation(s,{seed:seedRules});},(s,revision)=>({ok:true,revision,rule:savedRule,reviewCount:(s.transactions||[]).filter(transaction=>transaction.review===true).length}),null);
-        return response(mutation.result);
       }
       if(path==='/api/category-rules-preview'&&(request.method==='POST'||request.method==='GET')){
         let candidate=null;
@@ -979,8 +963,31 @@ export default {
         const wanted=input.direction==='received'&&!input.category?'Income':input.category,catalog=categoryCatalog(state).filter(row=>!row.archivedAt),category=catalog.find(row=>input.categoryId&&row.id===input.categoryId)||catalog.find(row=>row.name===wanted);
         if(!category||!['expense','income','transfer'].includes(category.kind)||state.budgetItemSettings?.[category.id]?.itemType==='allocation')throw apiError('Choose a valid category.');
         if(!category.system&&(category.profileId||'peter')!==(account.profileId??null))throw apiError('That category belongs to someone else. Choose another category.');
-        const id='manual-'+crypto.randomUUID(),transaction={id,itemId:null,accountId:account.id,date:input.date,merchant,amount:input.direction==='received'?-input.amount:input.amount,category:category.name,pending:false,currency:'USD',source:'manual'};
-        const saved=await mutateWithReplay(env,'transaction-add',input,s=>{checkRevision(s,input);if(!s.accounts.some(row=>row.id===account.id&&!row.archivedAt))throw apiError('Choose one of your accounts.',409);s.transactions.push(transaction);s.owner=user;},(s,revision)=>({ok:true,revision,transaction}),[id]);
+        const id='manual-'+crypto.randomUUID(),transaction={id,itemId:null,accountId:account.id,date:input.date,merchant,amount:input.direction==='received'?-input.amount:input.amount,category:category.name,override:category.name,overrideCategoryId:category.id,categoryEditVersion:1,pending:false,currency:account.currency||'USD',source:'manual'};
+        const saved=await mutateWithReplay(env,'transaction-add',input,s=>{checkRevision(s,input);if(!s.accounts.some(row=>row.id===account.id&&!row.archivedAt))throw apiError('Choose one of your accounts.',409);s.transactions.push(transaction);refreshReviewFlags(s,{full:true});s.owner=user;},(s,revision)=>({ok:true,revision,transaction}),[id]);
+        return response(saved.result);
+      }
+      if(path==='/api/transaction-edit'&&request.method==='POST'){
+        const input=await body(request),replay=await findOperationReplay(env,state,'transaction-edit',input);if(replay.found)return response(replay.response);
+        const transaction=state.transactions.find(row=>row.id===input.id);
+        if(!transaction)throw apiError('Transaction not found.',404);
+        if(transaction.source!=='manual')throw apiError('Only transactions you added by hand can be edited.');
+        const account=state.accounts.find(row=>row.id===input.accountId);
+        if(!account||account.archivedAt)throw apiError('Choose one of your accounts.');
+        if(!(account.manual===true||account.source==='csv'||account.source==='manual'))throw apiError('Edit transactions in accounts you track by hand. Bank-connected accounts fill in automatically.');
+        const merchant=typeof input.merchant==='string'?input.merchant.trim():'';
+        if(!merchant||merchant.length>100)throw apiError('Enter what the transaction was for (up to 100 characters).');
+        if(!validDateOnly(input.date)||input.date<'2000-01-01'||input.date>dateInReportingZone())throw apiError('Choose a date that is not in the future.');
+        if(!Number.isSafeInteger(input.amount)||input.amount<1||input.amount>100_000_000_000)throw apiError('Enter an amount greater than zero.');
+        if(input.direction!=='spent'&&input.direction!=='received')throw apiError('Choose whether money was spent or received.');
+        const wanted=input.direction==='received'&&!input.category?'Income':input.category,catalog=categoryCatalog(state).filter(row=>!row.archivedAt),category=catalog.find(row=>input.categoryId&&row.id===input.categoryId)||catalog.find(row=>row.name===wanted);
+        if(!category||!['expense','income','transfer'].includes(category.kind)||state.budgetItemSettings?.[category.id]?.itemType==='allocation')throw apiError('Choose a valid category.');
+        if(!category.system&&(category.profileId||'peter')!==(account.profileId??null))throw apiError('That category belongs to someone else. Choose another category.');
+        const nextAmount=input.direction==='received'?-input.amount:input.amount;
+        const linkedNow=row=>(state.transactionSplits||[]).some(split=>split.parentId===row.id||split.transactionId===row.id)||(state.transactionReimbursements||[]).some(link=>link.status!=='unlinked'&&(link.transactionId===row.id||link.reimbursesTransactionId===row.id))||(state.commitmentMatches||[]).some(match=>match.status==='user-confirmed'&&match.transactionId===row.id);
+        if(linkedNow(transaction)&&(input.accountId!==transaction.accountId||input.date!==transaction.date||nextAmount!==transaction.amount))throw apiError('This transaction is linked to a split, refund, or bill. Remove that link before changing its account, date, or amount.',409);
+        let savedTransaction;
+        const saved=await mutateWithReplay(env,'transaction-edit',input,s=>{checkRevision(s,input);const live=s.transactions.find(row=>row.id===input.id);if(!live)throw apiError('Transaction not found.',404);if(live.source!=='manual')throw apiError('Only transactions you added by hand can be edited.',409);const linked=(s.transactionSplits||[]).some(split=>split.parentId===live.id||split.transactionId===live.id)||(s.transactionReimbursements||[]).some(link=>link.status!=='unlinked'&&(link.transactionId===live.id||link.reimbursesTransactionId===live.id))||(s.commitmentMatches||[]).some(match=>match.status==='user-confirmed'&&match.transactionId===live.id);if(linked&&(input.accountId!==live.accountId||input.date!==live.date||nextAmount!==live.amount))throw apiError('This transaction is linked to a split, refund, or bill. Remove that link before changing its account, date, or amount.',409);live.accountId=account.id;live.date=input.date;live.merchant=merchant;live.amount=nextAmount;live.category=category.name;live.override=category.name;live.overrideCategoryId=category.id;live.categoryEditVersion=(Number.isSafeInteger(live.categoryEditVersion)?live.categoryEditVersion:0)+1;live.currency=account.currency||'USD';live.updatedAt=new Date().toISOString();refreshReviewFlags(s,{full:true});s.owner=user;savedTransaction=live;},(s,revision)=>({ok:true,revision,transaction:savedTransaction}),[input.id]);
         return response(saved.result);
       }
       if(path==='/api/transaction-remove'&&request.method==='POST'){
@@ -991,7 +998,7 @@ export default {
         if(transaction.source!=='manual')throw apiError('Only transactions you added by hand can be removed.');
         const linked=(state.transactionSplits||[]).some(row=>row.parentId===transaction.id||row.transactionId===transaction.id)||(state.transactionReimbursements||[]).some(row=>row.status!=='unlinked'&&(row.transactionId===transaction.id||row.reimbursesTransactionId===transaction.id))||(state.commitmentMatches||[]).some(row=>row.status==='user-confirmed'&&row.transactionId===transaction.id);
         if(linked)throw apiError('This transaction is linked to a split, refund, or bill. Remove that link first.',409);
-        const saved=await mutateWithReplay(env,'transaction-remove',input,s=>{checkRevision(s,input);const index=s.transactions.findIndex(row=>row.id===input.id);if(index<0)throw apiError('Transaction not found.',404);s.transactions.splice(index,1);s.owner=user;},(s,revision)=>({ok:true,revision,removed:input.id}),[input.id]);
+        const saved=await mutateWithReplay(env,'transaction-remove',input,s=>{checkRevision(s,input);const index=s.transactions.findIndex(row=>row.id===input.id);if(index<0)throw apiError('Transaction not found.',404);s.transactions.splice(index,1);refreshReviewFlags(s,{full:true});s.owner=user;},(s,revision)=>({ok:true,revision,removed:input.id}),[input.id]);
         return response(saved.result);
       }
       if(path==='/api/import-undo'&&request.method==='POST'){

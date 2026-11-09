@@ -46,11 +46,39 @@ function providerCategory(transaction) {
   return primary || detailed ? { ...(primary ? { primary } : {}), ...(detailed ? { detailed } : {}), ...(confidence ? { confidence } : {}) } : undefined;
 }
 
+// One numeric confidence contract for provider categories, imported rows, and
+// manual records. Provider text levels are normalized here so review decisions
+// never have to compare a string such as "LOW" against a number.
+export const LOW_CONFIDENCE_THRESHOLD = 0.5;
+const PROVIDER_CONFIDENCE = Object.freeze({ VERY_HIGH: 1, HIGH: 0.9, MEDIUM: 0.7, LOW: 0.3, UNKNOWN: 0 });
+
+export function normalizeConfidence(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : null;
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text) return null;
+  const provider = PROVIDER_CONFIDENCE[text.toUpperCase().replace(/[\s-]+/g, '_')];
+  if (provider !== undefined) return provider;
+  const numeric = Number(text);
+  return Number.isFinite(numeric) ? Math.min(1, Math.max(0, numeric)) : null;
+}
+
+export function transactionConfidence(transaction) {
+  const direct = normalizeConfidence(transaction?.confidence);
+  if (direct !== null) return direct;
+  return normalizeConfidence(transaction?.personalFinanceCategory?.confidence);
+}
+
+export function hasLowConfidence(transaction) {
+  const confidence = transactionConfidence(transaction);
+  return confidence !== null && confidence < LOW_CONFIDENCE_THRESHOLD;
+}
+
 export function fromPlaid(transaction, itemId) {
   if (!Number.isFinite(transaction.amount)) throw new Error('Invalid transaction amount');
   const amount=Math.round(transaction.amount*100);
   if(!Number.isSafeInteger(amount))throw new RangeError('Provider transaction amount exceeds the safe integer-cent range.');
-  const personalFinanceCategory=providerCategory(transaction), counterparties=providerCounterparties(transaction);
+  const personalFinanceCategory=providerCategory(transaction), counterparties=providerCounterparties(transaction),confidence=normalizeConfidence(personalFinanceCategory?.confidence);
   return {
     id: transaction.transaction_id,
     itemId,
@@ -61,6 +89,7 @@ export function fromPlaid(transaction, itemId) {
     category: categoryFor(transaction),
     pending: !!transaction.pending,
     currency: transaction.iso_currency_code || transaction.unofficial_currency_code || 'UNKNOWN',
+    ...(confidence !== null ? { confidence } : {}),
     ...(personalFinanceCategory ? { personalFinanceCategory } : {}),
     ...(counterparties ? { counterparties } : {})
   };
