@@ -442,6 +442,14 @@ export async function runBrowserCase(name) {
       await page.locator('#undo-last-review').click();
       await page.locator('#toast').filter({hasText:'Review decision undone'}).waitFor();
       await page.locator('#transaction-table tr').filter({hasText:'Synthetic coffee'}).waitFor();
+      for(const width of [1440,1024,768,390]){
+        await page.setViewportSize({width,height:1000});
+        const category=page.locator('#transaction-table tr').filter({hasText:'Synthetic coffee'}).locator('[data-category]');
+        const layout=await category.evaluate(el=>{const rect=el.getBoundingClientRect(),table=el.closest('.table-wrap');return{left:rect.left,right:rect.right,viewport:innerWidth,scrollWidth:table.scrollWidth,width:table.clientWidth};});
+        assert.ok(layout.left>=0&&layout.right<=layout.viewport&&layout.scrollWidth<=layout.width+1,'review category is visible without horizontal scrolling at '+width+'px: '+JSON.stringify(layout));
+        await category.click({trial:true});
+      }
+      await page.setViewportSize({width:1440,height:1000});
       await page.locator('#toggle-review').click();
       await page.locator('#transaction-table tr').filter({hasText:'Synthetic coffee'}).locator('[data-edit-transaction]').click();
       dialog=page.getByRole('dialog');await dialog.locator('#add-tx-amount').fill('5.25');await dialog.locator('#add-tx-category').selectOption({label:'Dining'});

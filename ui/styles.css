@@ -177,6 +177,10 @@ dialog.confirm-dialog .btn.danger{background:#8a3b2d;border-color:#8a3b2d;color:
 .review-inbox .controls{justify-content:flex-start;flex-wrap:wrap}
 .review-inbox .pill{margin-top:0;white-space:nowrap}
 .review-reason{color:#8a5a2b!important;font-size:11px!important}
+.transaction-table .transaction-cell-main{white-space:normal;overflow-wrap:anywhere}
+.transaction-table .merchant>div:last-child{min-width:0}
+.transaction-table .transaction-owner-control{display:grid;grid-template-columns:minmax(0,1fr);max-width:220px}
+.transaction-table .transaction-owner-control select{width:100%;min-width:0}
 .review-accept{color:#2f6a4d!important;font-weight:650}
 .rule-list{display:grid;gap:8px;margin:14px 0 20px;max-height:35vh;overflow:auto}
 .rule-row{display:flex;gap:12px;justify-content:space-between;align-items:flex-start;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:#fafbf8}
