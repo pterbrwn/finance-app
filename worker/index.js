@@ -90,6 +90,8 @@ function categoryRulesForState(state) {
     || String(left.id || '').localeCompare(String(right.id || '')));
 }
 function previewCategoryRuleChanges(state, candidate = null) {
+  state = structuredClone(state);
+  seedRules(state);
   const rules = [...(state.categoryRules || [])];
   if (candidate) {
     const index = candidate.id ? rules.findIndex(rule => rule.id === candidate.id) : -1;
@@ -715,7 +717,7 @@ export default {
         const existing=action==='delete'||input.id?(state.categoryRules||[]).find(rule=>rule.id===input.id)||null:null;
         if((action==='delete'||input.id)&&!existing)throw apiError('Category rule not found.',404);
         const normalized=action==='save'?normalizeCategoryRule(state,input,existing):null;let savedRule=null;
-        const mutation=await mutateWithReplay(env,'category-rules',input,s=>{checkRevision(s,input);s.categoryRules||=[];const live=input.id?s.categoryRules.find(rule=>rule.id===input.id)||null:null;if(input.id&&!live)throw apiError('Category rule not found.',404);if(action==='delete')s.categoryRules=s.categoryRules.filter(rule=>rule.id!==input.id);else{savedRule={...(live||{}),...normalized,id:live?.id||crypto.randomUUID(),createdAt:live?.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),enabled:input.enabled!==false};if(live)Object.assign(live,savedRule);else s.categoryRules.push(savedRule);}reconcileTransactionAutomation(s,{seed:seedRules});},(s,revision)=>({ok:true,revision,rule:savedRule,reviewCount:(s.transactions||[]).filter(transaction=>transaction.review===true).length}),null);
+        const mutation=await mutateWithReplay(env,'category-rules',input,s=>{checkRevision(s,input);seedRules(s);s.categoryRules||=[];const live=input.id?s.categoryRules.find(rule=>rule.id===input.id)||null:null;if(input.id&&!live)throw apiError('Category rule not found.',404);if(action==='delete')s.categoryRules=s.categoryRules.filter(rule=>rule.id!==input.id);else{savedRule={...(live||{}),...normalized,id:live?.id||crypto.randomUUID(),createdAt:live?.createdAt||new Date().toISOString(),updatedAt:new Date().toISOString(),enabled:input.enabled!==false};if(live)Object.assign(live,savedRule);else s.categoryRules.push(savedRule);}reconcileTransactionAutomation(s);},(s,revision)=>({ok:true,revision,rule:savedRule,reviewCount:(s.transactions||[]).filter(transaction=>transaction.review===true).length}),null);
         return response(mutation.result);
       }
       if(path==='/api/transactions'&&request.method==='GET'){

@@ -12,7 +12,7 @@ Avoid decorative dashboards, dark-mode variants, and broad visual rewrites that 
 
 - **Desktop:** fixed 228px sidebar on the left, content column up to 1620px wide. The sidebar carries the brand, main navigation, account summary, and household context.
 - **Tablet:** 175px sidebar. Charts and multi-column forms collapse to one or two columns.
-- **Phone:** the sidebar becomes a sticky top bar with a full-width page selector. The main navigation is hidden. Content padding drops to 16–17px.
+- **Phone:** the sidebar becomes a sticky top bar with direct links to Overview, Transactions, Budgets, and Bills plus a full-width page selector for other areas. Content padding drops to 16–17px.
 - **Page head:** eyebrow, page title, short description, then context controls. On phones the context label is visually hidden but remains the accessible name, and profile/month selectors share one row.
 - **Cards:** white surfaces, 1px warm border, 12px radius, compact headings. Primary content never lives inside a collapsed technical disclosure.
 - **Tables:** transaction tables become stacked rows below 600px. Above phone width but below 900px, the table scrolls inside its card instead of widening the document.
@@ -42,7 +42,7 @@ Use semantic colour, not colour alone. A warning always has text; a healthy stat
 - Add transaction is the first visible action on Transactions, at every width. It is never inside Filters.
 - Import and export are secondary and remain in the filter/action area.
 - Review and rule management are visible peer actions with clear labels: `Needs review`, `Manage rules`.
-- On phones the action row scrolls horizontally rather than stacking into several full-width rows. Primary actions stay first.
+- On phones primary actions stay visible; secondary filter controls can wrap. Occasional transaction actions live in a per-row Details disclosure.
 - Destructive actions use explicit verbs (`Delete rule`, `Remove transaction`) and ask for confirmation when records or dependencies change.
 
 ## Review workflow
@@ -52,16 +52,16 @@ Use semantic colour, not colour alone. A warning always has text; a healthy stat
 - `Mark N reviewed` applies to the visible page. `Undo last review` reverses the latest batch.
 - A correctly matched transfer can be accepted without changing its category.
 - Rules never exempt a transaction from review, and manual category choices are protected by `categoryEditVersion`.
-- Review reasons use plain language and remain visible on phones.
+- Review reasons use plain language, readable 13px or larger text, and remain visible on phones.
 
 ## Category rules
 
 - Rules are explicit user records. The distributable defaults contain no household-specific merchants or amounts.
-- The rule editor shows merchant/counterparty text, category, profile scope, account, amount, month bounds, and sources.
+- The rule editor shows merchant/counterparty text, category, profile scope, account, amount, month bounds, and sources. Rule help uses readable 13px or larger text.
 - `Preview changes` runs before saving and reports exact affected records. Saving with changes requires confirmation.
 - Rules can be paused, enabled, edited, and deleted. Deleting a rule may return records to review, but manual choices stay protected.
 - Precedence is deterministic: more constraints win; then amount, account, date bounds, sources, counterparty, merchant text, and finally text length.
-- Rule controls use the shared input treatment and 44px minimum height. Category starts unselected; signed amounts explain that receipts use negative values.
+- Rule controls use the shared input treatment and 44px minimum height. Category starts unselected; amount guidance uses readable text and explains receipt direction without requiring negative input.
 
 ## Daily overview and bills
 
@@ -115,3 +115,10 @@ One shared readiness model drives the Settings summary, top bar, banners, and de
 - Rough estimates remain visibly separate from complete saves.
 - The sample preview is clearly synthetic, does not write records, and never reveals saved balances.
 - Every financial number should reconcile to the same integer-cent source across Overview, Transactions, Budgets, Bills, and export.
+
+
+## Transaction and budget details
+
+- Editable transaction rows keep merchant, category, date, amount, and review action visible. Ownership, split, bill/reimbursement links, and manual edit/removal are grouped under More actions.
+- Split amounts are entered as positive values with an explicit Spent or Received direction. The interface converts direction to the established signed-cent representation when saving.
+- Phone budget rows foreground planned amount, actual spending, and remaining allowance. Per-category unassigned projections remain available under Planning details.

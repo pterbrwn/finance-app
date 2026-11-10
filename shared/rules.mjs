@@ -255,6 +255,17 @@ export const CATEGORY_RULE_DEFAULTS_VERSION = 2;
 export const DEFAULT_CATEGORY_RULES = Object.freeze([]);
 
 export function seedDefaultCategoryRules(state, catalog = [], { version = CATEGORY_RULE_DEFAULTS_VERSION, now = new Date().toISOString() } = {}) {
+  // Earlier upgrades could persist the retired rule list without updating every
+  // transaction. Repair those orphaned references even after the version marker.
+  const knownRuleIds = new Set((state.categoryRules || []).map(rule => rule.id));
+  for (const transaction of state.transactions || []) {
+    if (!String(transaction.ruleId || '').startsWith('default:') || knownRuleIds.has(transaction.ruleId)) continue;
+    delete transaction.ruleId;
+    delete transaction.ruleAppliedAt;
+    if (transaction.override !== undefined || transaction.overrideCategoryId !== undefined) {
+      transaction.categoryEditVersion = Math.max(1, Number.isSafeInteger(transaction.categoryEditVersion) ? transaction.categoryEditVersion : 0);
+    }
+  }
   if ((state.categoryRuleDefaultsVersion || 0) >= version) return 0;
   state.categoryRules ||= [];
   // Retire untouched rules that an older release seeded automatically. Rules a

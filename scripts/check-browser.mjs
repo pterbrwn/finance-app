@@ -464,9 +464,14 @@ try{
   await liabilityRow().getByRole('button',{name:'Archive',exact:true}).waitFor();
   assert.equal((await getBalanceSheetTotals()).netWorth,1100000,'restoring a liability returns it to the balance sheet');
 
+  await page.locator('#profile-select').selectOption('combined');
   await page.locator('[data-view="goals"]').first().click();
   await page.locator('#new-goal').click();
   const goalDialog=page.getByRole('dialog');
+  const goalOwner=goalDialog.getByLabel('Owner');
+  assert.equal(await goalOwner.inputValue(),'','Household goal creation requires an explicit owner choice');
+  assert.deepEqual(await goalOwner.locator('option').allTextContents(),['Choose Peter, Maddie, or Joint','Peter','Maddie','Joint']);
+  await goalOwner.selectOption('peter');
   await goalDialog.locator('#goal-name').fill('Browser emergency goal');
   await goalDialog.locator('#goal-target').fill('250');
   await goalDialog.locator('#goal-date').fill('2027-12-31');
@@ -480,6 +485,7 @@ try{
   await allocationDialog.getByRole('button',{name:'Save allocations'}).click();
   await page.getByText(/Scheduled month-end contributions:.*\d{4}-\d{2}-\d{2}/).waitFor();
 
+  await page.locator('#profile-select').selectOption('peter');
   await page.locator('[data-view="home"]').first().click();
   await page.locator('#new-scenario').click();
   const scenarioDialog=page.getByRole('dialog');
@@ -639,6 +645,7 @@ try{
       assert.ok(layout.document<=layout.viewport+1&&layout.body<=layout.viewport+1,`${view} has no horizontal page overflow at ${width}px: ${JSON.stringify(layout)}`);
       assert.deepEqual(layout.smallTargets,[],`${view} interactive controls have comfortable touch targets at ${width}px`);
       assert.deepEqual(layout.smallSummaries,[],`${view} secondary disclosures keep a usable target at ${width}px`);
+      if(width===390&&view==='transactions'){const labelSize=await page.locator('.mobile-cell-label').first().evaluate(element=>Number.parseFloat(getComputedStyle(element).fontSize));assert.ok(labelSize>=12,`mobile transaction labels are at least 12px: ${labelSize}`);}
       if(view==='transactions'&&width<=390){const addTransaction=await page.locator('#add-transaction').boundingBox();assert.ok(addTransaction&&addTransaction.y>=0&&addTransaction.y+addTransaction.height<=900,`Add transaction remains visible without scrolling at ${width}px: ${JSON.stringify(addTransaction)}`);}
       if(width===390)await audit(`${view}-${width}px`);
     }

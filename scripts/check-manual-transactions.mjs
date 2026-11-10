@@ -37,4 +37,28 @@ assert.equal((await request('transaction-remove',{id:tx.id,confirmed:true})).sta
 state.commitmentMatches[1].status='unlinked';
 const removed=await request('transaction-remove',{id:tx.id,confirmed:true});assert.equal(removed.status,200,await removed.clone().text());assert.ok(!state.transactions.some(row=>row.id===tx.id));
 assert.equal((await request('transaction-remove',{id:tx.id,confirmed:true})).status,404);
-console.log('Manual transaction add and remove checks passed: validation, signs, totals, replay, stale revision, and link protection.');
+// A previously completed default-rule migration may leave orphaned ownership
+// references. Preview and save must preserve unrelated historical categories.
+state.categoryRuleDefaultsVersion=2;
+state.categoryRules=[];
+const legacy={id:'legacy-default-history',accountId:'cash',date:today,merchant:'Synthetic legacy merchant',amount:1000,category:'Other',override:'Housing',overrideCategoryId:'system:housing',ruleId:'default:retired-synthetic',currency:'USD'};
+const stream={id:'synthetic-stream',accountId:'cash',date:today,merchant:'Synthetic streaming service',amount:1200,category:'Entertainment',currency:'USD'};
+state.transactions.push(legacy,stream);
+const rule={merchant:'Synthetic streaming service',categoryId:'system:utilities'};
+const beforePreview=structuredClone(state);
+const previewResponse=await request('category-rules-preview',{rule});assert.equal(previewResponse.status,200);
+const preview=await previewResponse.json();assert.equal(preview.count,1);assert.deepEqual(preview.changes.map(row=>row.id),[stream.id]);
+assert.deepEqual(state,beforePreview,'preview does not persist migration or change records');
+const savedRuleResponse=await request('category-rules',rule);assert.equal(savedRuleResponse.status,200,await savedRuleResponse.clone().text());
+const savedRule=(await savedRuleResponse.json()).rule;
+assert.equal(state.transactions.find(row=>row.id===stream.id).override,'Utilities');
+const preserved=state.transactions.find(row=>row.id===legacy.id);assert.equal(preserved.override,'Housing');assert.equal(preserved.ruleId,undefined);assert.equal(preserved.categoryEditVersion,1);
+assert.equal((await (await request('category-rules-preview',{rule:{...rule,id:savedRule.id}})).json()).count,0,'saved preview is idempotent');
+assert.equal((await request('category-rules',{action:'delete',id:savedRule.id})).status,200);
+assert.equal(state.transactions.find(row=>row.id===stream.id).override,undefined,'explicit rule deletion still clears its classifications');
+state.categoryRules=[{...savedRule,id:'default:edited-synthetic',defaultKey:'edited-synthetic',updatedAt:new Date().toISOString()}];
+Object.assign(state.transactions.find(row=>row.id===stream.id),{override:'Utilities',overrideCategoryId:'system:utilities',ruleId:'default:edited-synthetic'});
+assert.equal((await request('category-rules',{action:'delete',id:'default:edited-synthetic'})).status,200);
+assert.equal(state.transactions.find(row=>row.id===stream.id).override,undefined,'explicit deletion of a retained edited default still works');
+assert.equal(state.transactions.find(row=>row.id===legacy.id).override,'Housing','unrelated history survives subsequent rule changes');
+console.log('Manual transaction and rule migration checks passed: validation, signs, totals, replay, stale revision, link protection, preview/save parity, historical preservation, and explicit deletion.');

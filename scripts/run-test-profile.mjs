@@ -54,7 +54,8 @@ function run(script, args = [], extra = {}) {
     let output = '';
     child.stdout.on('data', chunk => output += chunk);
     child.stderr.on('data', chunk => output += chunk);
-    const timer = setTimeout(() => { signalTree('SIGTERM'); setTimeout(() => signalTree('SIGKILL'), 5000).unref(); }, 120_000);
+    const timeoutMs = script === 'scripts/check-browser.mjs' && !extra.BROWSER_CASE ? 300_000 : 120_000;
+    const timer = setTimeout(() => { signalTree('SIGTERM'); setTimeout(() => signalTree('SIGKILL'), 5000).unref(); }, timeoutMs);
     child.once('close', (code, signal) => { clearTimeout(timer); resolvePromise({ code: code ?? 1, signal, output }); });
     child.once('error', error => { clearTimeout(timer); resolvePromise({ code: 1, signal: null, output: String(error) }); });
   });

@@ -149,7 +149,7 @@
 
 .scenario-save-requirements{margin:14px 0;padding:12px 14px;background:#f7f8f3;border:1px solid var(--border);border-radius:10px}.scenario-save-requirements h3{font-size:14px;margin:0 0 6px}.scenario-save-requirements p,.scenario-save-requirements li{font-size:12px;line-height:1.45;color:#425548}.scenario-save-requirements ul{margin:8px 0 0;padding-left:18px}.scenario-save-requirements li+li{margin-top:4px}
 .transaction-filter-details summary{list-style:none}.transaction-filter-details summary::-webkit-details-marker{display:none}.transaction-filter-details summary::after{content:'Show';margin-left:8px;color:var(--muted);font-weight:500}.transaction-filter-details[open] summary::after{content:'Hide'}
-@media(max-width:600px){.topbar{height:40px}.pagehead{margin:8px 0 8px;gap:8px}h1{font-size:23px}.card{padding:11px 12px}.budget-heading>div>p{font-size:12px;line-height:1.45}.transaction-filters{gap:6px}.transaction-filter-details{gap:6px}.transaction-filter-details summary{min-height:44px;display:flex;align-items:center;padding:8px 10px}.transaction-filter-details .btn,.transaction-filter-details select,.transaction-filter-details input{min-height:44px}.mobile-budget-result{margin:6px 0 9px;padding:10px 12px}.budget-income-summary{gap:6px;padding:8px 0;margin-bottom:4px}.budget-income-summary span{font-size:11px}.budget-lines{margin-top:10px}#transaction-count{margin-bottom:8px!important}}
+@media(max-width:600px){.topbar{height:40px}.pagehead{margin:4px 0 4px;gap:6px}h1{font-size:23px}.card{padding:11px 12px}.budget-heading>div>p{font-size:12px;line-height:1.45}.transaction-filters{gap:6px}.transaction-filter-details{gap:6px}.transaction-filter-details summary{min-height:44px;display:flex;align-items:center;padding:8px 10px}.transaction-filter-details .btn,.transaction-filter-details select,.transaction-filter-details input{min-height:44px}.mobile-budget-result{margin:6px 0 9px;padding:10px 12px}.budget-income-summary{gap:6px;padding:8px 0;margin-bottom:4px}.budget-income-summary span{font-size:11px}.budget-lines{margin-top:10px}#transaction-count{margin-bottom:8px!important}}
 .first-run-steps{list-style:none;margin:18px 0;padding:0;display:grid;gap:14px}
 .first-run-steps li{display:grid;grid-template-columns:34px minmax(0,1fr);gap:14px;align-items:start}
 .first-run-steps p{margin:4px 0 10px;color:var(--muted)}
@@ -176,7 +176,7 @@ dialog.confirm-dialog .btn.danger{background:#8a3b2d;border-color:#8a3b2d;color:
 .review-inbox .card-sub{font-size:12px;line-height:1.55}
 .review-inbox .controls{justify-content:flex-start;flex-wrap:wrap}
 .review-inbox .pill{margin-top:0;white-space:nowrap}
-.review-reason{color:#8a5a2b!important;font-size:11px!important}
+.review-reason{color:#8a5a2b!important;font-size:13px!important;line-height:1.45}
 .transaction-table .transaction-cell-main{white-space:normal;overflow-wrap:anywhere}
 .transaction-table .merchant>div:last-child{min-width:0}
 .transaction-table .transaction-owner-control{display:grid;grid-template-columns:minmax(0,1fr);max-width:220px}
@@ -185,7 +185,7 @@ dialog.confirm-dialog .btn.danger{background:#8a3b2d;border-color:#8a3b2d;color:
 .rule-list{display:grid;gap:8px;margin:14px 0 20px;max-height:35vh;overflow:auto}
 .rule-row{display:flex;gap:12px;justify-content:space-between;align-items:flex-start;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:#fafbf8}
 .rule-row b{font-size:13px;display:block;overflow-wrap:anywhere}
-.rule-row small{display:block;color:var(--muted);font-size:11px;line-height:1.45;margin-top:3px}
+.rule-row small{display:block;color:var(--muted);font-size:13px;line-height:1.5;margin-top:4px}
 .rule-row .pill{margin-top:6px}
 .rule-row-actions{display:flex;gap:2px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}
 .rule-paused{opacity:.72}
@@ -230,3 +230,26 @@ dialog.rules-dialog{max-width:min(760px,calc(100% - 24px));width:min(760px,calc(
 [data-commitment-month-picker]{min-height:40px}
 @media(max-width:600px){[data-commitment-month-picker]{min-height:44px}}
 .budget-limit{color:#65736b}
+
+.transaction-more{margin-top:5px}.transaction-more summary{cursor:pointer;color:var(--green);font-size:12px;min-height:32px;display:flex;align-items:center}.transaction-more[open]{padding:4px 8px;border:1px solid var(--border);border-radius:7px}.transaction-more>*:not(summary){margin:4px}
+@media(max-width:600px){.transaction-more summary{min-height:40px}}
+
+.review-reason{font-size:13px!important;line-height:1.45}.transaction-tools{margin-top:6px}.transaction-tools summary{cursor:pointer;color:var(--green);font-size:12px;min-height:36px;display:flex;align-items:center}.transaction-tools[open]{padding:4px 8px;border:1px solid var(--border);border-radius:7px}.transaction-tools>*:not(summary){margin:4px}.budget-planning-detail{grid-column:1/-1;font-size:12px}.budget-planning-detail summary{cursor:pointer;color:var(--muted);min-height:32px;display:flex;align-items:center}.budget-planning-detail [role=cell]{display:block;text-align:left}
+
+.mobile-quick-nav{display:none}@media(max-width:600px){.sidebar .tagline{display:none}.mobile-quick-nav{display:flex;gap:6px;margin-top:4px;overflow-x:auto}.mobile-quick-nav button{flex:1 0 auto;min-height:44px;padding:8px 10px;border:1px solid #547063;border-radius:7px;background:#244a3c;color:#fff;font-size:13px}.mobile-quick-nav button[aria-current=page]{background:#dbe8c9;color:#193e32;border-color:#dbe8c9}.mobile-page-select{margin-top:6px}.split-edit-line{display:grid;grid-template-columns:minmax(130px,1fr) minmax(120px,.7fr) minmax(120px,.8fr);gap:10px}.split-edit-line label{min-width:0}}@media(max-width:420px){.split-edit-line{grid-template-columns:1fr 1fr}.split-edit-line label:first-child{grid-column:1/-1}}
+
+/* Keep the budget's primary question—how much allowance remains—compact. */
+.budget-column-head,.budget-line,.budget-income-line,.budget-total-line{grid-template-columns:minmax(135px,1.05fr) minmax(125px,1fr) repeat(3,minmax(90px,.78fr))}
+.budget-planning-detail{grid-column:1/-1;border-top:1px solid var(--border);padding-top:4px}
+.budget-planning-detail summary{color:var(--muted);font-size:12px;cursor:pointer;min-height:32px;display:flex;align-items:center}
+.budget-planning-detail [role=cell]{padding:4px 0 6px;text-align:left}
+.budget-income-detail{border:1px solid var(--border);border-radius:8px;margin:12px 0;padding:0 12px}
+.budget-income-detail>summary{cursor:pointer;color:var(--green);font-size:12px;font-weight:600;min-height:40px;display:flex;align-items:center}
+.budget-income-detail[open]{padding-bottom:8px}
+.budget-total-line>span:last-child{grid-column:1/-1;text-align:left}
+.budget-planning-value{display:grid;gap:3px;padding:4px 0 6px;text-align:left}.budget-planning-value>span{color:var(--muted);font-size:11px;line-height:1.4}.budget-planning-value>b{font-weight:650}
+@media(max-width:1100px){.budget-column-head,.budget-line,.budget-income-line,.budget-total-line{grid-template-columns:minmax(105px,1fr) minmax(115px,1fr) repeat(3,minmax(72px,.72fr))}}
+@media(max-width:600px){.mobile-quick-nav{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}.mobile-quick-nav button{width:100%;min-width:0}.budget-column-head,.budget-line,.budget-income-line,.budget-total-line{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.budget-planning-detail{grid-column:1/-1}.budget-income-detail{margin:8px 0}.budget-income-detail .budget-income-summary{border-top:1px solid var(--border)}}
+@media(max-width:600px){.mobile-quick-nav{display:flex;overflow-x:auto;margin-top:0}.mobile-quick-nav button{width:auto;min-width:0;flex:1 0 auto}.mobile-page-select{margin-top:2px}.demo-note{margin-bottom:12px}.pagehead{margin-top:0;margin-bottom:0}}
+
+@media(max-width:600px){.sidebar{z-index:100;isolation:isolate;background:#193e32;padding-bottom:16px}.mobile-cell-label{font-size:12px}}
