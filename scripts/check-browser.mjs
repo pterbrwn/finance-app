@@ -521,6 +521,8 @@ try{
   await page.waitForFunction(()=>!!document.querySelector('#scenario-live-preview .scenario-results'));
   const previewBreakdown=await scenarioDialog.locator('#scenario-live-preview .scenario-results').innerText();
   await audit('scenario-dialog');
+  const invalidScenarioFields=await scenarioDialog.locator('.scenario-form :invalid').evaluateAll(fields=>fields.map(field=>field.name||field.id||field.tagName));
+  assert.deepEqual(invalidScenarioFields,[],'the completed scenario form is natively valid before submission');
   await scenarioDialog.getByRole('button',{name:'Save complete scenario'}).click();
   await page.getByText('Browser purchase estimate',{exact:true}).first().waitFor();
   const scenarioCard=()=>page.locator('article.scenario-card').first(),savedBreakdown=await scenarioCard().locator('.scenario-results').innerText();
