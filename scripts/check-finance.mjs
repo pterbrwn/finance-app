@@ -661,6 +661,9 @@ assert.ok(investmentsHtml.includes('Retirement (IRA / 401k)')&&investmentsHtml.i
 assert.ok(investmentsHtml.includes('1301 Morgan - Emergency Fund'),'the emergency fund comes from the named savings account balance');
 assert.ok(investmentsHtml.includes('View accounts behind these groups'),'the mix chart exposes a numeric data table');
 assert.ok(investmentsHtml.includes('$8,500.00')&&investmentsHtml.includes('3 accounts with balances'),'the mix chart totals only account balances and reconciles with its table');
+const mixUnavailableHtml=await clientPage('https://ledger.test/?page=investments',{...pageBase,accounts:[{id:'savings-2',name:'Emergency Fund',type:'depository',subtype:'savings',balance:null,currency:'USD'}]});
+assert.ok(mixUnavailableHtml.includes('Emergency fund'),'an emergency fund without a recorded balance still appears as a group');
+assert.ok(mixUnavailableHtml.includes('Balance unavailable'),'missing balances are labeled instead of plotted as zero');
 const budgetOnlyHtml=await clientPage('https://ledger.test/',{...pageBase,budgets:{Housing:150000}});
 assert.ok(budgetOnlyHtml.includes('Saved monthly budgets'));
 assert.ok(budgetOnlyHtml.includes('Housing'));
