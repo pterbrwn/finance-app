@@ -11,6 +11,8 @@
     "dev": "bash scripts/start-ledger.sh",
     "check:local-http": "npm run build && bash scripts/run-node.sh scripts/check-dev.mjs --http",
     "build": "bash scripts/build.sh",
+    "build:react-ui": "LEDGER_UI_MODE=react bash scripts/run-node.sh scripts/build.mjs",
+    "check:react-ui": "npm --prefix ledger-ui run lint && npm --prefix ledger-ui run typecheck && npm --prefix ledger-ui run build",
     "validate": "bash scripts/run-node.sh scripts/validate-artifact.mjs",
     "check:source": "bash scripts/run-node.sh scripts/check-source.mjs",
     "check:sqlite": "bash scripts/run-node.sh scripts/check-sqlite.mjs",

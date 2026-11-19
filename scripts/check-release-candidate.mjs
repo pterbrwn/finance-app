@@ -9,7 +9,8 @@ const repo = resolve(import.meta.dirname, '..');
 const runtime = process.env.LEDGER_NODE_BIN || process.execPath;
 assert.match(process.version, /^v24\.22\.1$/);
 const protectedPaths = new Set(['docs/IMPLEMENTATION_PROGRESS.md', 'docs/STABILITY_REVIEW_2026-10-27.md']);
-const forbidden = /(^|\/)(?:\.git|node_modules|dist|data|backups|imports|exports|outputs)(\/|$)|\.(?:sqlite[^/]*|csv|tsv|ofx|qfx|qif|pem|p12|pfx|zip|gz)$/i;
+const forbidden = /(^|\/)(?:\.git|node_modules|dist)(\/|$)|\.(?:sqlite[^/]*|csv|tsv|ofx|qfx|qif|pem|p12|pfx|zip|gz)$/i;
+const topLevelForbidden = /^(?:data|backups|imports|exports|outputs)(\/|$)/i;
 const root = await mkdtemp(join(tmpdir(), 'ledger-release-candidate-'));
 async function makeWritable(path) {
   let entries; try { entries = await readdir(path, { withFileTypes: true }); } catch { return; }
@@ -21,7 +22,7 @@ try {
   await mkdir(source, { mode: 0o700 }); await mkdir(releaseRoot, { mode: 0o700 });
   const paths = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: repo }).toString().split('\0').filter(Boolean);
   for (const path of [...new Set(paths)].sort()) {
-    if (protectedPaths.has(path) || forbidden.test(path)) continue;
+    if (protectedPaths.has(path) || forbidden.test(path) || topLevelForbidden.test(path)) continue;
     const input = join(repo, path), output = join(source, path);
     let info; try { info = await lstat(input); } catch { continue; }
     if (info.isSymbolicLink()) throw new Error(`Candidate contains an unsupported symlink: ${path}`);

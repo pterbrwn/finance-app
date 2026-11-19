@@ -1,5 +1,5 @@
 // The loopback-only Node server supplies the local owner's identity.
-import { CATEGORIES, transactionMatchesCategory } from '../shared/categories.mjs';
+import { CATEGORIES, transactionMatchesCategory, isTransactionCategory, isInvestmentAllocation } from '../shared/categories.mjs';
 import { budgetMonthKey, resolveBudget, resolveIncomePlan, validMonth } from '../shared/budgets.mjs';
 import { canonicalOperationPayload, operationPayloadDigest } from '../shared/operation-identity.mjs';
 import { monthlyBudgetAmount, validateBudgetSchedule } from '../shared/budget-frequency.mjs';
@@ -69,7 +69,7 @@ function normalizeCategoryRule(state, input = {}, existing = null) {
     sources = cleaned.length ? cleaned : null;
   }
   const category = categoryRuleCategory(state, input);
-  if (!category || !['expense','income','transfer'].includes(category.kind) || state.budgetItemSettings?.[category.id]?.itemType === 'allocation') throw apiError('Choose a valid transaction category for this rule.');
+  if (!category || !isTransactionCategory(category, state.budgetItemSettings)) throw apiError('Choose a valid transaction category for this rule.');
   const requestedProfile = input.profileId === undefined ? (existing?.profileId ?? null) : input.profileId;
   if (requestedProfile !== null && requestedProfile !== '' && !['peter','maddie','joint'].includes(requestedProfile)) throw apiError('Choose Household, Peter, Maddie, or Joint for this rule scope.');
   const profileId = category.system ? (requestedProfile || null) : (category.profileId || 'peter');
@@ -486,9 +486,10 @@ async function publicState(state, env) {
 function budgetActuals(state,month){
   const aliases=new Map(Object.entries(state.budgetCategoryIds||{}).map(([id,name])=>[name,id]));
   const allocationIds=new Set(categoryCatalog(state).filter(category=>category.kind==='allocation').map(category=>category.id));
+  const investmentAllocationIds=new Set(categoryCatalog(state).filter(category=>isInvestmentAllocation(category,state.budgetItemSettings)).map(category=>category.id));
   let income=0;const categories={},activity={};
   for(const original of state.transactions||[])for(const row of transactionReportingRows(state,original)){if(!row.date?.startsWith(month)||row.pending||row.currency!=='USD')continue;const overridden=typeof row.override==='string'&&row.override.length>0,name=overridden?row.override:row.category,id=(overridden?row.overrideCategoryId:row.categoryId)||aliases.get(name);activity[id||name]=(activity[id||name]||0)+1;
-    if(id&&(state.budgetItemSettings?.[id]?.itemType==='allocation'||allocationIds.has(id)))continue;
+    if(id&&(state.budgetItemSettings?.[id]?.itemType==='allocation'||allocationIds.has(id))&&!investmentAllocationIds.has(id))continue;
     if(name==='Income'){income=addSafeCents(income,-row.amount,'Monthly income');continue;}if(name==='Transfers')continue;const key=id||name;categories[key]=addSafeCents(categories[key]||0,row.amount,'Monthly category spending');
   }
   return{income,categories,activity};
@@ -496,9 +497,10 @@ function budgetActuals(state,month){
 function budgetActualsFromRows(state,rows){
   const aliases=new Map(Object.entries(state.budgetCategoryIds||{}).map(([id,name])=>[name,id]));
   const allocationIds=new Set(categoryCatalog(state).filter(category=>category.kind==='allocation').map(category=>category.id));
+  const investmentAllocationIds=new Set(categoryCatalog(state).filter(category=>isInvestmentAllocation(category,state.budgetItemSettings)).map(category=>category.id));
   let income=0;const categories={},activity={};
   for(const row of rows){const name=row.category,id=row.categoryId||aliases.get(name),key=id||name;activity[key]=(activity[key]||0)+row.activity;
-    if(id&&(state.budgetItemSettings?.[id]?.itemType==='allocation'||allocationIds.has(id)))continue;
+    if(id&&(state.budgetItemSettings?.[id]?.itemType==='allocation'||allocationIds.has(id))&&!investmentAllocationIds.has(id))continue;
     if(name==='Income'){income=addSafeCents(income,-row.amount,'Monthly income');continue;}if(name==='Transfers')continue;categories[key]=addSafeCents(categories[key]||0,row.amount,'Monthly category spending');
   }
   return{income,categories,activity};
@@ -660,7 +662,7 @@ export default {
           if(JSON.stringify(existing)!==JSON.stringify(history.after))throw apiError('This split changed after that edit. Review the current split before undoing it.',409);next=history.before;
         }else{
           if(parent.pending)throw apiError('Wait until this transaction is posted before splitting it.');
-          try{next={id:crypto.randomUUID(),transactionId:parent.id,parentAmount:parent.amount,parentDate:parent.date,parentAccountId:parent.accountId,parentCurrency:parent.currency,allocations:validateTransactionSplit(parent,input.allocations,categoryCatalog(state).filter(row=>['expense','income','transfer'].includes(row.kind))),updatedAt:new Date().toISOString(),needsReview:false};}catch(error){throw apiError(error.message);}
+          try{next={id:crypto.randomUUID(),transactionId:parent.id,parentAmount:parent.amount,parentDate:parent.date,parentAccountId:parent.accountId,parentCurrency:parent.currency,allocations:validateTransactionSplit(parent,input.allocations,categoryCatalog(state).filter(category=>isTransactionCategory(category,state.budgetItemSettings))),updatedAt:new Date().toISOString(),needsReview:false};}catch(error){throw apiError(error.message);}
         }
         const mutation=await mutateWithReplay(env,'transaction-split',input,s=>{checkRevision(s,input);s.transactionSplits||=[];s.transactionSplitHistory||=[];const current=s.transactionSplits.findIndex(row=>row.transactionId===parent.id),before=current>=0?structuredClone(s.transactionSplits[current]):null;if(current>=0)s.transactionSplits.splice(current,1);if(next)s.transactionSplits.push(next);s.transactionSplitHistory.push({id:crypto.randomUUID(),transactionId:parent.id,before,after:next?structuredClone(next):null,revision:(s.revision||0)+1,createdAt:new Date().toISOString()});s.owner=user;},(s,revision)=>({ok:true,revision,split:next}),null,'owner');return response(mutation.result);
       }
@@ -891,14 +893,14 @@ export default {
       if (path === '/api/category' && request.method === 'POST') {
         const input = await body(request);
         const category = categoryCatalog(state).find(c => c.id === input.categoryId && !c.archivedAt) || categoryCatalog(state).find(c => c.name === input.category && !c.archivedAt);
-        if (!category || !['expense','income','transfer'].includes(category.kind) || state.budgetItemSettings?.[category.id]?.itemType === 'allocation') throw apiError('Choose a valid transaction category.');
+        if (!category || !isTransactionCategory(category, state.budgetItemSettings)) throw apiError('Choose a valid transaction category.');
         const transaction=state.transactions.find(row=>row.id===input.id);if(!transaction)throw apiError('Transaction not found.',404);const transactionOwner=transaction.profileId??state.accounts.find(account=>account.id===transaction.accountId)?.profileId??null;if(!category.system&&(category.profileId||'peter')!==transactionOwner)throw apiError('Assign this transaction to the category owner before using that custom category.');
         const saved = await mutateWithReplay(env,'category',input,s => { checkRevision(s,input); const t = s.transactions.find(t => t.id === input.id); if (!t) throw apiError('Transaction not found.', 404); const live = categoryCatalog(s).find(c => c.id === category.id && !c.archivedAt); if (!live) throw apiError('That category is no longer available.', 409); t.override = live.name; t.overrideCategoryId = live.id;delete t.ruleId;delete t.ruleAppliedAt;t.categoryEditVersion=(Number.isSafeInteger(t.categoryEditVersion)?t.categoryEditVersion:0)+1;if (live.name === 'Transfers') refreshReviewFlags(s,{full:true}); else refreshReviewFlags(s,{full:false,onlyIds:new Set([t.id])}); },(s,revision)=>({ok:true,revision}),[input.id]);
         return response(saved.result);
       }
       if(path==='/api/category-bulk'&&request.method==='POST'){
         const input=await body(request),ids=Array.isArray(input.ids)?[...new Set(input.ids)]:[],category=categoryCatalog(state).find(c=>c.id===input.categoryId&&!c.archivedAt);
-        if(!ids.length||ids.length>100||ids.some(id=>typeof id!=='string')||!category||!['expense','income','transfer'].includes(category.kind)||state.budgetItemSettings?.[category.id]?.itemType==='allocation')throw apiError('Choose up to 100 transactions and a valid transaction category.');
+        if(!ids.length||ids.length>100||ids.some(id=>typeof id!=='string')||!category||!isTransactionCategory(category,state.budgetItemSettings))throw apiError('Choose up to 100 transactions and a valid transaction category.');
         const selectedRows=state.transactions.filter(row=>ids.includes(row.id));if(!category.system&&selectedRows.some(transaction=>(transaction.profileId??state.accounts.find(account=>account.id===transaction.accountId)?.profileId??null)!==(category.profileId||'peter')))throw apiError('Assign selected transactions to the custom category owner before using that category.');
         const id=crypto.randomUUID(),mutation=await mutateWithReplay(env,'category-bulk',input,s=>{checkRevision(s,input);const selected=s.transactions.filter(t=>ids.includes(t.id));if(selected.length!==ids.length)throw apiError('One or more selected transactions are no longer available.',409);s.categoryEditBatches||=[];const changes=selected.map(t=>({id:t.id,override:t.override,overrideCategoryId:t.overrideCategoryId}));for(const [index,t] of selected.entries()){t.override=category.name;t.overrideCategoryId=category.id;delete t.ruleId;delete t.ruleAppliedAt;t.categoryEditVersion=(Number.isSafeInteger(t.categoryEditVersion)?t.categoryEditVersion:0)+1;changes[index].afterVersion=t.categoryEditVersion;}refreshReviewFlags(s,{full:false,onlyIds:new Set(ids)});s.categoryEditBatches.push({id,categoryId:category.id,createdAt:new Date().toISOString(),changes});},(s,revision)=>({ok:true,batchId:id,count:ids.length,revision}),ids);
         return response(mutation.result);
@@ -963,7 +965,7 @@ export default {
         if(!Number.isSafeInteger(input.amount)||input.amount<1||input.amount>100_000_000_000)throw apiError('Enter an amount greater than zero.');
         if(input.direction!=='spent'&&input.direction!=='received')throw apiError('Choose whether money was spent or received.');
         const wanted=input.direction==='received'&&!input.category?'Income':input.category,catalog=categoryCatalog(state).filter(row=>!row.archivedAt),category=catalog.find(row=>input.categoryId&&row.id===input.categoryId)||catalog.find(row=>row.name===wanted);
-        if(!category||!['expense','income','transfer'].includes(category.kind)||state.budgetItemSettings?.[category.id]?.itemType==='allocation')throw apiError('Choose a valid category.');
+        if(!category||!isTransactionCategory(category,state.budgetItemSettings))throw apiError('Choose a valid category.');
         if(!category.system&&(category.profileId||'peter')!==(account.profileId??null))throw apiError('That category belongs to someone else. Choose another category.');
         const id='manual-'+crypto.randomUUID(),transaction={id,itemId:null,accountId:account.id,date:input.date,merchant,amount:input.direction==='received'?-input.amount:input.amount,category:category.name,override:category.name,overrideCategoryId:category.id,categoryEditVersion:1,pending:false,currency:account.currency||'USD',source:'manual'};
         const saved=await mutateWithReplay(env,'transaction-add',input,s=>{checkRevision(s,input);if(!s.accounts.some(row=>row.id===account.id&&!row.archivedAt))throw apiError('Choose one of your accounts.',409);s.transactions.push(transaction);refreshReviewFlags(s,{full:true});s.owner=user;},(s,revision)=>({ok:true,revision,transaction}),[id]);
@@ -983,7 +985,7 @@ export default {
         if(!Number.isSafeInteger(input.amount)||input.amount<1||input.amount>100_000_000_000)throw apiError('Enter an amount greater than zero.');
         if(input.direction!=='spent'&&input.direction!=='received')throw apiError('Choose whether money was spent or received.');
         const wanted=input.direction==='received'&&!input.category?'Income':input.category,catalog=categoryCatalog(state).filter(row=>!row.archivedAt),category=catalog.find(row=>input.categoryId&&row.id===input.categoryId)||catalog.find(row=>row.name===wanted);
-        if(!category||!['expense','income','transfer'].includes(category.kind)||state.budgetItemSettings?.[category.id]?.itemType==='allocation')throw apiError('Choose a valid category.');
+        if(!category||!isTransactionCategory(category,state.budgetItemSettings))throw apiError('Choose a valid category.');
         if(!category.system&&(category.profileId||'peter')!==(account.profileId??null))throw apiError('That category belongs to someone else. Choose another category.');
         const nextAmount=input.direction==='received'?-input.amount:input.amount;
         const linkedNow=row=>(state.transactionSplits||[]).some(split=>split.parentId===row.id||split.transactionId===row.id)||(state.transactionReimbursements||[]).some(link=>link.status!=='unlinked'&&(link.transactionId===row.id||link.reimbursesTransactionId===row.id))||(state.commitmentMatches||[]).some(match=>match.status==='user-confirmed'&&match.transactionId===row.id);

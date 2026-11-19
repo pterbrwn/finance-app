@@ -6,7 +6,7 @@ A personal finance dashboard hosted on a Jetson. Source code lives at https://gi
 
 No deployment was independently verified by this repository's 2026-11-08 household-readiness review. The last owner-reported production activation is immutable release `bc2cf41a77b4` (commit `bc2cf41a77b470c02ca2f74371bfd03d195f1a6c`) on Node.js 24.22.1 with SQLite schema 9. It was activated on 2026-11-01 after the full local CI sequence (fast, integration, browser, and release profiles), and the [GitHub test run](https://github.com/pterbrwn/finance-app/actions/runs/41340542347) passed on that commit, with no schema change and the same-day verified SQLite backup in place. The daily SQLite backup timer remains active and the bank sync timer remains disabled. That activation added separate pre-tax (gross) and take-home (paycheck) annual income amounts to the Overview and year review.
 
-An older note in this section said production application code matched `45eba0047502`; that record is superseded by the activation above and is retained only in git history. The source checkout used for the 2026-11-08 readiness review is commit `4143cf8ea38659f96249dd69e0b0c5e044eee18e`; it is a candidate, not evidence of deployment. See the [household-readiness plan](docs/ASTRA_VALIDATION_AND_10_OF_10_PLAN_2026-11-08.md) for the code acceptance record and remaining operational gates.
+An older note in this section said production application code matched `45eba0047502`; that record is superseded by the activation above and is retained only in git history. The earlier `5f77f24` activation recorded in the household-profiles handoff and execution notes predates this owner-reported activation and is likewise historical, not the current production record. The source checkout used for the 2026-11-08 readiness review is commit `4143cf8ea38659f96249dd69e0b0c5e044eee18e`; it is a candidate, not evidence of deployment. See the [household-readiness plan](docs/ASTRA_VALIDATION_AND_10_OF_10_PLAN_2026-11-08.md) for the code acceptance record and remaining operational gates.
 
 Peter confirmed that existing records belong to him, and the ownership-review marker is cleared with an audit timestamp. Maddie's separate Tailscale login is not configured yet. Profile selection is organizational, not a privacy boundary. The bank sync timer remains disabled. Remaining manual acceptance includes actual Maddie login, physical screen-reader use, physical 200% zoom, an off-device encrypted-restore rehearsal, and a full privacy review of repository content. See the [stability execution record](docs/STABILITY_EXECUTION_2026-10-28.md) for earlier synthetic check coverage and outstanding manual checks.
 
@@ -22,6 +22,10 @@ The stability and product work are documented in [PRODUCT_IMPLEMENTATION_PLAN_LU
 - Plaid may process bank data when enabled. Ledger's database, bank tokens, and credentials remain on the Jetson; no Sites, R2, GitHub, or cloud job stores them.
 - Viewing the dashboard sends records to your authenticated browser. Responses use `Cache-Control: no-store`; there is no browser database or transaction cache. For save recovery, the current tab may keep only an operation ID, write scope, base revision, and start time in `sessionStorage`; it never stores form values, account IDs, CSV content, or credentials. Export CSV explicitly downloads records to the device running your browser.
 - With bank integration disabled or unconfigured, browser policy blocks external scripts, frames, and network connections. The app includes no analytics, remote fonts, or external assets.
+
+## Parallel shadcn UI
+
+A separate React/Vite + shadcn/ui frontend lives in `ledger-ui/` and uses the same local API. It is not activated in production. `npm run build:react-ui` embeds it as an opt-in `/react` page while `/` continues to serve the original interface. See [the rollout note](docs/SHADCN_UI_ROLLOUT.md) for checks and the cutover gate.
 
 ## Run locally
 

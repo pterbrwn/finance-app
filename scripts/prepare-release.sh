@@ -22,6 +22,9 @@ mkdir -p "$work_dir/source" "$work_dir/release/scripts" "$work_dir/release/dist"
 git -C "$repo_root" archive --format=tar "$release_id" | tar -xf - -C "$work_dir/source"
 node_dir="$(dirname "$node_bin")"
 PATH="$node_dir:$PATH" "$node_bin" "$node_dir/../lib/node_modules/npm/bin/npm-cli.js" ci --omit=dev --prefix "$work_dir/source"
+if [[ -d "$work_dir/source/ledger-ui" && ( "${LEDGER_UI_MODE:-}" == "react" || "${LEDGER_UI_MODE:-}" == "1" || "${LEDGER_UI_CUTOVER:-}" == "1" ) ]]; then
+  PATH="$node_dir:$PATH" "$node_bin" "$node_dir/../lib/node_modules/npm/bin/npm-cli.js" ci --prefix "$work_dir/source/ledger-ui"
+fi
 (cd "$work_dir/source" && LEDGER_BUILD_ID="$release_id" "$node_bin" scripts/build.mjs)
 cp -R "$work_dir/source/dist/." "$work_dir/release/dist/"
 cp "$work_dir/source/package.json" "$work_dir/release/package.json"

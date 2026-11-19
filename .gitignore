@@ -8,7 +8,7 @@ site.tar.gz
 outputs/
 .openai/
 node_modules/
-data/
+/data/
 backups/
 imports/
 exports/

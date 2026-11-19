@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { chromium } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
-import { installConfirmResponder, confirmNext, assertConfirmClean } from './confirm-responder.mjs';
+import { installConfirmResponder, confirmNext, confirmMaybe, assertConfirmClean } from './confirm-responder.mjs';
 
 if (process.env.BROWSER_CASE) {
   const { runBrowserCase } = await import('./browser-cases.mjs');
@@ -485,7 +485,9 @@ try{
   await allocationDialog.getByRole('button',{name:'Save allocations'}).click();
   await page.getByText(/Scheduled month-end contributions:.*\d{4}-\d{2}-\d{2}/).waitFor();
 
+  const maybeDiscardAllocationDraft=confirmMaybe(page,'accept',/Discard unsaved form edits before leaving this page\?/);
   await page.locator('#profile-select').selectOption('peter');
+  maybeDiscardAllocationDraft();
   await page.locator('[data-view="home"]').first().click();
   await page.locator('#new-scenario').click();
   const scenarioDialog=page.getByRole('dialog');

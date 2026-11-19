@@ -44,6 +44,19 @@ export function confirmNext(page, action = 'accept', pattern = null) {
   return new Promise(resolve => queues.get(page).push({ action, pattern, resolve, settled: false }));
 }
 
+export function confirmMaybe(page, action = 'accept', pattern = null) {
+  installConfirmResponder(page);
+  const entry = { action, pattern, resolve() {}, settled: false };
+  queues.get(page).push(entry);
+  return () => {
+    if (entry.settled) return;
+    entry.settled = true;
+    const queue = queues.get(page);
+    const index = queue.indexOf(entry);
+    if (index >= 0) queue.splice(index, 1);
+  };
+}
+
 export function assertConfirmClean() {
   if (confirmErrors.length) throw new Error('confirmation problems: ' + confirmErrors.join(' | '));
 }

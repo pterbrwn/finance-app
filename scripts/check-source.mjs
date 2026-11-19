@@ -15,12 +15,13 @@ const tracked = (await git(['ls-files', '-z'])).split('\0').filter(Boolean);
 const untracked = (await git(['ls-files', '--others', '--exclude-standard', '-z'])).split('\0').filter(Boolean);
 const paths = [...new Set([...tracked, ...untracked])];
 const excludedByPolicy = new Set(['docs/IMPLEMENTATION_PROGRESS.md', 'docs/STABILITY_REVIEW_2026-10-27.md']);
-const forbidden = /(^|\/)(?:\.env[^/]*|\.openai|\.sites-runtime|\.wrangler|data|backups|imports|exports|outputs|node_modules|dist)(\/|$)|(?:^|\/)(?:state\.json(?:\..*)?|config\.json|config\.local\.[^/]+)$|^docs\/FINANCE_APP_(?:EXECUTION_PLAN|REVIEW|COMPLETION_PLAN)\.md$|\.(?:csv|tsv|ofx|qfx|qif|db(?:-.*)?|sqlite[^/]*|pem|key|p12|pfx|log|zip|gz)$/i;
+const forbidden = /(^|\/)(?:\.git|\.env[^/]*|\.openai|\.sites-runtime|\.wrangler|node_modules|dist)(\/|$)|(?:^|\/)(?:state\.json(?:\..*)?|config\.json|config\.local\.[^/]+)$|^docs\/FINANCE_APP_(?:EXECUTION_PLAN|REVIEW|COMPLETION_PLAN)\.md$|\.(?:csv|tsv|ofx|qfx|qif|db(?:-.*)?|sqlite[^/]*|pem|key|p12|pfx|log|zip|gz)$/i;
+const forbiddenTopLevel = /^(?:data|backups|imports|exports|outputs)(\/|$)/i;
 const secret = /-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{25,}|(?:AKIA|ASIA)[A-Z0-9]{16}|access-(?:sandbox|production)-[a-z0-9-]{20,}/;
 let invalid = false;
 for (const path of paths) {
   if (excludedByPolicy.has(path)) continue;
-  if (forbidden.test(path)) {
+  if (forbidden.test(path) || forbiddenTopLevel.test(path)) {
     console.error('Private/generated file is staged: ' + path); invalid = true; continue;
   }
   let text;

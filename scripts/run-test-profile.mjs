@@ -23,13 +23,14 @@ const scripts = {
 assert.ok(Object.hasOwn(scripts, profile), `Unknown test profile ${profile}`);
 
 const protectedPaths = new Set(['docs/IMPLEMENTATION_PROGRESS.md', 'docs/STABILITY_REVIEW_2026-10-27.md']);
-const excludedPath = /(^|\/)(?:\.git|node_modules|dist|data|backups|imports|exports|outputs)(\/|$)|\.(?:sqlite[^/]*|csv|tsv|ofx|qfx|qif|pem|p12|pfx|zip|gz)$/i;
+const excludedPath = /(^|\/)(?:\.git|node_modules|dist)(\/|$)|\.(?:sqlite[^/]*|csv|tsv|ofx|qfx|qif|pem|p12|pfx|zip|gz)$/i;
+const excludedTopLevelPath = /^(?:data|backups|imports|exports|outputs)(\/|$)/i;
 function candidateIdentity() {
   const names = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], { cwd: root }).toString().split('\0').filter(Boolean);
   const hash = createHash('sha256');
   const included = [];
   for (const name of [...new Set(names)].sort()) {
-    if (protectedPaths.has(name) || excludedPath.test(name)) continue;
+    if (protectedPaths.has(name) || excludedPath.test(name) || excludedTopLevelPath.test(name)) continue;
     try { const bytes = readFileSync(join(root, name)); hash.update(name).update('\0').update(bytes).update('\0'); included.push(name); }
     catch { /* removed tracked paths are represented in git status, not read */ }
   }
