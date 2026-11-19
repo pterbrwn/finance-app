@@ -85,6 +85,13 @@ try {
   assert.equal(allocationSummary.current.spend,2500,'SQLite monthly summary excludes explicitly classified allocation transactions from spending');
   assert.deepEqual(allocationSummary.current.categories,{Travel:2500});assert.equal(allocationSummary.current.purchases,1,'allocation transfers do not count as purchases');
   await repository.mutate(state=>{state.transactions=state.transactions.filter(row=>row.id!=='txn-allocation');delete state.categoryRecords;delete state.budgetItemSettings;});
+  await repository.mutate(state=>{state.categoryRecords=[{id:'allocation-investment',name:'Investment',kind:'allocation'}];state.budgetItemSettings={'allocation-investment':{itemType:'allocation',budgetGroup:'Investments'}};state.transactions.push({id:'txn-investment',accountId:'account-1',date:'2026-01-05',merchant:'Synthetic investment funding',amount:12500,currency:'USD',category:'Investment',categoryId:'allocation-investment'});});
+  const investmentSummary=await repository.queryMonthSummary('2026-01');
+  assert.equal(investmentSummary.current.spend,15000,'SQLite monthly summary counts investment funding whose group is stored only in budget settings');
+  assert.deepEqual(investmentSummary.current.categories,{Travel:2500,Investment:12500},'settings-only investment group is attributed to its bucket');
+  assert.equal(investmentSummary.current.purchases,2,'investment funding counts as recorded activity');
+  assert.deepEqual(investmentSummary.current.weeklySpend,[15000,0,0,0,0],'weekly spending includes settings-only investment funding');
+  await repository.mutate(state=>{state.transactions=state.transactions.filter(row=>row.id!=='txn-allocation'&&row.id!=='txn-investment');delete state.categoryRecords;delete state.budgetItemSettings;});
   await Promise.all([
     repository.mutate(state => { state.budgets.Dining = 10000; }),
     repository.mutate(state => { state.budgets.Housing = 150000; })

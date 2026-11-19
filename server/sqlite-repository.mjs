@@ -370,10 +370,14 @@ export function createSqliteRepository(db) {
       WHERE (json_extract(category_record.value,'$.id')=${effectiveId} OR json_extract(category_record.value,'$.name')=${category})
       AND (json_extract(category_record.value,'$.kind')='allocation' OR EXISTS (SELECT 1 FROM json_each(${budgetSettings}) AS item_setting WHERE item_setting.key=json_extract(category_record.value,'$.id') AND json_extract(item_setting.value,'$.itemType')='allocation')))
       OR EXISTS (SELECT 1 FROM json_each(${budgetSettings}) AS item_setting WHERE item_setting.key=${effectiveId} AND json_extract(item_setting.value,'$.itemType')='allocation'))`;
+    const investmentGroup=`coalesce(
+      nullif(json_extract(category_record.value,'$.budgetGroup'),''),
+      (SELECT json_extract(item_setting.value,'$.budgetGroup') FROM json_each(${budgetSettings}) AS item_setting WHERE item_setting.key=json_extract(category_record.value,'$.id')),
+      '')`;
     const investmentAllocation=`EXISTS (SELECT 1 FROM json_each(${categoryRecords}) AS category_record
       WHERE (json_extract(category_record.value,'$.id')=${effectiveId} OR json_extract(category_record.value,'$.name')=${category})
       AND json_extract(category_record.value,'$.kind')='allocation'
-      AND coalesce(json_extract(category_record.value,'$.budgetGroup'),'')='Investments')`;
+      AND ${investmentGroup}='Investments')`;
     const expenseEligible=`${eligible} AND ${category} NOT IN ('Income','Transfers') AND (NOT ${isAllocation} OR ${investmentAllocation})`;
     const rows=db.prepare(`SELECT ${category} AS category,
       SUM(CASE WHEN ${expenseEligible} THEN json_extract(payload_json,'$.amount') ELSE 0 END) AS spend,
