@@ -493,6 +493,7 @@ export function createSqliteRepository(db) {
     async readIdentity() { return ownerIdentity(); },
     async readSyncJob() { return syncJobState(); },
     async queryTransactions(query) { return queryTransactionPage(query); },
+    async reviewCount(viewProfile = 'combined') { return queryTransactionPage({ review: true, limit: 1, viewProfile }).total; },
     async queryCategoryTransactionIds(categoryId,categoryName) { return queryCategoryTransactionIds(categoryId,categoryName); },
     async readBudgetAnalytics(month,viewProfile) { return queryBudgetAnalytics(month,viewProfile); },
     async queryMonthSummary(month,viewProfile) { return monthSummary(month,viewProfile); },
